@@ -26,6 +26,15 @@ namespace TABCoopMod.Testing
         public static string ChaosSpec { get; private set; }
         public static bool PosDump { get; private set; }
 
+        /// <summary>When > 0, the in-process MCP control server listens on 127.0.0.1:ControlPort.</summary>
+        public static int ControlPort { get; private set; }
+
+        /// <summary>Auto-save a PNG after every mutating control tool (default on; TABCOOP_AUTO_SHOT=0 disables).</summary>
+        public static bool AutoShot { get; private set; }
+
+        /// <summary>True when the MCP control server is enabled (TABCOOP_CONTROL_PORT set).</summary>
+        public static bool ControlEnabled => ControlPort > 0;
+
         public static string OutputDirectory { get; private set; }
 
         public static void Initialize()
@@ -47,6 +56,8 @@ namespace TABCoopMod.Testing
             Role = Env("TABCOOP_ROLE") ?? string.Empty;
             ChaosSpec = Env("TABCOOP_CHAOS");
             PosDump = Env("TABCOOP_POS_DUMP") == "1";
+            ControlPort = ParseInt(Env("TABCOOP_CONTROL_PORT"), 0);
+            AutoShot = Env("TABCOOP_AUTO_SHOT") != "0";
 
             string logDir = null;
             try { logDir = Path.GetDirectoryName(ModLogger.LogFilePath); } catch { }

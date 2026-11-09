@@ -1,0 +1,538 @@
+using System;
+using System.Collections;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Globalization;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Web.Script.Serialization;
+using DXVision;
+using TABCoopMod.Commands;
+using TABCoopMod.Core;
+
+namespace TABCoopMod.Testing
+{
+    /// <summary>
+    /// In-process JSON control channel for automated testing (MCP server connects over loopback TCP).
+    /// Requests are queued from the socket thread and executed on the game's main/render thread from
+    /// StartFrame, because issuing a command mutates live game state and is not thread-safe.
+    ///
+    /// Protocol (newline-delimited JSON, one request/response per line):
+    ///   request : {"id":123,"tool":"move_units","args":{"ids":[...],"x":10,"y":20}}
+    ///   response: {"id":123,"ok":true,"result":{...}}  or  {"id":123,"ok":false,"error":"..."}
+    /// All game commands go through CommandExecutor/NetCommand so they follow the same path as the
+    /// multiplayer replay (never touches local CSelectable).
+    /// </summary>
+    public static class ControlServer
+    {
+        private const int MaxListEntities = 5000;
+
+        private sealed class PendingRequest
+        {
+            public string RequestJson;
+            public string ResponseJson;
+            public ManualResetEventSlim Done;
+        }
+
+        private static readonly ConcurrentQueue<PendingRequest> _queue = new ConcurrentQueue<PendingRequest>();
+        private static readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 32 * 1024 * 1024 };
+
+        private static TcpListener _listener;
+        private static Thread _acceptThread;
+        private static volatile bool _running;
+        private static int _port;
+
+        public static bool IsRunning => _running;
+        public static int Port => _port;
+
+        /// <summary>Called every render frame from StartFrame. Starts the listener once and drains requests.</summary>
+        public static void Tick()
+        {
+            int port = TestHarnessConfig.ControlPort;
+            if (port <= 0) return;
+            if (!_running) Start(port);
+            ScreenshotService.Tick();
+            Drain();
+        }
+
+        private static void Start(int port)
+        {
+            try
+            {
+                _port = port;
+                _listener = new TcpListener(IPAddress.Loopback, port);
+                _listener.Start();
+                _running = true;
+                _acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "TABCoopControlAccept" };
+                _acceptThread.Start();
+                ModLogger.Info($"[ControlServer] listening on 127.0.0.1:{port}");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error($"[ControlServer] failed to start on port {port}", ex);
+                _running = false;
+            }
+        }
+
+        private static void Stop()
+        {
+            _running = false;
+            try { _listener?.Stop(); } catch { }
+            _listener = null;
+        }
+
+        private static void AcceptLoop()
+        {
+            while (_running)
+            {
+                TcpClient client;
+                try { client = _listener.AcceptTcpClient(); }
+                catch { if (!_running) break; else continue; }
+
+                var t = new Thread(() => ClientLoop(client)) { IsBackground = true, Name = "TABCoopControlClient" };
+                t.Start();
+            }
+        }
+
+        private static void ClientLoop(TcpClient client)
+        {
+            try
+            {
+                client.NoDelay = true;
+                using (client)
+                using (var stream = client.GetStream())
+                using (var reader = new StreamReader(stream, new UTF8Encoding(false)))
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true })
+                {
+                    string line;
+                    while (_running && (line = reader.ReadLine()) != null)
+                    {
+                        if (string.IsNullOrWhiteSpace(line)) continue;
+
+                        var pending = new PendingRequest { RequestJson = line, Done = new ManualResetEventSlim(false) };
+                        _queue.Enqueue(pending);
+                        if (!pending.Done.Wait(10000))
+                        {
+                            writer.WriteLine(ErrorResponse(0, "timeout waiting for game main thread (is the game paused/loading?)"));
+                            continue;
+                        }
+                        writer.WriteLine(pending.ResponseJson ?? ErrorResponse(0, "no response"));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[ControlServer] client loop ended: {ex.Message}");
+            }
+        }
+
+        private static void Drain()
+        {
+            while (_queue.TryDequeue(out var pending))
+            {
+                try { pending.ResponseJson = HandleRequest(pending.RequestJson); }
+                catch (Exception ex)
+                {
+                    ModLogger.Error("[ControlServer] handler failed", ex);
+                    pending.ResponseJson = ErrorResponse(0, ex.Message);
+                }
+                finally { pending.Done.Set(); }
+            }
+        }
+
+        // ====================================================================
+        // Request dispatch (runs on the game main thread)
+        // ====================================================================
+
+        private static string HandleRequest(string requestJson)
+        {
+            long id = 0;
+            string tool = null;
+            try
+            {
+                Dictionary<string, object> req = _json.Deserialize<Dictionary<string, object>>(requestJson);
+                if (req == null) return ErrorResponse(0, "empty request");
+
+                id = GetLong(req, "id", 0);
+                tool = GetStr(req, "tool");
+                var args = req.TryGetValue("args", out object a) ? a as Dictionary<string, object> : null;
+                if (args == null) args = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+
+                object result = Dispatch(tool, args);
+                AttachScreenshot(tool, args, result);
+                return OkResponse(id, result);
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[ControlServer] tool '{tool}' failed: {ex.Message}");
+                return ErrorResponse(id, ex.Message);
+            }
+        }
+
+        private static object Dispatch(string tool, Dictionary<string, object> args)
+        {
+            switch ((tool ?? string.Empty).ToLowerInvariant())
+            {
+                case "ping": return Ping();
+                case "get_state":
+                case "game_state": return GetState();
+                case "list_entities": return ListEntities(args);
+                case "move_units": return MoveUnits(args);
+                case "place_building": return PlaceBuilding(args);
+                case "train_unit": return TrainUnit(args);
+                case "cancel_current_order": return CancelCurrent(args);
+                case "cancel_queued_order": return CancelQueued(args);
+                case "set_paused": return SetPaused(args);
+                case "issue_command": return IssueRawCommand(args);
+                case "screenshot": return TakeScreenshot(args);
+                default: throw new InvalidOperationException($"unknown tool '{tool}'");
+            }
+        }
+
+        // ====================================================================
+        // Tools
+        // ====================================================================
+
+        private static object Ping()
+        {
+            return new Dictionary<string, object>
+            {
+                ["pong"] = true,
+                ["tick"] = CurrentTick(),
+                ["port"] = _port
+            };
+        }
+
+        private static object GetState()
+        {
+            var game = DXGame.Current;
+            object ls = GameBridge.CurrentLevelState;
+
+            int entityCount = 0, playerCount = 0;
+            if (game?.Entities != null)
+            {
+                foreach (var e in game.Entities)
+                {
+                    if (e == null || e.Disposed) continue;
+                    if ((e.ID & 0x8000000000000000UL) != 0) continue;
+                    entityCount++;
+                    if (GameBridge.IsPlayerEntity(e)) playerCount++;
+                }
+            }
+
+            return new Dictionary<string, object>
+            {
+                ["tick"] = game?.IAIterationInt ?? 0,
+                ["gameTimeMs"] = game?.GameTimeInt ?? 0,
+                ["paused"] = game?.Paused ?? false,
+                ["levelLoaded"] = ls != null,
+                ["gold"] = GameBridge.GetLevelInt("Gold"),
+                ["wood"] = GameBridge.GetLevelInt("Wood"),
+                ["stone"] = GameBridge.GetLevelInt("Stone"),
+                ["iron"] = GameBridge.GetLevelInt("Iron"),
+                ["oil"] = GameBridge.GetLevelInt("Oil"),
+                ["entityCount"] = entityCount,
+                ["playerEntityCount"] = playerCount
+            };
+        }
+
+        private static object ListEntities(Dictionary<string, object> args)
+        {
+            string typeContains = GetStr(args, "typeContains");
+            bool onlyPlayer = GetBool(args, "onlyPlayer", false);
+            bool movable = GetBool(args, "movable", false);
+            bool includeProjectiles = GetBool(args, "includeProjectiles", false);
+            int limit = GetInt(args, "limit", 50);
+            if (limit <= 0 || limit > MaxListEntities) limit = MaxListEntities;
+
+            var list = new List<Dictionary<string, object>>();
+            var game = DXGame.Current;
+            if (game?.Entities != null)
+            {
+                Type movableType = movable ? GameBridge.TypeCMovable : null;
+
+                // Sorted by ID so output is stable across calls (agents diff the result).
+                var matched = new List<DXEntity>();
+                foreach (var e in game.Entities)
+                {
+                    if (e == null || e.Disposed) continue;
+                    if ((e.ID & 0x8000000000000000UL) != 0) continue;
+                    string tn = e.GetType().Name;
+                    bool isProj = tn.IndexOf("Projectile", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                  tn.IndexOf("Proyectile", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (!includeProjectiles && isProj) continue;
+                    if (onlyPlayer && !GameBridge.IsPlayerEntity(e)) continue;
+                    if (!string.IsNullOrEmpty(typeContains) && tn.IndexOf(typeContains, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (movableType != null && !GameBridge.HasComponent(e, movableType)) continue;
+                    matched.Add(e);
+                }
+                matched.Sort((a, b) => a.ID.CompareTo(b.ID));
+
+                int count = 0;
+                foreach (var e in matched)
+                {
+                    if (count++ >= limit) break;
+                    list.Add(new Dictionary<string, object>
+                    {
+                        // IDs are 64-bit and exceed JS safe-integer range → always render as strings.
+                        ["id"] = e.ID.ToString(CultureInfo.InvariantCulture),
+                        ["type"] = e.GetType().Name,
+                        ["x"] = Math.Round(e.Position.X, 2),
+                        ["y"] = Math.Round(e.Position.Y, 2),
+                        ["hp"] = GameBridge.GetLifeValue(e),
+                        ["player"] = GameBridge.IsPlayerEntity(e),
+                        ["movable"] = GameBridge.HasComponent(e, GameBridge.TypeCMovable)
+                    });
+                }
+            }
+
+            return new Dictionary<string, object> { ["count"] = list.Count, ["entities"] = list };
+        }
+
+        private static object MoveUnits(Dictionary<string, object> args)
+        {
+            ulong[] ids = GetULongArray(args, "ids");
+            if (ids.Length == 0) throw new ArgumentException("ids is required");
+            float x = GetFloat(args, "x");
+            float y = GetFloat(args, "y");
+
+            Type travelType = GameBridge.GameAssembly?.GetType("ZX.Commands.Travel");
+            object travel = travelType != null ? GameBridge.GetCommandGeneric(travelType) : null;
+            if (travel == null) throw new InvalidOperationException("Travel command singleton unresolved");
+
+            var cmd = new NetCommand
+            {
+                Type = NetCommandType.GroupMoveOrPatrol,
+                PlayerId = 1,
+                CommandId = GameBridge.GetCommandId(travel),
+                ExecutorEntityIds = ids,
+                TargetPosition = new PointF(x, y),
+                IsShiftQueued = GetBool(args, "shift", false)
+            };
+            CommandExecutor.Execute(cmd);
+            return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
+        }
+
+        private static object PlaceBuilding(Dictionary<string, object> args)
+        {
+            string typeName = GetStr(args, "buildingType") ?? "ZX.Entities.TentHouse";
+            float x = GetFloat(args, "x");
+            float y = GetFloat(args, "y");
+            float w = GetFloat(args, "sizeW", 1f);
+            float h = GetFloat(args, "sizeH", 1f);
+
+            ulong builderId = GetULong(args, "builderId", 0);
+            var ids = builderId != 0UL ? new[] { builderId } : Array.Empty<ulong>();
+
+            var cmd = new NetCommand
+            {
+                Type = NetCommandType.PlaceBuilding,
+                PlayerId = 1,
+                BuildingTypeName = typeName,
+                ExecutorEntityIds = ids,
+                TargetPosition = new PointF(x, y),
+                TargetSize = new SizeF(w, h),
+                TargetOrigin = new PointF(x, y),
+                IsBonusBuilding = GetBool(args, "isBonus", false),
+                InstantBuild = GetBool(args, "instant", false),
+                IsShiftQueued = GetBool(args, "shift", false)
+            };
+            CommandExecutor.Execute(cmd);
+            return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
+        }
+
+        private static object TrainUnit(Dictionary<string, object> args)
+        {
+            ulong barracksId = GetULong(args, "barracksId", 0);
+            if (barracksId == 0UL) throw new ArgumentException("barracksId is required");
+            string unitType = GetStr(args, "unitType") ?? "ZX.Entities.Ranger";
+
+            Type ut = GameBridge.GameAssembly?.GetType(unitType);
+            if (ut == null) throw new ArgumentException($"unknown unit type '{unitType}'");
+
+            object trainCmd = GameBridge.GetTrainCommandForType(ut);
+            if (trainCmd == null) throw new InvalidOperationException($"no Train command for '{unitType}'");
+
+            var cmd = new NetCommand
+            {
+                Type = NetCommandType.ExecuteCommand,
+                PlayerId = 1,
+                CommandId = GameBridge.GetCommandId(trainCmd),
+                ExecutorEntityIds = new[] { barracksId }
+            };
+            CommandExecutor.Execute(cmd);
+            return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
+        }
+
+        private static object CancelCurrent(Dictionary<string, object> args)
+        {
+            ulong[] ids = GetULongArray(args, "ids");
+            if (ids.Length == 0) throw new ArgumentException("ids is required");
+
+            var cmd = new NetCommand { Type = NetCommandType.CancelCurrentOrder, PlayerId = 1, ExecutorEntityIds = ids };
+            CommandExecutor.Execute(cmd);
+            return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
+        }
+
+        private static object CancelQueued(Dictionary<string, object> args)
+        {
+            ulong[] ids = GetULongArray(args, "ids");
+            if (ids.Length == 0) throw new ArgumentException("ids is required");
+
+            var cmd = new NetCommand
+            {
+                Type = NetCommandType.CancelQueuedOrder,
+                PlayerId = 1,
+                ExecutorEntityIds = ids,
+                QueueSlotIndex = (byte)GetInt(args, "slot", 0)
+            };
+            CommandExecutor.Execute(cmd);
+            return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
+        }
+
+        private static object SetPaused(Dictionary<string, object> args)
+        {
+            bool paused = GetBool(args, "paused", true);
+            var cmd = new NetCommand { Type = NetCommandType.SetPaused, PlayerId = 1, TargetPausedState = paused };
+            CommandExecutor.Execute(cmd);
+            return new Dictionary<string, object> { ["dispatched"] = true, ["paused"] = DXGame.Current?.Paused ?? false };
+        }
+
+        private static object IssueRawCommand(Dictionary<string, object> args)
+        {
+            var cmd = new NetCommand
+            {
+                Type = (NetCommandType)GetInt(args, "type", 1),
+                PlayerId = (byte)GetInt(args, "playerId", 1),
+                CommandId = GetInt(args, "commandId", 0),
+                BuildingTypeName = GetStr(args, "buildingType") ?? string.Empty,
+                ExecutorEntityIds = GetULongArray(args, "ids"),
+                TargetEntityId = GetULong(args, "targetEntityId", 0),
+                TargetPosition = new PointF(GetFloat(args, "x"), GetFloat(args, "y")),
+                TargetSize = new SizeF(GetFloat(args, "sizeW", 0f), GetFloat(args, "sizeH", 0f)),
+                TargetOrigin = new PointF(GetFloat(args, "originX"), GetFloat(args, "originY")),
+                IsShiftQueued = GetBool(args, "shift", false),
+                QueueSlotIndex = (byte)GetInt(args, "slot", 0),
+                TargetPausedState = GetBool(args, "paused", false)
+            };
+            CommandExecutor.Execute(cmd);
+            return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
+        }
+
+        private static object TakeScreenshot(Dictionary<string, object> args)
+        {
+            string tag = GetStr(args, "tag") ?? "manual";
+            string path = ScreenshotService.CaptureNow(tag);
+            return new Dictionary<string, object>
+            {
+                ["saved"] = path != null,
+                ["path"] = path ?? string.Empty
+            };
+        }
+
+        private static void AttachScreenshot(string tool, Dictionary<string, object> args, object result)
+        {
+            if (!(result is Dictionary<string, object> dict)) return;
+            if (!TestHarnessConfig.AutoShot) return;
+            if (!GetBool(args, "screenshot", true)) return; // per-call opt-out
+            if (!IsMutatingTool(tool)) return;
+
+            // Deferred capture: the file appears a couple of frames after the operation is applied.
+            dict["screenshot"] = ScreenshotService.RequestAfterFrames(tool);
+        }
+
+        private static bool IsMutatingTool(string tool)
+        {
+            switch ((tool ?? string.Empty).ToLowerInvariant())
+            {
+                case "move_units":
+                case "place_building":
+                case "train_unit":
+                case "cancel_current_order":
+                case "cancel_queued_order":
+                case "set_paused":
+                case "issue_command":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static int CurrentTick() => DXGame.Current?.IAIterationInt ?? 0;
+
+        // ====================================================================
+        // JSON helpers
+        // ====================================================================
+
+        private static string OkResponse(long id, object result)
+        {
+            var payload = new Dictionary<string, object> { ["id"] = id, ["ok"] = true, ["result"] = result };
+            return _json.Serialize(payload);
+        }
+
+        private static string ErrorResponse(long id, string message)
+        {
+            var payload = new Dictionary<string, object> { ["id"] = id, ["ok"] = false, ["error"] = message ?? "unknown error" };
+            return _json.Serialize(payload);
+        }
+
+        private static string GetStr(Dictionary<string, object> d, string key)
+        {
+            if (d == null || !d.TryGetValue(key, out object v) || v == null) return null;
+            return Convert.ToString(v, CultureInfo.InvariantCulture);
+        }
+
+        private static bool GetBool(Dictionary<string, object> d, string key, bool fallback)
+        {
+            if (d == null || !d.TryGetValue(key, out object v) || v == null) return fallback;
+            try { return Convert.ToBoolean(v, CultureInfo.InvariantCulture); } catch { return fallback; }
+        }
+
+        private static int GetInt(Dictionary<string, object> d, string key, int fallback)
+        {
+            if (d == null || !d.TryGetValue(key, out object v) || v == null) return fallback;
+            try { return Convert.ToInt32(v, CultureInfo.InvariantCulture); } catch { return fallback; }
+        }
+
+        private static long GetLong(Dictionary<string, object> d, string key, long fallback)
+        {
+            if (d == null || !d.TryGetValue(key, out object v) || v == null) return fallback;
+            try { return Convert.ToInt64(v, CultureInfo.InvariantCulture); } catch { return fallback; }
+        }
+
+        private static float GetFloat(Dictionary<string, object> d, string key, float fallback = 0f)
+        {
+            if (d == null || !d.TryGetValue(key, out object v) || v == null) return fallback;
+            try { return Convert.ToSingle(v, CultureInfo.InvariantCulture); } catch { return fallback; }
+        }
+
+        private static ulong GetULong(Dictionary<string, object> d, string key, ulong fallback)
+        {
+            if (d == null || !d.TryGetValue(key, out object v) || v == null) return fallback;
+            try { return Convert.ToUInt64(v, CultureInfo.InvariantCulture); } catch { return fallback; }
+        }
+
+        private static ulong[] GetULongArray(Dictionary<string, object> d, string key)
+        {
+            if (d == null || !d.TryGetValue(key, out object v) || v == null)
+                return Array.Empty<ulong>();
+
+            if (v is IEnumerable en && !(v is string))
+            {
+                var list = new List<ulong>();
+                foreach (object item in en)
+                {
+                    if (item == null) continue;
+                    try { list.Add(Convert.ToUInt64(item, CultureInfo.InvariantCulture)); } catch { }
+                }
+                return list.ToArray();
+            }
+
+            try { return new[] { Convert.ToUInt64(v, CultureInfo.InvariantCulture) }; } catch { return Array.Empty<ulong>(); }
+        }
+    }
+}

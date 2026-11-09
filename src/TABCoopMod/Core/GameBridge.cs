@@ -386,6 +386,8 @@ namespace TABCoopMod.Core
             return result;
         }
 
+        public static bool IsPlayerEntity(object entity) => IsPlayerTeam(entity);
+
         private static bool IsPlayerTeam(object entity)
         {
             Type t = entity.GetType();

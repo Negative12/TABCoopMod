@@ -39,6 +39,7 @@ namespace TABCoopMod.Testing
                 }
 
                 DeterministicReplayVerifier.OnRenderFrame();
+                ControlServer.Tick();
                 HandleSinglePlayerToggle();
                 TryApplyRole();
                 TryAutoLoad();
@@ -156,7 +157,10 @@ namespace TABCoopMod.Testing
 
         private static void TryAutoLoad()
         {
-            if (_autoLoadIssued || !TestHarnessConfig.Enabled) return;
+            if (_autoLoadIssued) return;
+            // Auto-load is used both by the replay verifier (TABCOOP_TEST) and by the MCP control
+            // server (TABCOOP_CONTROL_PORT). In control-only mode the verifier stays disabled.
+            if (!TestHarnessConfig.Enabled && !TestHarnessConfig.ControlEnabled) return;
             if (string.IsNullOrEmpty(TestHarnessConfig.AutoLoadSave)) return;
             if (CoopSessionManager.IsSessionActive) return;
             if (!_menuReady) return; // wait until the main menu is fully initialized

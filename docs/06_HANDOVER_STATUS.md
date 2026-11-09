@@ -180,3 +180,29 @@ compare_hashes: 首个分叉仍为 tick 32001 的 pos（注入发生前）→ �
 2. **捕获侧内部类型**（`CommandInterceptorPatch` 的 `is Build`/`__0.Team`/`__1.SerEntityRef`/`HasComponent<CMovable>()`）尚未以真实输入复核；若 `TABCOOP_INTERCEPT=1` 下复现 `TypeAccessException`，按 §0.5 同法反射化。
 3. 之后回到 07 §1（网络帧同步门控）与 §5（暂停/倍速/市长同步）。
 
+---
+
+## 8. 2026-11-09 会话3（续）：MCP 自动化操作测试台
+
+> 详细用法见 **`docs/08_MCP_AUTOMATION.md`**。
+
+### 8.1 新增能力
+- **游戏内控制服务** `Testing/ControlServer.cs`：`TABCOOP_CONTROL_PORT` 开启后监听 `127.0.0.1`，换行 JSON；socket 线程只收发，**所有操作排队到 `DXGame.StartFrame` 主线程执行**，统一走 `CommandExecutor`/`NetCommand`。
+- **截图服务** `Testing/ScreenshotService.cs`：用引擎自带 `DXGame.CaptureScreen()` 存 PNG；改动类工具**延迟 2 帧**抓图，确保反映操作效果；目录 `<游戏目录>\tabcoop_shots\`。
+- **独立 MCP 服务端** `src/TABCoopMod.Mcp/`（net10.0，无第三方依赖，手写 MCP stdio JSON-RPC）：把 10 个工具转发到控制服务，并在返回前等待截图落盘。
+- **配置/脚本**：`.mcp.json`（`tabcoop-game`）、`scripts/build_mcp_server.ps1`、`scripts/run_game_with_control.ps1`、`scripts/control_smoke.ps1`。
+- `TestHarnessConfig` 新增 `ControlPort`/`AutoShot`/`ControlEnabled`；控制模式可单独自动读档且**不触发回放验证器**。
+
+### 8.2 工具
+`game_state` / `list_entities` / `move_units` / `place_building` / `train_unit` / `cancel_current_order` / `cancel_queued_order` / `set_paused` / `issue_command` / `screenshot`。
+实体 ID 为 64 位、以字符串返回；改动类工具结果含 `screenshot` 路径。
+
+### 8.3 实机验证（`1_Backup.zxsav` 自动读档）
+- 控制层 `control_smoke.ps1`：`ping`/`get_state`/`list_entities`/`screenshot` 正常；PNG 有效（2880×1800）。
+- MCP 全链路（stdio 喂 JSON-RPC）：`initialize`/`tools/list`/`tools/call` 正常；`game_state`（unpause 前后）、`list_entities`、`move_units`（游侠从 (136.17,125.48) 移动到 (147.41,127.5) 途中）、`train_unit`（Train cmd 584315074）均成功并自动截图。
+- 修复：MCP `JsonNode` 参数父子复用（`DeepClone`）；`game_state` 与 `get_state` 工具名对齐。
+- 截图经缩略图目视确认为真实游戏画面。
+
+### 8.4 尚未覆盖
+鼠标框选/点选/编队/摄像机、攻击/修理等需 commandId 的复合指令（可 `issue_command` 手动）、倍速/市长（executor 未实现）、真实键鼠事件注入。详见 08 §7。
+
