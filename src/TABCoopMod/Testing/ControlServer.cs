@@ -187,6 +187,7 @@ namespace TABCoopMod.Testing
                 case "cancel_current_order": return CancelCurrent(args);
                 case "cancel_queued_order": return CancelQueued(args);
                 case "set_paused": return SetPaused(args);
+                case "set_game_speed": return SetGameSpeed(args);
                 case "issue_command": return IssueRawCommand(args);
                 case "screenshot": return TakeScreenshot(args);
                 case "get_camera": return GetCamera();
@@ -237,6 +238,7 @@ namespace TABCoopMod.Testing
                 ["tick"] = game?.IAIterationInt ?? 0,
                 ["gameTimeMs"] = game?.GameTimeInt ?? 0,
                 ["paused"] = game?.Paused ?? false,
+                ["gameSpeed"] = game?.GameSpeed ?? 0,
                 ["levelLoaded"] = ls != null,
                 ["gameMode"] = gameMode?.ToString(),
                 ["inCampaign"] = inCampaign is bool ic && ic,
@@ -500,6 +502,19 @@ namespace TABCoopMod.Testing
             };
         }
 
+        private static object SetGameSpeed(Dictionary<string, object> args)
+        {
+            float speed = GetFloat(args, "speed", 1f);
+            speed = Math.Max(0f, Math.Min(20f, speed));
+            var cmd = new NetCommand { Type = NetCommandType.SetGameSpeed, PlayerId = 1, GameSpeed = speed };
+            CommandExecutor.Execute(cmd);
+            return new Dictionary<string, object>
+            {
+                ["dispatched"] = true,
+                ["gameSpeed"] = DXGame.Current?.GameSpeed ?? 0
+            };
+        }
+
         private static object RevealMap(Dictionary<string, object> args)
         {
             bool reveal = GetBool(args, "enabled", true);
@@ -534,6 +549,7 @@ namespace TABCoopMod.Testing
                 case "cancel_current_order":
                 case "cancel_queued_order":
                 case "set_paused":
+                case "set_game_speed":
                 case "issue_command":
                 case "set_camera":
                 case "reveal_map":

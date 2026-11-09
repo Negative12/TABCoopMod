@@ -50,6 +50,7 @@ namespace TABCoopMod.Commands
         public bool InstantBuild { get; set; }
         public byte QueueSlotIndex { get; set; }
         public bool TargetPausedState { get; set; }
+        public float GameSpeed { get; set; } = 1f;
         public byte MayorOptionIndex { get; set; }
         public bool IsMayorFinalDecision { get; set; }
 
@@ -87,6 +88,7 @@ namespace TABCoopMod.Commands
             w.Write(TargetPausedState);
             w.Write(MayorOptionIndex);
             w.Write(IsMayorFinalDecision);
+            w.Write(GameSpeed);
         }
 
         public static NetCommand ReadFrom(BinaryReader r)
@@ -120,6 +122,7 @@ namespace TABCoopMod.Commands
             cmd.TargetPausedState = r.ReadBoolean();
             cmd.MayorOptionIndex = r.ReadByte();
             cmd.IsMayorFinalDecision = r.ReadBoolean();
+            cmd.GameSpeed = r.ReadSingle();
 
             return cmd;
         }
@@ -194,6 +197,14 @@ namespace TABCoopMod.Commands
                             GameBridge.ShowTopBanner(
                                 netCmd.TargetPausedState ? $"Player {netCmd.PlayerId} Paused Game" : $"Player {netCmd.PlayerId} Resumed Game",
                                 Color.Gold, 1500);
+                        }
+                        break;
+
+                    case NetCommandType.SetGameSpeed:
+                        if (DXGame.Current != null)
+                        {
+                            DXGame.Current.GameSpeed = Math.Max(0.0, Math.Min(20.0, (double)netCmd.GameSpeed));
+                            GameBridge.ShowTopBanner($"Player {netCmd.PlayerId} set speed {DXGame.Current.GameSpeed:0.##}x", Color.Gold, 1200);
                         }
                         break;
                 }

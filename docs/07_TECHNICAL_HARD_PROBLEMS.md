@@ -148,6 +148,17 @@
 
 **现阶段结论**：**世界坐标散点/箭头图是“分叉在哪”的可靠依据**；截图目前只能尽力而为，不能保证落在指定交互区并显示敌人。
 
+### 待研究清单（TODO，交更大模型）
+
+- [ ] **R1 回放截帧不跟随相机/开图**：`DXGame.CaptureScreen()` 在 `IsIADeterministic=true` 下返回的帧似乎是载入时默认相机那一帧。尝试：截帧前临时 `DXGame.IsIADeterministic=false`，强制一帧渲染/呈现（`DXGame.SetCamera`/`FinishScene`/`Present`）后再 `CaptureScreen`；或定位 `CaptureScreen` 的数据来源（是否离屏 RT 未随相机重绘）。
+- [ ] **R2 相机每帧被游戏重控**：定位每帧写 `DXScene.CameraArea` / `ZXLevelState.LevelCameraArea` 的源头（输入边缘滚动、相机控制器、存档恢复），提供“锁定相机”开关或直接设置其目标字段，使 `set_camera` 稳定。
+- [ ] **R3 开图后敌人（僵尸）仍隐藏**：反编译 `ZXSystemMapLayers`（`#=zJme8KFhmikprnkg_2CDeiQE=`）敌人渲染分支，弄清 `hideEnemiesIfNotWatched` 与 `LayerFog` “已探索/已可见”标记；直接把这些格标记为已探索，或找出真正控制敌人可见性的开关（`ShowFullMap`/`FogEnabled` 只解决地形）。
+- [ ] **R4 CameraArea 夹紧/位移规则**：弄清 `CameraArea` 被夹紧的约束（`LevelCameraArea`/地图边界/1.6 宽高比/最大缩小 72×45），使 `set_camera` 结果可预测。
+- [ ] **R5 真实两跑画面**：上述修复后，在回放截帧里采集每跑真实画面（当前截图仅作背景参考）。
+- [ ] **R6 低 ID 实体/投射物 ID 复用**：分叉报告里大量 `DXEntity`(≈100000+) 与低 ID 投射物呈“巨幅位移”，疑为跨跑 ID 复用（同 ID 指向不同对象）。研究 ID 分配/复用与装载顺序，或在报告里可靠地区分“真实位移”与“ID 复用假位移”。
+
+> 说明：以上均为**运行时可视化/取证**问题，与 §0.1 的模拟确定性解耦；修复后可用于人工/视觉复核，但不改变同步逻辑本身。
+
 ---
 
 ## 0.5 【已解决 · 会话3】指令注入撞到内部类型的 TypeAccessException
@@ -255,7 +266,10 @@ ERROR 计数 = 0 / WARN = 0
 
 ---
 
-## 5. Step 2：暂停 / 倍速 / 市长同步补丁（本轮按约定不做）★
+## 5. Step 2：暂停 / 倍速 / 市长同步补丁（进行中）★
+
+**会话3 进展**：`SetGameSpeed` 已补全——`CommandExecutor` 新增 `case SetGameSpeed`（写 `DXGame.GameSpeed`，0..20），`NetCommand` 增加 `GameSpeed` 字段并序列化，MCP 暴露 `set_game_speed {speed}`。实测：暂停(0)→3→1 生效，`game_state` 的 `gameSpeed` 与实际推进一致。
+**仍待**：`MayorVoteOrSelect` executor（市长接口需进一步反编译 `ZXMayor`/`ZXGame.#=zcITiOSD6YNmD`）；以及 `PauseSyncPatch`/`MayorSyncPatch` 这些**producer**（让玩家真实按键/弹窗产生 NetCommand；注意暂停是空格微操核心，先别用暂停掩盖确定性 bug）。
 
 **现象**：`NetCommandType.SetGameSpeed(7)` 与 `MayorVoteOrSelect(8)` 已定义且可序列化，但 `CommandExecutor.Execute` 的 switch **没有这两个 case**（静默 no-op），且没有任何拦截点会产生它们。`SetPaused(6)` executor 有 case，但同样**没有 producer**——玩家按空格暂停只改本地 `DXGame.Paused`，另一端继续跑 → 立即分叉。
 

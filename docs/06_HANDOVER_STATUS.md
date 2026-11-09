@@ -218,4 +218,6 @@ compare_hashes: 首个分叉仍为 tick 32001 的 pos（注入发生前）→ �
 - 新增 `scripts/build_divergence_report.py`：生成自包含 HTML，左=世界坐标分叉散点/箭头，右=**两张同 tick 截图上按坐标画分叉框**（实线本跑/虚线另一跑，优先视野内），下=逐 tick 分项时间线。示例产物：`analysis/divergence_6666/index.html`（已 gitignore）。
 - MCP 新增 `get_camera` / `set_camera`：可移动到任意世界坐标/实体并缩放后自动截图，用于放大查看差异点。实测相机移动后保持、画面随之改变。
 - MCP 新增 `reveal_map`：直接置 `ZXLevelState.ShowFullMap=true` 并关 `ZXSystemMapLayers.FogEnabled` 开全图去黑雾（仅渲染，模拟状态不变；比造 `RevealMap`/沉默窥探者奇观方便）。回放脚本加 `-RevealMap` 即可让对比截图无黑雾。
+- Step 2 进展：`SetGameSpeed` executor + `NetCommand.GameSpeed` 字段 + MCP `set_game_speed` 已实现并实测（暂停0→3→1 生效）。`MayorVoteOrSelect` 与 Pause/Mayor 的 producer 拦截仍待，见 `docs/07 §5`。
+- 注意：确定性回放里截图不跟随相机/开图、游戏每帧重控相机、开图后敌人仍隐藏——均记录在 `docs/07 §0.6` 待研究清单。
 

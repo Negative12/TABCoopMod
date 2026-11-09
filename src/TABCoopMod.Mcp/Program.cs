@@ -296,6 +296,10 @@ namespace TABCoopMod.Mcp
                 "Pause or resume the simulation.",
                 WithShot(new JsonObject { ["paused"] = Bool("True to pause, false to resume.") }), Req("paused")));
 
+            tools.Add(Tool("set_game_speed",
+                "Set the simulation speed multiplier (0 = pause, 1 = normal, up to 20).",
+                WithShot(new JsonObject { ["speed"] = Num("Speed multiplier.") }), Req("speed")));
+
             tools.Add(Tool("issue_command",
                 "Escape hatch: dispatch a raw NetCommand (message-shape from docs/04_NETWORK_PROTOCOL.md).",
                 WithShot(new JsonObject

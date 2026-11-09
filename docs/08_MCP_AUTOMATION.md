@@ -90,6 +90,7 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 | `cancel_current_order` | 取消当前命令/建造 | `ids[]` |
 | `cancel_queued_order` | 取消生产队列槽位 | `ids[]`,`slot` |
 | `set_paused` | 暂停/恢复 | `paused` |
+| `set_game_speed` | 设置模拟倍速（0=暂停，1=正常，最高 20） | `speed` |
 | `issue_command` | 原始 NetCommand 逃生口 | `type`,`commandId`,`ids[]`,`targetEntityId`,`x`,`y`… |
 | `screenshot` | 立即截图并返回路径 | `tag?` |
 | `get_camera` | 当前相机世界矩形 + 屏幕尺寸（用于世界→像素映射） | — |
