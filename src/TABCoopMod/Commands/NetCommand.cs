@@ -51,6 +51,7 @@ namespace TABCoopMod.Commands
         public byte QueueSlotIndex { get; set; }
         public bool TargetPausedState { get; set; }
         public float GameSpeed { get; set; } = 1f;
+        public string MayorId { get; set; } = string.Empty;
         public byte MayorOptionIndex { get; set; }
         public bool IsMayorFinalDecision { get; set; }
 
@@ -89,6 +90,7 @@ namespace TABCoopMod.Commands
             w.Write(MayorOptionIndex);
             w.Write(IsMayorFinalDecision);
             w.Write(GameSpeed);
+            w.Write(MayorId ?? string.Empty);
         }
 
         public static NetCommand ReadFrom(BinaryReader r)
@@ -123,6 +125,7 @@ namespace TABCoopMod.Commands
             cmd.MayorOptionIndex = r.ReadByte();
             cmd.IsMayorFinalDecision = r.ReadBoolean();
             cmd.GameSpeed = r.ReadSingle();
+            cmd.MayorId = r.ReadString();
 
             return cmd;
         }
@@ -205,6 +208,13 @@ namespace TABCoopMod.Commands
                         {
                             DXGame.Current.GameSpeed = Math.Max(0.0, Math.Min(20.0, (double)netCmd.GameSpeed));
                             GameBridge.ShowTopBanner($"Player {netCmd.PlayerId} set speed {DXGame.Current.GameSpeed:0.##}x", Color.Gold, 1200);
+                        }
+                        break;
+
+                    case NetCommandType.MayorVoteOrSelect:
+                        if (!string.IsNullOrEmpty(netCmd.MayorId) && GameBridge.ApplyMayor(netCmd.MayorId))
+                        {
+                            GameBridge.ShowTopBanner($"Player {netCmd.PlayerId} selected a mayor", Color.Gold, 1500);
                         }
                         break;
                 }

@@ -40,6 +40,7 @@ namespace TABCoopMod.Testing
 
                 DeterministicReplayVerifier.OnRenderFrame();
                 ControlServer.Tick();
+                PauseSyncController.Tick();
                 HandleSinglePlayerToggle();
                 TryApplyRole();
                 TryAutoLoad();

@@ -670,5 +670,87 @@ namespace TABCoopMod.Core
             }
             return box;
         }
+
+        // ====================================================================
+        // Mayor selection (ZX.ZXMayor). Identify the chosen mayor by its string ID and apply that
+        // exact mayor on every peer — avoids re-running the male/female random pick per machine.
+        // ====================================================================
+        private static Type _typeZXMayor;
+        private static FieldInfo _mayorRegistryField;
+        private static PropertyInfo _mayorIdProp, _mayorNameProp, _mayorLevelProp;
+        private static MethodInfo _mayorApplyMethod;
+
+        private static void EnsureMayorMeta()
+        {
+            if (_typeZXMayor != null) return;
+            _typeZXMayor = GameAssembly?.GetType("ZX.ZXMayor");
+            if (_typeZXMayor == null) return;
+
+            const BindingFlags SF = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+            const BindingFlags IF = BindingFlags.Public | BindingFlags.Instance;
+            _mayorRegistryField = _typeZXMayor.GetField(ObfuscatedSymbols.Field_ZXMayor_Registry, SF);
+            _mayorIdProp = _typeZXMayor.GetProperty("ID", IF);
+            _mayorNameProp = _typeZXMayor.GetProperty("Name", IF);
+            _mayorLevelProp = _typeZXMayor.GetProperty("Level", IF);
+            _mayorApplyMethod = AccessTools.Method(_typeZXMayor, ObfuscatedSymbols.Method_ZXMayor_Apply, new[] { LevelStateType });
+            if (_mayorApplyMethod == null)
+            {
+                foreach (var m in AccessTools.GetDeclaredMethods(_typeZXMayor))
+                {
+                    if (m.Name == ObfuscatedSymbols.Method_ZXMayor_Apply && m.GetParameters().Length == 1)
+                    { _mayorApplyMethod = m; break; }
+                }
+            }
+        }
+
+        public static List<Dictionary<string, object>> GetMayorList(int levelFilter)
+        {
+            EnsureMayorMeta();
+            var result = new List<Dictionary<string, object>>();
+            var dict = _mayorRegistryField?.GetValue(null) as IDictionary;
+            if (dict == null) return result;
+            foreach (DictionaryEntry kv in dict)
+            {
+                object mayor = kv.Value;
+                if (mayor == null) continue;
+                int lvl = _mayorLevelProp != null ? Convert.ToInt32(_mayorLevelProp.GetValue(mayor)) : 0;
+                if (levelFilter > 0 && lvl != levelFilter) continue;
+                result.Add(new Dictionary<string, object>
+                {
+                    ["id"] = _mayorIdProp != null ? Convert.ToString(_mayorIdProp.GetValue(mayor)) : Convert.ToString(kv.Key),
+                    ["name"] = _mayorNameProp != null ? Convert.ToString(_mayorNameProp.GetValue(mayor)) : "?",
+                    ["level"] = lvl
+                });
+            }
+            return result;
+        }
+
+        public static bool ApplyMayor(string mayorId)
+        {
+            EnsureMayorMeta();
+            if (string.IsNullOrEmpty(mayorId) || _mayorApplyMethod == null) return false;
+            var dict = _mayorRegistryField?.GetValue(null) as IDictionary;
+            if (dict == null || !dict.Contains(mayorId)) return false;
+            object mayor = dict[mayorId];
+            object ls = CurrentLevelState;
+            if (mayor == null || ls == null) return false;
+            try { _mayorApplyMethod.Invoke(mayor, new[] { ls }); return true; }
+            catch (Exception ex) { ModLogger.Warn($"[GameBridge] ApplyMayor failed: {ex.Message}"); return false; }
+        }
+
+        public static int GetLevelCollectionCount(string name)
+        {
+            var prop = GetLevelProperty(name);
+            var ls = CurrentLevelState;
+            if (prop == null || ls == null) return 0;
+            try
+            {
+                object v = prop.GetValue(ls);
+                if (v is ICollection col) return col.Count;
+                if (v is IEnumerable en) { int n = 0; foreach (var _ in en) n++; return n; }
+            }
+            catch { }
+            return 0;
+        }
     }
 }

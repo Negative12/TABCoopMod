@@ -159,6 +159,20 @@
 
 > 说明：以上均为**运行时可视化/取证**问题，与 §0.1 的模拟确定性解耦；修复后可用于人工/视觉复核，但不改变同步逻辑本身。
 
+### 0.7 【会话3 调研】随机数种子与确定性设置
+
+**引擎 RNG 结构**（`DXVision.DXRandom : System.Random`，MT19937）：
+- `DXRandom.Global`：`_Global = new DXRandom(_GlobalSeed + new Random().Next())` —— 默认**非确定**（我们已 patch 为同步实例）。
+- `DXRandom()` 无参构造：`init_genrand(ThreadId * Ticks*100000)` —— 默认**非确定**（我们已 patch 为定种）。
+- `DXRandom(int seed)` / `Initialize(int seed)`：可显式定种；`Mt`（uint[624]）可 get/set，但私有 `mti` 不可设，故**整状态恢复不完整**，建议按 seed 重播种而非拷 `Mt`。
+- `DXLevel.Random`：`public DXRandom Random { get; set; }`，默认 `new DXRandom()`（非确定）。**可直接赋 `new DXRandom(seed)`**，控制关卡级随机（如市长候选人抽取用的就是它）。
+- `ZX.GameSystems.ZXRandomLevelParams.Seed`：**生存地图生成种子**（public int，get/set），默认 `DXRandom.Global.Next()`。载入存档会带上该 seed；要两端一致，必须同存档/同 seed。
+- `DXGame.IsIADeterministic`：只控制**单线程实体更新 + 同步物理**，**不是 RNG 定种开关**。
+
+**结论/建议**：
+- 没有“一个总开关”让全引擎确定性随机；需分别接管：`DXRandom.Global`（已）、无参 `DXRandom()`（已）、`DXLevel.Random`（建议在载入后赋定种实例）、生存 `Seed`（同存档即可）。
+- 可选新增控制工具 `seed_rng {seed}`：`DXLevel.Current.Random = new DXRandom(seed)` + 重播 `DXRandom.Global`，用于可复现实验；`Mt` 可读用于哈希。
+
 ---
 
 ## 0.5 【已解决 · 会话3】指令注入撞到内部类型的 TypeAccessException
@@ -269,7 +283,9 @@ ERROR 计数 = 0 / WARN = 0
 ## 5. Step 2：暂停 / 倍速 / 市长同步补丁（进行中）★
 
 **会话3 进展**：`SetGameSpeed` 已补全——`CommandExecutor` 新增 `case SetGameSpeed`（写 `DXGame.GameSpeed`，0..20），`NetCommand` 增加 `GameSpeed` 字段并序列化，MCP 暴露 `set_game_speed {speed}`。实测：暂停(0)→3→1 生效，`game_state` 的 `gameSpeed` 与实际推进一致。
-**仍待**：`MayorVoteOrSelect` executor（市长接口需进一步反编译 `ZXMayor`/`ZXGame.#=zcITiOSD6YNmD`）；以及 `PauseSyncPatch`/`MayorSyncPatch` 这些**producer**（让玩家真实按键/弹窗产生 NetCommand；注意暂停是空格微操核心，先别用暂停掩盖确定性 bug）。
+**市长接口已解析并实现 executor**：`ZXMayor` 有静态注册表 `Dictionary<string,ZXMayor> #=zoTuFkHI=`、`ID/Name/Level/Gender`，应用方法 `#=zPTw8CXGE0RqF(ZXLevelState)`；弹窗 `ZXGame.#=zcITiOSD6YNmD()` 按 `Level=MayorStates.Count+1` 用 `DXLevel.Current.Random` 随机选男/女，左右按钮分别应用。**设计：用 `MayorId` 传参应用**（`GameBridge.ApplyMayor`），避免两端重抽样；新增 MCP `list_mayors`/`mayor_select`。实测 level1 有 40 名，`mayor_select Mayor_001` 后 `MayorStates` 4→5。
+**暂停恢复 3 秒倒计时**：`PauseSyncController`（横幅倒计时，引擎无专门倒计时渲染器）+ MCP `request_pause`；实测请求恢复→3→2→1→自动恢复。
+**仍待**：`PauseSyncPatch`/`MayorSyncPatch` 这些 **producer**（把玩家真实空格/暂停按钮、市长左右按钮转成 NetCommand；注意暂停是空格微操核心，先别用它掩盖确定性 bug）。
 
 **现象**：`NetCommandType.SetGameSpeed(7)` 与 `MayorVoteOrSelect(8)` 已定义且可序列化，但 `CommandExecutor.Execute` 的 switch **没有这两个 case**（静默 no-op），且没有任何拦截点会产生它们。`SetPaused(6)` executor 有 case，但同样**没有 producer**——玩家按空格暂停只改本地 `DXGame.Paused`，另一端继续跑 → 立即分叉。
 

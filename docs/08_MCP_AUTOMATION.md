@@ -91,6 +91,9 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 | `cancel_queued_order` | 取消生产队列槽位 | `ids[]`,`slot` |
 | `set_paused` | 暂停/恢复 | `paused` |
 | `set_game_speed` | 设置模拟倍速（0=暂停，1=正常，最高 20） | `speed` |
+| `request_pause` | 本地暂停/恢复；**恢复走 3 秒倒计时**(顶部横幅) 再恢复 | `paused` |
+| `list_mayors` | 列出市长（注册表 id/name/level） | `level?` |
+| `mayor_select` | 按 MayorId 应用市长（确定性，不逐端重抽样） | `mayorId` |
 | `issue_command` | 原始 NetCommand 逃生口 | `type`,`commandId`,`ids[]`,`targetEntityId`,`x`,`y`… |
 | `screenshot` | 立即截图并返回路径 | `tag?` |
 | `get_camera` | 当前相机世界矩形 + 屏幕尺寸（用于世界→像素映射） | — |

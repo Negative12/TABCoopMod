@@ -92,6 +92,10 @@ namespace TABCoopMod.Core
         public const string Method_Build_PlaceBuilding         = "#=zBTwSMLo=";
         public const string Method_BuildOrTrain_GetForType     = "#=zQ4lx63I=";
 
+        // Mayor (ZX.ZXMayor)
+        public const string Field_ZXMayor_Registry             = "#=zoTuFkHI=";
+        public const string Method_ZXMayor_Apply               = "#=zPTw8CXGE0RqF";
+
         // ====================================================================
         // 7. ZX.Entities.ZXEntity & Components (CCommandable, CSelectable, CLife)
         // ====================================================================

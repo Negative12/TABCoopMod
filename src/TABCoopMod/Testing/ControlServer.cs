@@ -13,6 +13,7 @@ using System.Web.Script.Serialization;
 using DXVision;
 using TABCoopMod.Commands;
 using TABCoopMod.Core;
+using TABCoopMod.Sync;
 
 namespace TABCoopMod.Testing
 {
@@ -188,6 +189,9 @@ namespace TABCoopMod.Testing
                 case "cancel_queued_order": return CancelQueued(args);
                 case "set_paused": return SetPaused(args);
                 case "set_game_speed": return SetGameSpeed(args);
+                case "request_pause": return RequestPauseTool(args);
+                case "list_mayors": return ListMayors(args);
+                case "mayor_select": return SelectMayor(args);
                 case "issue_command": return IssueRawCommand(args);
                 case "screenshot": return TakeScreenshot(args);
                 case "get_camera": return GetCamera();
@@ -239,6 +243,8 @@ namespace TABCoopMod.Testing
                 ["gameTimeMs"] = game?.GameTimeInt ?? 0,
                 ["paused"] = game?.Paused ?? false,
                 ["gameSpeed"] = game?.GameSpeed ?? 0,
+                ["countdownActive"] = PauseSyncController.CountdownActive,
+                ["mayorCount"] = GameBridge.GetLevelCollectionCount("MayorStates"),
                 ["levelLoaded"] = ls != null,
                 ["gameMode"] = gameMode?.ToString(),
                 ["inCampaign"] = inCampaign is bool ic && ic,
@@ -502,6 +508,41 @@ namespace TABCoopMod.Testing
             };
         }
 
+        private static object RequestPauseTool(Dictionary<string, object> args)
+        {
+            bool paused = GetBool(args, "paused", true);
+            PauseSyncController.RequestPause(paused);
+            return new Dictionary<string, object>
+            {
+                ["requested"] = paused,
+                ["countdownActive"] = PauseSyncController.CountdownActive,
+                ["secondsRemaining"] = PauseSyncController.SecondsRemaining,
+                ["paused"] = DXGame.Current?.Paused ?? false
+            };
+        }
+
+        private static object ListMayors(Dictionary<string, object> args)
+        {
+            int level = GetInt(args, "level", 0);
+            var list = GameBridge.GetMayorList(level);
+            return new Dictionary<string, object> { ["count"] = list.Count, ["mayors"] = list };
+        }
+
+        private static object SelectMayor(Dictionary<string, object> args)
+        {
+            string id = GetStr(args, "mayorId");
+            if (string.IsNullOrEmpty(id)) throw new ArgumentException("mayorId is required");
+
+            var cmd = new NetCommand { Type = NetCommandType.MayorVoteOrSelect, PlayerId = 1, MayorId = id };
+            CommandExecutor.Execute(cmd);
+            return new Dictionary<string, object>
+            {
+                ["dispatched"] = true,
+                ["mayorId"] = id,
+                ["mayorCount"] = GameBridge.GetLevelCollectionCount("MayorStates")
+            };
+        }
+
         private static object SetGameSpeed(Dictionary<string, object> args)
         {
             float speed = GetFloat(args, "speed", 1f);
@@ -550,6 +591,8 @@ namespace TABCoopMod.Testing
                 case "cancel_queued_order":
                 case "set_paused":
                 case "set_game_speed":
+                case "request_pause":
+                case "mayor_select":
                 case "issue_command":
                 case "set_camera":
                 case "reveal_map":

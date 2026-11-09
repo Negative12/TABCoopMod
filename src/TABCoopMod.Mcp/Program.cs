@@ -300,6 +300,18 @@ namespace TABCoopMod.Mcp
                 "Set the simulation speed multiplier (0 = pause, 1 = normal, up to 20).",
                 WithShot(new JsonObject { ["speed"] = Num("Speed multiplier.") }), Req("speed")));
 
+            tools.Add(Tool("request_pause",
+                "Local pause intent: pausing is immediate; resuming runs a short countdown (default 3s) before resuming.",
+                WithShot(new JsonObject { ["paused"] = Bool("true = pause now, false = resume after countdown.") }), Req("paused")));
+
+            tools.Add(Tool("list_mayors",
+                "List mayors (id/name/level) from the registry.",
+                new JsonObject { ["level"] = Int("Filter by level (0 = all).") }, new JsonArray()));
+
+            tools.Add(Tool("mayor_select",
+                "Select/apply a mayor by its ID (deterministic — sent by ID, no per-peer re-roll).",
+                WithShot(new JsonObject { ["mayorId"] = Str("Mayor ID from list_mayors.") }), Req("mayorId")));
+
             tools.Add(Tool("issue_command",
                 "Escape hatch: dispatch a raw NetCommand (message-shape from docs/04_NETWORK_PROTOCOL.md).",
                 WithShot(new JsonObject
