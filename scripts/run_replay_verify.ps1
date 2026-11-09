@@ -11,12 +11,16 @@ param(
     [int]$Ticks = 200,
     [ValidateSet("twoproc","inproc")][string]$RunMode = "twoproc",
     [string]$ShotCam = "",
+    [switch]$RevealMap,
     [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
     [int]$TimeoutSeconds = 180
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot = Split-Path -Parent $ScriptDir
+$ShotDir = Join-Path $RepoRoot "tabcoop_shots"
+New-Item -ItemType Directory -Force -Path $ShotDir | Out-Null
 
 $exe = Join-Path $GameDir "TheyAreBillions.exe"
 $log = Join-Path $GameDir "TABCoopMod.log"
@@ -36,7 +40,9 @@ function Run-Pass([int]$runIdx) {
     $env:TABCOOP_TICK_GATE = "always"
     $env:TABCOOP_INTERCEPT = "0"
     $env:TABCOOP_POS_DUMP = "1"
+    $env:TABCOOP_SHOT_DIR = $ShotDir
     if ($ShotCam) { $env:TABCOOP_SHOT_CAM = $ShotCam } else { Remove-Item Env:TABCOOP_SHOT_CAM -ErrorAction SilentlyContinue }
+    if ($RevealMap) { $env:TABCOOP_REVEAL_MAP = "1" } else { Remove-Item Env:TABCOOP_REVEAL_MAP -ErrorAction SilentlyContinue }
 
     Write-Host "[replay] pass $runIdx launching..."
     $proc = Start-Process -FilePath $exe -WorkingDirectory $GameDir -PassThru

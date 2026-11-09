@@ -191,6 +191,7 @@ namespace TABCoopMod.Testing
                 case "screenshot": return TakeScreenshot(args);
                 case "get_camera": return GetCamera();
                 case "set_camera": return SetCamera(args);
+                case "reveal_map": return RevealMap(args);
                 default: throw new InvalidOperationException($"unknown tool '{tool}'");
             }
         }
@@ -499,6 +500,19 @@ namespace TABCoopMod.Testing
             };
         }
 
+        private static object RevealMap(Dictionary<string, object> args)
+        {
+            bool reveal = GetBool(args, "enabled", true);
+            bool showFull = GameBridge.SetShowFullMap(reveal);
+            bool fog = GameBridge.SetFogEnabled(!reveal); // disable global fog while revealing
+            return new Dictionary<string, object>
+            {
+                ["reveal"] = reveal,
+                ["appliedShowFullMap"] = showFull,
+                ["appliedFogToggle"] = fog
+            };
+        }
+
         private static void AttachScreenshot(string tool, Dictionary<string, object> args, object result)
         {
             if (!(result is Dictionary<string, object> dict)) return;
@@ -522,6 +536,7 @@ namespace TABCoopMod.Testing
                 case "set_paused":
                 case "issue_command":
                 case "set_camera":
+                case "reveal_map":
                     return true;
                 default:
                     return false;

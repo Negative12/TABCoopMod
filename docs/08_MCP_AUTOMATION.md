@@ -94,6 +94,7 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 | `screenshot` | 立即截图并返回路径 | `tag?` |
 | `get_camera` | 当前相机世界矩形 + 屏幕尺寸（用于世界→像素映射） | — |
 | `set_camera` | 移动/缩放相机到世界坐标或某个实体，并自动延迟截图 | `x`,`y`,`w`,`h`,`zoom`,`entityId` |
+| `reveal_map` | 开全图（置 `ZXLevelState.ShowFullMap` 并关 `FogEnabled`），仅影响渲染，不改模拟 | `enabled?` |
 
 **实体 ID 是 64 位，超过 JS 安全整数范围，工具统一以字符串返回**；传参用字符串或数字均可。
 改动类工具返回结果含 `screenshot` 字段（PNG 绝对路径）；MCP 服务端会**等待文件落盘**再返回，可直接用读图工具打开。
@@ -185,24 +186,24 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 
 把两进程回放的**同 tick** 数据可视化，直接看出"分叉发生在哪些位置"：
 
-1. 回放验证器在首个记录 tick 除了导出 `coop_pos_run1/2.txt`，现在还导出
-   `coop_shot_run1/2.png`（同 tick 截图）与 `coop_cam_run1/2.json`（相机变换）。
-2. 生成报告：
-   > 截图默认沿用存档相机（常在安全区）。要看**交互区**（左/上），先用 `-ShotCam "cx,cy,w,h"` 覆盖回放截图相机，例如 `-ShotCam "75,85,64,40"`（引擎会按地图边界轻微夹紧）。`run_replay_verify.ps1` 已支持该参数。
+1. 回放验证器在首个记录 tick 除导出 `coop_pos_run1/2.txt` 外，还在**工作目录** `tabcoop_shots/` 保存**唯一命名**的截图与相机参数：
+   - `replay_run<N>_t<tick>_<yyyyMMdd_HHmmss_fff>.png`
+   - `replay_run<N>_t<tick>_<...>.cam.json`
+   - 并维护 `tabcoop_shots/latest_replay_shots.json`（记录两跑截图/相机路径），**不再用固定文件名覆盖**，因此不会出现浏览器缓存旧图。
+2. 生成报告。截图默认沿用存档相机（常在安全区/黑雾区），建议加：
+   - `-ShotCam "cx,cy,w,h"`：把回放截图相机移到交互区（6666 的分叉集中在 x≈37–97、y≈52–112，可用 `"75,85,64,40"`；引擎会按地图边界轻微夹紧）。
+   - `-RevealMap`：开全图（置 `ShowFullMap`、关 `FogEnabled`），去掉黑雾；仅影响渲染，不改模拟。
    ```powershell
-   powershell -File scripts/run_replay_verify.ps1 -SavePath "<save>" -Ticks 120 -ShotCam "75,85,64,40"
+   powershell -File scripts/run_replay_verify.ps1 -SavePath "<save>" -Ticks 120 -ShotCam "75,85,64,40" -RevealMap
    ```
-   然后生成报告：
+   然后生成报告（`--manifest` 自动读取两跑的唯一截图/相机路径）：
    ```powershell
    python scripts/build_divergence_report.py `
      --pos1 "<game>\coop_pos_run1.txt" --pos2 "<game>\coop_pos_run2.txt" `
      --tl1 "<game>\coop_replay_run1.timeline" --tl2 "<game>\coop_replay_run2.timeline" `
-     --shot1 ../../tabcoop_shots/replay_6666_run1_t168601.png `
-     --shot2 ../../tabcoop_shots/replay_6666_run2_t168601.png `
-     --cam1 "<game>\coop_cam_run1.json" --cam2 "<game>\coop_cam_run2.json" `
+     --manifest "tabcoop_shots/latest_replay_shots.json" `
      --out analysis/divergence_6666/index.html
    ```
-   （把 `coop_shot_runN.png` 复制到 `tabcoop_shots/replay_6666_runN_t<tick>.png` 以便相对引用。）
 3. 报告内容：
    - 左：世界坐标散点/箭头（两跑同一 tick 的逐实位移，颜色/长度表示位移大小，×表示独有实体）。
    - 右：**两张同 tick 截图**，按坐标在每个分叉实体处画框（实线=本跑位置，虚线=另一跑位置），默认优先标注视野内分叉点。
@@ -210,4 +211,6 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
    - 交互：最小位移过滤、类型过滤、最多框数、缩放/平移、悬停查看实体 id/类型/位移。
 4. 想看某个分叉点的放大实景，用 MCP：`set_camera {x,y,zoom}` 或 `set_camera {entityId}` → 自动截图到 `tabcoop_shots/`；`get_camera` 可回读相机矩形。
 
-> 说明：回放截图与坐标来自同一 tick（168601），但相机由存档恢复；两跑相机一致时可直接叠加对比。
+> 说明：回放截图与坐标来自同一 tick 附近（截图延迟 2 tick 等渲染）；相机由存档恢复或 `-ShotCam` 覆盖；两跑相机一致时可直接叠加对比。
+>
+> **开全图实现取舍**：引擎可见性判断是 `ZXLevelState.ShowFullMap || !ZXSystemMapLayers.FogEnabled`，所以直接置这两个参数最简单、无副作用（仅渲染）；`ZX.Entities.RevealMap`（沉默窥探者）只是靠 `CMapWatcher.WatchRange` 提供视野，需要建造/资源，不必用。MCP 的 `reveal_map` 工具即直接置位实现（实测黑雾消失、模拟状态不变）。

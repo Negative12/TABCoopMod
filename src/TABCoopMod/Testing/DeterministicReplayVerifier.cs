@@ -213,6 +213,13 @@ namespace TABCoopMod.Testing
         {
             DumpPositions();
 
+            if (TestHarnessConfig.RevealMap)
+            {
+                bool a = GameBridge.SetShowFullMap(true);
+                bool b = GameBridge.SetFogEnabled(false);
+                ModLogger.Info($"[ReplayVerifier] reveal map: ShowFullMap={a}, FogDisabled={b}");
+            }
+
             // Optional camera override (TABCOOP_SHOT_CAM) lets the report look at the interaction
             // area instead of the save's restored camera. Apply now; capture a couple of ticks later
             // so the render target has been redrawn with the new camera.
@@ -240,20 +247,57 @@ namespace TABCoopMod.Testing
                 var game = DXGame.Current;
                 if (game == null) return;
 
-                string shotPath = Path.Combine(TestHarnessConfig.OutputDirectory, $"coop_shot_run{_currentRun}.png");
-                string camPath = Path.Combine(TestHarnessConfig.OutputDirectory, $"coop_cam_run{_currentRun}.json");
+                string dir = !string.IsNullOrEmpty(TestHarnessConfig.ShotDir)
+                    ? TestHarnessConfig.ShotDir
+                    : Path.Combine(TestHarnessConfig.OutputDirectory, "tabcoop_shots");
+                System.IO.Directory.CreateDirectory(dir);
+
+                int tick = game.IAIterationInt;
+                string baseName = $"replay_run{_currentRun}_t{tick}_{DateTime.Now:yyyyMMdd_HHmmss_fff}";
+                string shotPath = Path.Combine(dir, baseName + ".png");
+                string camPath = Path.Combine(dir, baseName + ".cam.json");
 
                 using (var bmp = game.CaptureScreen())
                 {
                     if (bmp == null) return;
                     bmp.Save(shotPath, ImageFormat.Png);
                     CameraProbe.WriteJson(camPath, bmp.Width, bmp.Height);
-                    ModLogger.Info($"[ReplayVerifier] Dumped run{_currentRun} screenshot {bmp.Width}x{bmp.Height} -> {shotPath}; camera -> {camPath}");
+                    ModLogger.Info($"[ReplayVerifier] Saved run{_currentRun} screenshot {bmp.Width}x{bmp.Height} -> {shotPath}; camera -> {camPath}");
                 }
+
+                UpdateShotManifest(dir, tick, shotPath, camPath);
             }
             catch (Exception ex)
             {
                 ModLogger.Error("[ReplayVerifier] CaptureShot failed", ex);
+            }
+        }
+
+        /// <summary>Writes/merges tabcoop_shots/latest_replay_shots.json so the report can auto-discover
+        /// the uniquely-named shots of each pass (no fixed-name overwrites, no stale browser cache).</summary>
+        private static void UpdateShotManifest(string dir, int tick, string shotPath, string camPath)
+        {
+            try
+            {
+                string path = Path.Combine(dir, "latest_replay_shots.json");
+                var ser = new System.Web.Script.Serialization.JavaScriptSerializer();
+                Dictionary<string, object> root = null;
+                if (File.Exists(path))
+                {
+                    try { root = ser.Deserialize<Dictionary<string, object>>(File.ReadAllText(path)); } catch { }
+                }
+                if (root == null) root = new Dictionary<string, object>();
+                root["tick"] = tick;
+                root["run" + _currentRun] = new Dictionary<string, object>
+                {
+                    ["shot"] = shotPath,
+                    ["cam"] = camPath
+                };
+                File.WriteAllText(path, ser.Serialize(root));
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[ReplayVerifier] manifest update failed: {ex.Message}");
             }
         }
 

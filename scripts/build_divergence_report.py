@@ -16,7 +16,7 @@
 #     --shot2 ../../tabcoop_shots/replay_6666_run2_t168601.png \
 #     --cam1 <game>/coop_cam_run1.json --cam2 <game>/coop_cam_run2.json \
 #     --out analysis/divergence_6666/index.html
-import argparse, json, os
+import argparse, json, os, hashlib, shutil
 
 def load_pos(path):
     d = {}
@@ -70,6 +70,7 @@ def main():
     ap.add_argument("--shot2", default="")
     ap.add_argument("--cam1", default="")
     ap.add_argument("--cam2", default="")
+    ap.add_argument("--manifest", default="", help="tabcoop_shots/latest_replay_shots.json (auto-fills shot/cam paths)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -112,8 +113,36 @@ def main():
         for key in ("pos", "life", "proj", "prod", "resv"):
             timeline[key].append(1 if r1.get(key) != r2.get(key) else 0)
 
+    if args.manifest:
+        try:
+            with open(args.manifest, "r", encoding="utf-8") as f:
+                man = json.load(f)
+            m1 = man.get("run1") or {}
+            m2 = man.get("run2") or {}
+            if m1.get("shot"): args.shot1 = m1["shot"]
+            if m1.get("cam"): args.cam1 = m1["cam"]
+            if m2.get("shot"): args.shot2 = m2["shot"]
+            if m2.get("cam"): args.cam2 = m2["cam"]
+        except Exception as e:
+            print(f"warning: manifest read failed: {e}")
+
     cam1, cam2 = load_cam(args.cam1), load_cam(args.cam2)
     same_cam = bool(cam1 and cam2 and all(abs(cam1[k] - cam2[k]) < 1e-3 for k in ("x", "y", "w", "h")))
+
+    outdir = os.path.dirname(os.path.abspath(args.out))
+    os.makedirs(outdir, exist_ok=True)
+
+    def rel_src(p):  # browser URL relative to the report file
+        if not p:
+            return ""
+        ap = p if os.path.isabs(p) else os.path.abspath(p)
+        try:
+            r = os.path.relpath(ap, outdir)
+        except Exception:
+            r = p
+        return r.replace("\\", "/")
+
+    shot1_src, shot2_src = rel_src(args.shot1), rel_src(args.shot2)
 
     data = {
         "tick": common_ticks[0] if common_ticks else 0,
@@ -122,7 +151,7 @@ def main():
         "topTypes": sorted(top_moved.items(), key=lambda kv: -kv[1])[:25],
         "entities": entities,
         "timeline": timeline,
-        "shots": {"a": {"src": args.shot1, "cam": cam1}, "b": {"src": args.shot2, "cam": cam2}},
+        "shots": {"a": {"src": shot1_src, "cam": cam1}, "b": {"src": shot2_src, "cam": cam2}},
         "sameCam": same_cam,
     }
 

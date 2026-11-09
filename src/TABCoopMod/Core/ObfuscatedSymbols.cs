@@ -17,7 +17,8 @@ namespace TABCoopMod.Core
         public const string Type_ZXSystemMainMenu   = "#=zLs$VX1eoAapVflmW_w==";
         public const string Type_ZXSystemCampaign   = "#=zUsJtyOzSfYDnqdeHjCSzszBbekLj";
         public const string Type_ZXSystemMapLayers  = "#=zJme8KFhmikprnkg_2CDeiQE=";
-        public const string Type_ZXSystemAudio      = "#=zJYbPa4gP2VI16zEh5y2Zxew=";
+        /// <summary>Static singleton field holding the live ZXSystemMapLayers (fog config) instance.</summary>
+        public const string Field_MapLayers_Current  = "#=zQFWYIvs=";        public const string Type_ZXSystemAudio      = "#=zJYbPa4gP2VI16zEh5y2Zxew=";
         public const string Type_ZXSystemBuilder    = "#=z5Ns_eH8ENLF7HFU5mg==";
         public const string Type_ZXSteamManager     = "#=z3Zxcp6RwVCZHa9xpeg==";
         public const string Type_ZXMessageBoxHelper = "#=zzi2cl4h1HYA5cX8aaw==";

@@ -337,6 +337,13 @@ namespace TABCoopMod.Mcp
                     ["entityId"] = Str("Center on this entity instead of x/y.")
                 }), new JsonArray()));
 
+            tools.Add(Tool("reveal_map",
+                "Reveal the whole map (ShowFullMap=true, fog disabled). Rendering-only; does not change the simulation.",
+                WithShot(new JsonObject
+                {
+                    ["enabled"] = Bool("true = reveal, false = restore fog.")
+                }), new JsonArray()));
+
             return tools;
         }
     }

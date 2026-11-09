@@ -255,6 +255,44 @@ namespace TABCoopMod.Core
             try { return Convert.ToInt32(prop.GetValue(ls)); } catch { return 0; }
         }
 
+        public static bool SetLevelProperty(string name, object value)
+        {
+            var prop = GetLevelProperty(name);
+            var ls = CurrentLevelState;
+            if (prop == null || ls == null || !prop.CanWrite) return false;
+            try { prop.SetValue(ls, value); return true; } catch { return false; }
+        }
+
+        /// <summary>
+        /// Reveals the whole map via ZXLevelState.ShowFullMap, which is OR'ed into every visibility
+        /// check in ZXSystemMapLayers. Rendering-only — it does not mutate the simulation state.
+        /// </summary>
+        public static bool SetShowFullMap(bool on) => SetLevelProperty("ShowFullMap", on);
+
+        private static Type _mapLayersType;
+        private static FieldInfo _mapLayersCurrentField;
+        private static PropertyInfo _fogEnabledProp;
+
+        /// <summary>Toggles ZXSystemMapLayers.FogEnabled (the global fog-of-war switch).</summary>
+        public static bool SetFogEnabled(bool on)
+        {
+            if (_mapLayersType == null)
+                _mapLayersType = GameAssembly?.GetType(ObfuscatedSymbols.Type_ZXSystemMapLayers);
+            if (_mapLayersType == null) return false;
+
+            if (_mapLayersCurrentField == null)
+                _mapLayersCurrentField = _mapLayersType.GetField(ObfuscatedSymbols.Field_MapLayers_Current,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            object inst = _mapLayersCurrentField?.GetValue(null);
+            if (inst == null) return false;
+
+            if (_fogEnabledProp == null)
+                _fogEnabledProp = _mapLayersType.GetProperty("FogEnabled", BindingFlags.Public | BindingFlags.Instance);
+            if (_fogEnabledProp == null || !_fogEnabledProp.CanWrite) return false;
+
+            try { _fogEnabledProp.SetValue(inst, on); return true; } catch { return false; }
+        }
+
         public static string Localize(string key) => _mLocalize != null ? (string)_mLocalize.Invoke(null, new object[] { key }) : key;
         public static string GetSavesDirectory() => (string)_mGetSavesDir?.Invoke(null, null);
 
