@@ -136,8 +136,8 @@ ERROR 计数 = 0 / WARN = 0
 - 两遍日志中 `CommandId` 完全一致（`Travel=1952427338`、`Train=584315074`），说明命令单例 ID 在确定性沙盒下稳定。
 - `compare_hashes.ps1` 首个分叉仍是 tick 32001 的 `pos`（在任何注入发生之前）→ **本次修复没有新增任何分叉类别**；`life/proj/prod/resv/经济` 仍一致。残留的 `pos` 分叉属于 §0.1（移动积分不确定），与本项无关。
 
-### 仍待单独验证（未阻塞本项）
-- **捕获侧**（`Patches/CommandInterceptorPatch.cs`）的 Prefix 方法签名仍强类型引用 `ZXCommand`/`ZXEntity`/`ZXCommandTarget`/`CCommandable`，且方法体含 `is Build` / `__0.Team` / `__1.SerEntityRef` / `HasComponent<CMovable>()`。本次注入路径因 `IsReplayingCommand=true` 早退，未真正执行到这些语句（JIT 是否会在首调用时抛 `TypeAccessException` 尚需以 `TABCOOP_INTERCEPT=1` + 真实输入复核）。若复现，按同一套 `object + 反射` 改法处理 `isinst`/属性访问/泛型实例化即可。
+### 捕获侧实测补充（同一会话）
+另跑一遍 `TABCOOP_INTERCEPT=1`（60 tick，AI 指令持续流经被 `Patch_ZXCommand_Execute` 补丁的 `ZXCommand.#=zfmgzkuw=` 前缀）：**日志无任何 `TypeAccessException`/`MethodAccessException`/ERROR**。说明该 Prefix 方法的 JIT（含 `is Build`/`is Travel`、`__0.Team`、`__1.SerEntityRef`、`HasComponent<CMovable>()`）在当前 CLR 下并未抛类型访问异常。因此捕获侧暂**无需**反射化改造；仍需人工以真实鼠标输入验证「捕获→序列化→回放」闭环的功能正确性（自动化无法代替点击）。
 
 
 ---
