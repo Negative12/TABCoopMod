@@ -84,21 +84,30 @@
 
 ---
 
-## 4. 本次会话末尾的构建状态
+## 4. 本次会话末尾的构建 / 部署 / 启动验证状态
 
 ```
 dotnet build src/TABCoopMod/TABCoopMod.csproj -c Release
 → 已成功生成。0 个警告，0 个错误
-→ 产物 <repo_root>\src\TABCoopMod\bin\Release\TABCoopMod.dll (79,360 bytes)
+→ 产物 src/TABCoopMod/bin/Release/TABCoopMod.dll
+
+scripts/install_mod.ps1
+→ TABCoopMod installed successfully!
+
+启动 TheyAreBillions.exe 后 TABCoopMod.log 实测输出：
+→ [GameBridge] ALL BINDINGS VERIFIED SUCCESSFULLY (0 missing).
+→ [Harmony] All Harmony patches applied. Classes OK=10, failed-tolerant=0.
+→ [MainMenuPatch] Injected 'CO-OP MULTIPLAYER' button into TMenuCategory.Main successfully!
+→ ERROR 计数 = 0
 ```
 
-**部署未完成**：最后一次 `install_mod.ps1` 因游戏进程占用 `0Harmony.dll` 失败（`IOException`）。
-接手后第一件事：
+**结论：注入链、符号绑定、全部 10 个 Harmony 补丁类、主菜单按钮注入均已实机验证通过。**
 
-```bash
-powershell -NoProfile -Command 'Get-Process *TheyAreBillions* -EA SilentlyContinue | Stop-Process -Force'
-powershell -ExecutionPolicy Bypass -File "<repo_root>/scripts/install_mod.ps1"
-```
+修掉的关键 bug（不要回退）：
+1. `OMiniMap.OnMouseRightDown` 含 Eazfuscator 生成异常块 → MonoMod IL 重写抛 `异常块的错误代码生成` → **曾导致 PatchAll 整体失败、Mod 完全不加载**。已从补丁目标中移除。
+2. `Harmony.PatchAll(assembly)` 是一损俱损的：任何一类补丁失败就抛出并中断整个 Initialize。已改为**逐类 `PatchClassProcessor(...).Patch()` 包 try/catch**，单类失败只记 Warn。
+
+Git 已提交：`4bbea80 Phase 0 完成 + Phase 1-3 骨架落地`
 
 ---
 
