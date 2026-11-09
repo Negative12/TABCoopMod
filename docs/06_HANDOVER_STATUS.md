@@ -202,6 +202,7 @@ compare_hashes: 首个分叉仍为 tick 32001 的 pos（注入发生前）→ �
 - MCP 全链路（stdio 喂 JSON-RPC）：`initialize`/`tools/list`/`tools/call` 正常；`game_state`（unpause 前后）、`list_entities`、`move_units`（游侠从 (136.17,125.48) 移动到 (147.41,127.5) 途中）、`train_unit`（Train cmd 584315074）均成功并自动截图。
 - 修复：MCP `JsonNode` 参数父子复用（`DeepClone`）；`game_state` 与 `get_state` 工具名对齐。
 - 截图经缩略图目视确认为真实游戏画面。
+- **存档模式实测**（`game_state` 新增 `gameMode/inCampaign/difficulty/survivalMode`）：`1_Backup.zxsav`=**Campaign**(Normal，~9.8k 实体/178 玩家实体)；`test.zxsav`/`900survival.zxsav`/`6666.zxsav`=**Survival**（`6666` 为发育完整的中后期档，1020 玩家实体，推荐做自动化操作测试）。战役与生存引擎确定性等效，但代表性不同，详见 08 §6。
 
 ### 8.4 尚未覆盖
 鼠标框选/点选/编队/摄像机、攻击/修理等需 commandId 的复合指令（可 `issue_command` 手动）、倍速/市长（executor 未实现）、真实键鼠事件注入。详见 08 §7。

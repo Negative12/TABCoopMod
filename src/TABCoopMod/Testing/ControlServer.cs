@@ -224,12 +224,21 @@ namespace TABCoopMod.Testing
                 }
             }
 
+            object gameMode = GameBridge.GetGameStateProperty("GameMode");
+            object inCampaign = GameBridge.GetGameStateProperty("InCampaign");
+            object difficulty = GameBridge.GetGameStateProperty("Difficulty");
+            object survivalParams = GameBridge.GetGameStateProperty("SurvivalModeParams");
+
             return new Dictionary<string, object>
             {
                 ["tick"] = game?.IAIterationInt ?? 0,
                 ["gameTimeMs"] = game?.GameTimeInt ?? 0,
                 ["paused"] = game?.Paused ?? false,
                 ["levelLoaded"] = ls != null,
+                ["gameMode"] = gameMode?.ToString(),
+                ["inCampaign"] = inCampaign is bool ic && ic,
+                ["difficulty"] = difficulty?.ToString(),
+                ["survivalMode"] = survivalParams != null,
                 ["gold"] = GameBridge.GetLevelInt("Gold"),
                 ["wood"] = GameBridge.GetLevelInt("Wood"),
                 ["stone"] = GameBridge.GetLevelInt("Stone"),

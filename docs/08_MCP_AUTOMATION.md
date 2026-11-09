@@ -82,7 +82,7 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 
 | 工具 | 说明 | 主要参数 |
 |---|---|---|
-| `game_state` | 当前 tick、暂停、资源、实体数 | — |
+| `game_state` | 当前 tick、暂停、资源、实体数、**游戏模式/难度** | — |
 | `list_entities` | 列出实体（id/类型/坐标/HP/阵营/可移动） | `typeContains`,`onlyPlayer`,`movable`,`includeProjectiles`,`limit` |
 | `move_units` | 群体移动 | `ids[]`,`x`,`y`,`shift?` |
 | `place_building` | 放置建筑（走正常 Build 命令扣资源） | `buildingType`,`x`,`y`,`sizeW?`,`sizeH?`,`builderId?`,`isBonus?`,`instant?` |
@@ -105,7 +105,25 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 
 ---
 
-## 6. 截图
+## 6. 测试存档与游戏模式
+
+`game_state` 现在会返回 `gameMode`(Survival/CustomLevel/Campaign)、`inCampaign`、`difficulty`、`survivalMode`，可直接确认当前存档属于哪种模式。
+
+已实测的本机存档：
+
+| 存档 | 模式 | tick | 实体数 | 玩家实体 | 资源 | 适用场景 |
+|---|---|---|---|---|---|---|
+| `1_Backup.zxsav` | **Campaign**(Normal) | 31904 | ~9.8k | 178 | 355金 | 战役流程；**不代表生存** |
+| `test.zxsav` | **Survival** | 443 | ~43k | 6 | 100/20 | 生存早期（单位极少） |
+| `900survival.zxsav` | **Survival** | 11 | ~39.7k | 6 | 100/20 | 生存开局（几乎无基地） |
+| `6666.zxsav` | **Survival** | 168485 | ~30.6k | **1020** | 9605金/392油 | **生存中后期、发育完整——推荐做操作/自动化测试的默认存档** |
+
+**战役 vs 生存是否等效：**
+- **引擎确定性层面等效**：两者共用同一 `ZXLevelState`、实体更新、物理、`DXRandom`、`NetCommand`/`CommandExecutor`。`docs/07 §0.1`（移动积分）与 §0.5（反射化）结论对两种模式都成立。
+- **代表性不同（不等效）**：战役有任务脚本/目标/`CampaignState`/`LevelEvents`；生存有 `SurvivalModeParams`（随机地图生成）、周期性尸潮、难度/天数缩放、市长系统。生存的实体规模与随机面更大，是**更严苛、更接近联机目标**的确定性测试面。
+- **建议**：自动化操作测试默认用 `6666.zxsav`（发育完整的生存档）；早期流程用 `test.zxsav`/`900survival.zxsav`；战役档保留为第二套用例，避免只测一种模式。
+
+## 7. 截图
 
 - 目录：`<游戏目录>\tabcoop_shots\`（=`TestHarnessConfig.OutputDirectory/tabcoop_shots`）。
 - 命名：`<序号>_t<tick>_<时分秒_毫秒>_<tag>.png`，例如 `00002_t32786_160213_380_move_units.png`。
@@ -114,7 +132,7 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 
 ---
 
-## 7. 已覆盖 vs 未覆盖的人类操作
+## 8. 已覆盖 vs 未覆盖的人类操作
 
 **已覆盖（走确定性指令路径）**
 - 移动、建造、训练、取消当前/队列、暂停。
@@ -128,7 +146,7 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 
 ---
 
-## 8. 协议细节（控制层）
+## 9. 协议细节（控制层）
 
 换行分隔 JSON，一行一请求/响应：
 
@@ -146,7 +164,7 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 
 ---
 
-## 9. 排障
+## 10. 排障
 
 | 现象 | 处理 |
 |---|---|

@@ -213,7 +213,22 @@ namespace TABCoopMod.Core
         public static DXGame ZXGameInstance => _mZXGameCurrent?.Invoke(null, null) as DXGame;
         public static DXSystem LevelSystemInstance => _mLevelSysCurrent?.Invoke(null, null) as DXSystem;
         public static DXSystem MainMenuInstance => _mMainMenuCurrent?.Invoke(null, null) as DXSystem;
-        public static ZXGameState CurrentGameState => (ZXGameState)_mGameStateCurrent?.Invoke(null, null);
+        /// <summary>ZXGameState is internal; expose it as object so callers can reflect safely.</summary>
+        public static object CurrentGameStateObject => _mGameStateCurrent?.Invoke(null, null);
+
+        private static readonly Dictionary<string, PropertyInfo> _gameStatePropCache = new Dictionary<string, PropertyInfo>();
+
+        public static object GetGameStateProperty(string name)
+        {
+            object gs = CurrentGameStateObject;
+            if (gs == null) return null;
+            if (!_gameStatePropCache.TryGetValue(name, out PropertyInfo prop))
+            {
+                prop = gs.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+                _gameStatePropCache[name] = prop;
+            }
+            try { return prop?.GetValue(gs); } catch { return null; }
+        }
 
         /// <summary>
         /// ZXLevelState is an internal type; a direct cast fails at runtime with TypeAccessException.
