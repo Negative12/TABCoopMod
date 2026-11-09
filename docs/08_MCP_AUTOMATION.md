@@ -188,6 +188,11 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 1. 回放验证器在首个记录 tick 除了导出 `coop_pos_run1/2.txt`，现在还导出
    `coop_shot_run1/2.png`（同 tick 截图）与 `coop_cam_run1/2.json`（相机变换）。
 2. 生成报告：
+   > 截图默认沿用存档相机（常在安全区）。要看**交互区**（左/上），先用 `-ShotCam "cx,cy,w,h"` 覆盖回放截图相机，例如 `-ShotCam "75,85,64,40"`（引擎会按地图边界轻微夹紧）。`run_replay_verify.ps1` 已支持该参数。
+   ```powershell
+   powershell -File scripts/run_replay_verify.ps1 -SavePath "<save>" -Ticks 120 -ShotCam "75,85,64,40"
+   ```
+   然后生成报告：
    ```powershell
    python scripts/build_divergence_report.py `
      --pos1 "<game>\coop_pos_run1.txt" --pos2 "<game>\coop_pos_run2.txt" `

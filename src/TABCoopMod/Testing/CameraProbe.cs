@@ -64,5 +64,34 @@ namespace TABCoopMod.Testing
                 Core.ModLogger.Warn($"[CameraProbe] write failed: {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// Applies a camera override from "cx,cy" or "cx,cy,w,h" (world units). Returns false on bad input.
+        /// </summary>
+        public static bool ApplySpec(string spec)
+        {
+            if (string.IsNullOrWhiteSpace(spec)) return false;
+            string[] parts = spec.Split(',');
+            if (parts.Length < 2) return false;
+
+            if (!float.TryParse(parts[0].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float cx)) return false;
+            if (!float.TryParse(parts[1].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float cy)) return false;
+
+            var cur = Capture();
+            float w = cur.Valid ? cur.W : 64f;
+            float h = cur.Valid ? cur.H : 40f;
+            if (parts.Length >= 4)
+            {
+                if (!float.TryParse(parts[2].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out w)) return false;
+                if (!float.TryParse(parts[3].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out h)) return false;
+            }
+
+            var scene = DXScene.Current;
+            if (scene == null || w <= 0f || h <= 0f) return false;
+
+            scene.CameraArea = new RectangleF(cx - w / 2f, cy - h / 2f, w, h);
+            Core.ModLogger.Info($"[CameraProbe] applied camera override center=({cx},{cy}) size=({w},{h})");
+            return true;
+        }
     }
 }

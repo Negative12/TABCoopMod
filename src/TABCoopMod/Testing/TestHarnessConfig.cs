@@ -35,6 +35,9 @@ namespace TABCoopMod.Testing
         /// <summary>Directory screenshots are written to (TABCOOP_SHOT_DIR). Set by the launcher to the workspace folder.</summary>
         public static string ShotDir { get; private set; }
 
+        /// <summary>Camera override for replay screenshots: "cx,cy" or "cx,cy,w,h" (TABCOOP_SHOT_CAM).</summary>
+        public static string ShotCamera { get; private set; }
+
         /// <summary>True when the MCP control server is enabled (TABCOOP_CONTROL_PORT set).</summary>
         public static bool ControlEnabled => ControlPort > 0;
 
@@ -62,6 +65,7 @@ namespace TABCoopMod.Testing
             ControlPort = ParseInt(Env("TABCOOP_CONTROL_PORT"), 0);
             AutoShot = Env("TABCOOP_AUTO_SHOT") != "0";
             ShotDir = Env("TABCOOP_SHOT_DIR");
+            ShotCamera = Env("TABCOOP_SHOT_CAM");
 
             string logDir = null;
             try { logDir = Path.GetDirectoryName(ModLogger.LogFilePath); } catch { }

@@ -40,6 +40,7 @@ namespace TABCoopMod.Testing
         private static readonly List<string> _records = new List<string>();
         private static int _reloadWatchFrames;
         private static bool _reloadPending;
+        private static int _shotDueCount = -1;
         private static int _armTick = -1;
         private static int _lastEntityCount = -1;
         private static int _settleStreak;
@@ -112,6 +113,7 @@ namespace TABCoopMod.Testing
                 _lastEntityCount = -1;
                 _settleStreak = 0;
                 _reloadPending = false;
+                _shotDueCount = -1;
 
                 LockstepClock.EnableDeterministicSandbox(ReplaySeed);
                 LockstepClock.CalibrateEntityIdCounterFromLoadedLevel(ReplaySeed);
@@ -210,6 +212,29 @@ namespace TABCoopMod.Testing
         private static void DumpSnapshot()
         {
             DumpPositions();
+
+            // Optional camera override (TABCOOP_SHOT_CAM) lets the report look at the interaction
+            // area instead of the save's restored camera. Apply now; capture a couple of ticks later
+            // so the render target has been redrawn with the new camera.
+            if (!string.IsNullOrEmpty(TestHarnessConfig.ShotCamera) && CameraProbe.ApplySpec(TestHarnessConfig.ShotCamera))
+            {
+                _shotDueCount = _records.Count + 2;
+                ModLogger.Info($"[ReplayVerifier] camera override '{TestHarnessConfig.ShotCamera}' applied; screenshot due at record {_shotDueCount}.");
+                return;
+            }
+
+            CaptureShot();
+        }
+
+        private static void MaybeCaptureDeferredShot()
+        {
+            if (_shotDueCount < 0 || _records.Count < _shotDueCount) return;
+            _shotDueCount = -1;
+            CaptureShot();
+        }
+
+        private static void CaptureShot()
+        {
             try
             {
                 var game = DXGame.Current;
@@ -228,7 +253,7 @@ namespace TABCoopMod.Testing
             }
             catch (Exception ex)
             {
-                ModLogger.Error("[ReplayVerifier] DumpSnapshot failed", ex);
+                ModLogger.Error("[ReplayVerifier] CaptureShot failed", ex);
             }
         }
 
@@ -259,6 +284,8 @@ namespace TABCoopMod.Testing
 
                 if (TestHarnessConfig.PosDump && _records.Count == 1)
                     DumpSnapshot();
+
+                MaybeCaptureDeferredShot();
 
                 if (d.SimTick >= _baselineTick + _ticks)
                     FinishRun();

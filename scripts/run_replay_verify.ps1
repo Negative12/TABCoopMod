@@ -10,6 +10,7 @@ param(
     [Parameter(Mandatory=$true)][string]$SavePath,
     [int]$Ticks = 200,
     [ValidateSet("twoproc","inproc")][string]$RunMode = "twoproc",
+    [string]$ShotCam = "",
     [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
     [int]$TimeoutSeconds = 180
 )
@@ -35,6 +36,7 @@ function Run-Pass([int]$runIdx) {
     $env:TABCOOP_TICK_GATE = "always"
     $env:TABCOOP_INTERCEPT = "0"
     $env:TABCOOP_POS_DUMP = "1"
+    if ($ShotCam) { $env:TABCOOP_SHOT_CAM = $ShotCam } else { Remove-Item Env:TABCOOP_SHOT_CAM -ErrorAction SilentlyContinue }
 
     Write-Host "[replay] pass $runIdx launching..."
     $proc = Start-Process -FilePath $exe -WorkingDirectory $GameDir -PassThru

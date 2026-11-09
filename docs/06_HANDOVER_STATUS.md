@@ -214,6 +214,7 @@ compare_hashes: 首个分叉仍为 tick 32001 的 pos（注入发生前）→ �
 
 ### 8.6 分叉可视化与相机导航（新）
 - 回放验证器在首个记录 tick 额外导出同 tick 截图 `coop_shot_runN.png` 与相机变换 `coop_cam_runN.json`（`Testing/CameraProbe.cs`）。
+- 回放截图默认沿用存档相机（实测指向右下安全区，无单位交互）。用 `run_replay_verify.ps1 -ShotCam "cx,cy,w,h"` 覆盖到交互区（实测 6666 的分叉集中在 x≈37–97、y≈52–112，用 `-ShotCam "75,85,64,40"` 后截图覆盖左侧交互区；引擎会按地图边界轻微夹紧 X）。
 - 新增 `scripts/build_divergence_report.py`：生成自包含 HTML，左=世界坐标分叉散点/箭头，右=**两张同 tick 截图上按坐标画分叉框**（实线本跑/虚线另一跑，优先视野内），下=逐 tick 分项时间线。示例产物：`analysis/divergence_6666/index.html`（已 gitignore）。
 - MCP 新增 `get_camera` / `set_camera`：可移动到任意世界坐标/实体并缩放后自动截图，用于放大查看差异点。实测相机移动后保持、画面随之改变。
 
