@@ -122,3 +122,32 @@ TABCoopMod.log
 ```
 
 用 `scripts/uninstall_mod.ps1` 一键清理。
+
+---
+
+## 6. 2026-11-09 第二轮（会话2）：自动化确定性测试台落地 + 实证关键阻塞
+
+> 详细技术结论见 **`docs/07_TECHNICAL_HARD_PROBLEMS.md`**（尤其 §0 / §0.5）。
+
+### 6.1 已完成（本轮新增，编译 0/0，实机注入 OK=14 类）
+- **确定性固定步长时钟**：`Determinism/LockstepClock.cs` 新增 `ITickGate`（`AlwaysReady/Manual/TurnInput` 骨架）、`LogicTickActive`（跨线程，修复原先 Task 线程拿不到 `[ThreadStatic]` 标志的问题）、`LoadingLevel`；`UpdateGameLogic` 前缀按 gate 精确推进 `GameTime=Last+33.33`（ready）或夹紧（blocked）；`LoadPhysics/LoadPhysicsOld` 在确定性模式下直接跳过后台线程。
+- **自动化回放验证器** `Testing/DeterministicReplayVerifier` + `TestHarnessConfig` + `ReplayTimeline`（纯逻辑可离线单测）+ `TestingLifecyclePatches`：主菜单就绪后自动载入存档 → 等实体稳定取基线 → 逐 tick 记录 StateHash 到 `.timeline` → 两进程各跑一遍 → `compare_hashes.ps1` 比对。触发全走环境变量（见 07 文档 / 脚本头）。
+- **脚本化操作注入** `Testing/ScriptedCommandDriver`（默认 +10 帐篷 / +30 移动 / +60 训练；支持 `TABCOOP_SCENARIO` 文本脚本）。
+- **网络故障注入** `Networking/ChaosTransport`（延迟/抖动/丢包/断连窗口，seeded，`Delivered/Dropped` 统计），经 `CoopSessionManager.CreateTransport` 自动包裹。
+- **StateHasher v2**：新增投射物 / 生产队列 / 预留量子校验和，全反射实现（不碰内部类型），顺序无关。
+- **追加确定性尝试（已落地，未解决）**：独立 `DXRandomCtorPatch`（Hook 无参构造定种）、`GameBridge.SortEntitiesById`（装载后按 ID 重排实体）。详见 07 §0。
+- **修复**：空选中右键不再被吞；每帧复位 `SuppressIndividualMoveExecution/InQueueAutoAdvance`；`StopSession` 清回调与重入标志、修剪 `_hostTickHashes`；硬编码混淆名收进 `ObfuscatedSymbols`；`ModLogger` 支持 `TABCOOP_LOG_NAME`（多开分日志）。
+- **关键运行时修复**：`GameBridge.CurrentLevelState` 原先强转 `internal` 的 `ZXLevelState` 会在运行时抛 `TypeAccessException`；已改为返回 `object` + 反射读取（`GetLevelInt` 等）。`StateHasher`/`GameBridge` 实体路径同样改为 `object` + 反射。
+
+### 6.2 实测结论（重要）
+- 注入链、14 个 Harmony 补丁类、主菜单按钮 **全部正常**（`Classes OK=14, failed-tolerant=0`，0 missing）。
+- 自动载入存档**能进入关卡**（已修：必须等主菜单 `OnLoad` 后再加载，否则 NRE）。
+- 两进程同存档对比，经"载入前启用沙盒 + `DXRandom` 无参构造定种 + 实体按 ID 重排 + DXGuid 加载期不走同步 ID"多步修复后：**tick、entities、life、proj、prod、resv、经济全部一致，只剩 `pos`（位置）分叉**（`1_Backup.zxsav` tick 31925，entities=3017 两跑相同）。问题已精确收敛到**每 tick 的移动/物理位置更新**。详见 `docs/07 §0`。
+- 全局串行化 `DXHelper_Task.For` 是**负优化**（entities/life 重新分叉），已回退。不要全局串行。
+- **位置 diff 诊断**（新增 `scripts/compare_pos.ps1`）：两跑实体 ID 集合一致，位置不同的**只有移动中的单位（僵尸/市民）**，静态实体完全一致；偏移随 tick **累积增长**（1 tick≈0.16，95 tick≈1.2）→ 判定为**逐 tick 移动积分不确定**（疑似按真实时间而非固定 `GameTime` 推进）。已新增 `LockstepClock.ResetBehaviourRandom` 重置 `DXBehaviour<BData>.GlobalRandom`（源码种子来自 `DXRandom.Global.Next()`），但未完全解决；详见 `docs/07 §0.1`。
+- 指令注入仍撞内部类型 `TypeAccessException`（`CommandExecutor`/`ScriptedCommandDriver` 未反射化），本轮降级为 `SKIP`，详见 `docs/07 §0.5`。
+
+### 6.3 接手后第一优先级
+1. 按 `docs/07 §0` 攻克**存档加载确定性**（Hook `DXRandom` 无参构造函数 / 所有 `System.Random` / 加载期并行实体创建）。
+2. 按 `docs/07 §0.5` 把 `CommandExecutor` 全量反射化，让脚本注入真正生效。
+3. 之后才回到原 Step 2（暂停/倍速/市长同步，见 `docs/07 §5`）。

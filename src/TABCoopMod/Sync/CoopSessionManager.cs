@@ -9,6 +9,7 @@ using TABCoopMod.Core;
 using TABCoopMod.Determinism;
 using TABCoopMod.Networking;
 using TABCoopMod.Patches;
+using TABCoopMod.Testing;
 using TABCoopMod.UI;
 using ZX.GUI;
 
@@ -55,7 +56,7 @@ namespace TABCoopMod.Sync
         public static void StartHostSession(bool useLoopback)
         {
             StopSession();
-            Transport = useLoopback ? (INetworkTransport)new LocalTcpLoopbackTransport() : new SteamP2PTransport();
+            Transport = CreateTransport(useLoopback);
             BindTransportEvents();
             Transport.StartHost(3);
 
@@ -67,7 +68,7 @@ namespace TABCoopMod.Sync
         public static void JoinSession(bool useLoopback, string targetAddressOrSteamId)
         {
             StopSession();
-            Transport = useLoopback ? (INetworkTransport)new LocalTcpLoopbackTransport() : new SteamP2PTransport();
+            Transport = CreateTransport(useLoopback);
             BindTransportEvents();
             Transport.ConnectToHost(targetAddressOrSteamId);
 
@@ -78,7 +79,13 @@ namespace TABCoopMod.Sync
         public static void StopSession()
         {
             CommandInterceptor.IsInterceptionEnabled = false;
+            CommandInterceptor.OnLocalCommandCaptured = null;
+            CommandInterceptor.SuppressIndividualMoveExecution = false;
+            CommandInterceptor.InQueueAutoAdvance = false;
+            CommandExecutor.IsReplayingCommand = false;
             IsInSyncedLevel = false;
+            _lastCheckedSimTick = -1;
+            _hostTickHashes.Clear();
             LockstepClock.DisableDeterministicSandbox();
             AllyStates.Clear();
             _localOutgoingQueue.Clear();
@@ -89,6 +96,20 @@ namespace TABCoopMod.Sync
                 Transport.Dispose();
                 Transport = null;
             }
+        }
+
+        private static INetworkTransport CreateTransport(bool useLoopback)
+        {
+            INetworkTransport transport = useLoopback
+                ? (INetworkTransport)new LocalTcpLoopbackTransport()
+                : new SteamP2PTransport();
+
+            if (TestHarnessConfig.HasChaos)
+            {
+                transport = new ChaosTransport(transport, ChaosConfig.FromString(TestHarnessConfig.ChaosSpec));
+                ModLogger.Info($"[CoopSessionManager] Chaos injection active: {TestHarnessConfig.ChaosSpec}");
+            }
+            return transport;
         }
 
         private static void BindTransportEvents()
@@ -289,6 +310,16 @@ namespace TABCoopMod.Sync
             if (curTick > 0 && curTick % 60 == 0 && curTick != _lastCheckedSimTick)
             {
                 _lastCheckedSimTick = curTick;
+
+                // Prune stale host hashes (keep ~20s of history) so the dictionary cannot grow unbounded.
+                if (Transport.IsHost && _hostTickHashes.Count > 0)
+                {
+                    var stale = new List<int>();
+                    foreach (var k in _hostTickHashes.Keys)
+                        if (k < curTick - 600) stale.Add(k);
+                    foreach (var k in stale) _hostTickHashes.Remove(k);
+                }
+
                 var digest = StateHasher.ComputeDigest();
 
                 if (Transport.IsHost)

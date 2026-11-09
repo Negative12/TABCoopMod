@@ -292,7 +292,7 @@ namespace TABCoopMod.Commands
 
             ulong builderId = netCmd.ExecutorEntityIds.Length > 0 ? netCmd.ExecutorEntityIds[0] : 0UL;
             ZXEntity builder = (builderId != 0 ? DXGame.Current?.GetEntityByID(builderId) as ZXEntity : null)
-                               ?? GameBridge.CurrentLevelState?.CurrentCommandCenter;
+                               ?? (GameBridge.GetCommandCenterEntity() as ZXEntity);
 
             if (builder == null) return;
 

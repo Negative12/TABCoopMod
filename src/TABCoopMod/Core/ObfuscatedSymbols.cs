@@ -82,6 +82,7 @@ namespace TABCoopMod.Core
         // ====================================================================
         public const string Method_ZXCommand_GetById           = "#=zqRskexw=";
         public const string Method_ZXCommand_GetByName         = "#=z4koKvss=";
+        public const string Method_ZXCommand_GetGeneric        = "#=z5pCZsgI=";
         public const string Method_ZXCommand_Execute           = "#=zfmgzkuw=";
         public const string Method_ZXCommand_CanExecute        = "#=zKc8Kpc_EaFhf";
         public const string Method_ZXCommand_IsVisible         = "#=zXAX1VeKTLe7O";
@@ -127,6 +128,7 @@ namespace TABCoopMod.Core
         public const string Method_MsgBox_ShowOkCancel         = "#=zy6vF6BSAUKyT";
         public const string Method_MsgBox_ShowYesNo            = "#=zFNDB6pz7Wqg3";
         public const string Method_MsgBox_ShowInputBox         = "#=znd_PcbSNuH79";
+        public const string Method_MsgBox_ShowListSelector     = "#=zYjeCpah9Jpv2S1i8lQ==";
         public const string Method_MsgBox_GetPlainTextRenderer = "#=zth32r9N3TXbR";
 
         public const string Method_ZXWindow_AddBottomButton    = "#=zJMx0W0Q=";

@@ -214,7 +214,31 @@ namespace TABCoopMod.Core
         public static DXSystem LevelSystemInstance => _mLevelSysCurrent?.Invoke(null, null) as DXSystem;
         public static DXSystem MainMenuInstance => _mMainMenuCurrent?.Invoke(null, null) as DXSystem;
         public static ZXGameState CurrentGameState => (ZXGameState)_mGameStateCurrent?.Invoke(null, null);
-        public static ZXLevelState CurrentLevelState => (ZXLevelState)_mLevelStateCurrent?.Invoke(null, null);
+
+        /// <summary>
+        /// ZXLevelState is an internal type; a direct cast fails at runtime with TypeAccessException.
+        /// Everything touching it must go through reflection, so it is returned as object.
+        /// </summary>
+        public static object CurrentLevelState => _mLevelStateCurrent?.Invoke(null, null);
+        public static Type LevelStateType => _mLevelStateCurrent?.ReturnType;
+
+        private static readonly Dictionary<string, PropertyInfo> _levelPropCache = new Dictionary<string, PropertyInfo>();
+
+        public static PropertyInfo GetLevelProperty(string name)
+        {
+            if (_levelPropCache.TryGetValue(name, out var cached)) return cached;
+            PropertyInfo prop = LevelStateType?.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+            _levelPropCache[name] = prop;
+            return prop;
+        }
+
+        public static int GetLevelInt(string name)
+        {
+            var prop = GetLevelProperty(name);
+            var ls = CurrentLevelState;
+            if (prop == null || ls == null) return 0;
+            try { return Convert.ToInt32(prop.GetValue(ls)); } catch { return 0; }
+        }
 
         public static string Localize(string key) => _mLocalize != null ? (string)_mLocalize.Invoke(null, new object[] { key }) : key;
         public static string GetSavesDirectory() => (string)_mGetSavesDir?.Invoke(null, null);
@@ -296,6 +320,154 @@ namespace TABCoopMod.Core
         public static ZXWindow ShowYesNoMessageBox(string title, string message, Action onYes, Action onNo = null)
         {
             return (ZXWindow)_methodShowYesNo.Invoke(null, new object[] { title, message, onYes, onNo });
+        }
+
+        // ====================================================================
+        // Deterministic test-harness helpers.
+        // NOTE: all game entity/component classes are internal, so these return base/public
+        // types (DXEntity) and use reflection internally. Never cast to ZXEntity here.
+        // ====================================================================
+
+        private static readonly Dictionary<Type, PropertyInfo> _teamPropCache = new Dictionary<Type, PropertyInfo>();
+        private static readonly Dictionary<Type, PropertyInfo> _lifePropCache = new Dictionary<Type, PropertyInfo>();
+        private static readonly Dictionary<Type, PropertyInfo> _ordersPropCache = new Dictionary<Type, PropertyInfo>();
+        private static PropertyInfo _ccProp;
+
+        public static void SortEntitiesById()
+        {
+            try
+            {
+                var game = DXGame.Current;
+                if (game == null) return;
+                var field = AccessTools.Field(typeof(DXGame), "_Entities");
+                if (field?.GetValue(game) is List<DXEntity> list && list.Count > 1)
+                {
+                    list.Sort((a, b) => a.ID.CompareTo(b.ID));
+                    ModLogger.Info($"[GameBridge] Re-ordered {list.Count} entities by ID for deterministic update order.");
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] SortEntitiesById failed: {ex.Message}");
+            }
+        }
+
+        public static List<DXEntity> GetPlayerEntities()
+        {
+            var result = new List<DXEntity>();
+            var game = DXGame.Current;
+            if (game?.Entities == null) return result;
+
+            foreach (var entity in game.Entities)
+            {
+                if (entity == null || entity.Disposed) continue;
+                if ((entity.ID & 0x8000000000000000UL) != 0) continue;
+                if (IsPlayerTeam(entity)) result.Add(entity);
+            }
+            result.Sort((a, b) => a.ID.CompareTo(b.ID));
+            return result;
+        }
+
+        public static List<DXEntity> GetPlayerEntitiesByTypeName(string typeNameSubstring, int maxCount = int.MaxValue)
+        {
+            var result = new List<DXEntity>();
+            if (string.IsNullOrEmpty(typeNameSubstring)) return result;
+
+            foreach (var entity in GetPlayerEntities())
+            {
+                if (entity.GetType().Name.IndexOf(typeNameSubstring, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    result.Add(entity);
+                    if (result.Count >= maxCount) break;
+                }
+            }
+            return result;
+        }
+
+        private static bool IsPlayerTeam(object entity)
+        {
+            Type t = entity.GetType();
+            if (!_teamPropCache.TryGetValue(t, out PropertyInfo prop))
+            {
+                prop = t.GetProperty("Team", BindingFlags.Public | BindingFlags.Instance);
+                _teamPropCache[t] = prop;
+            }
+            if (prop == null) return false;
+            try { return string.Equals(prop.GetValue(entity)?.ToString(), "Player", StringComparison.OrdinalIgnoreCase); }
+            catch { return false; }
+        }
+
+        public static DXEntity GetCommandCenterEntity()
+        {
+            var ls = CurrentLevelState;
+            if (ls == null) return null;
+            if (_ccProp == null)
+                _ccProp = LevelStateType?.GetProperty("CurrentCommandCenter", BindingFlags.Public | BindingFlags.Instance);
+            if (_ccProp == null) return null;
+            try { return _ccProp.GetValue(ls) as DXEntity; } catch { return null; }
+        }
+
+        public static object GetLifeObject(object entity)
+        {
+            if (entity == null || _mGetEntityLife == null) return null;
+            if (!_mGetEntityLife.DeclaringType.IsInstanceOfType(entity)) return null;
+            try { return _mGetEntityLife.Invoke(entity, null); } catch { return null; }
+        }
+
+        public static int GetLifeValue(object entity)
+        {
+            object life = GetLifeObject(entity);
+            if (life == null) return 0;
+            Type t = life.GetType();
+            if (!_lifePropCache.TryGetValue(t, out PropertyInfo prop))
+            {
+                prop = t.GetProperty("Life", BindingFlags.Public | BindingFlags.Instance);
+                _lifePropCache[t] = prop;
+            }
+            if (prop == null) return 0;
+            try { return Convert.ToInt32(prop.GetValue(life)); } catch { return 0; }
+        }
+
+        public static object GetCommandableObject(object entity)
+        {
+            if (entity == null || _mGetEntityCmd == null) return null;
+            if (!_mGetEntityCmd.DeclaringType.IsInstanceOfType(entity)) return null;
+            try { return _mGetEntityCmd.Invoke(entity, null); } catch { return null; }
+        }
+
+        public static IList GetOrdersQueued(object cmdComp)
+        {
+            if (cmdComp == null) return null;
+            Type t = cmdComp.GetType();
+            if (!_ordersPropCache.TryGetValue(t, out PropertyInfo prop))
+            {
+                prop = t.GetProperty("OrdersQueued", BindingFlags.Public | BindingFlags.Instance);
+                _ordersPropCache[t] = prop;
+            }
+            if (prop == null) return null;
+            try { return prop.GetValue(cmdComp) as IList; } catch { return null; }
+        }
+
+        public static int GetOrderCommandId(object order)
+        {
+            if (order == null) return 0;
+            Type t = order.GetType();
+            if (!_idCommandCache.TryGetValue(t, out PropertyInfo prop))
+            {
+                prop = t.GetProperty("IDCommand", BindingFlags.Public | BindingFlags.Instance);
+                _idCommandCache[t] = prop;
+            }
+            if (prop == null) return 0;
+            try { return Convert.ToInt32(prop.GetValue(order)); } catch { return 0; }
+        }
+
+        private static readonly Dictionary<Type, PropertyInfo> _idCommandCache = new Dictionary<Type, PropertyInfo>();
+
+        public static ZXCommand GetCommandGeneric(Type commandType)
+        {
+            var generic = AccessTools.Method(typeof(ZXCommand), ObfuscatedSymbols.Method_ZXCommand_GetGeneric);
+            if (generic == null || !generic.IsGenericMethodDefinition) return null;
+            return generic.MakeGenericMethod(commandType).Invoke(null, null) as ZXCommand;
         }
     }
 }

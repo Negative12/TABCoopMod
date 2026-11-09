@@ -57,7 +57,7 @@ namespace TABCoopMod.UI
 
                 var showListMethod = AccessTools.Method(
                     GameBridge.TypeZXMessageBoxHelper,
-                    "#=zYjeCpah9Jpv2S1i8lQ==",
+                    ObfuscatedSymbols.Method_MsgBox_ShowListSelector,
                     new[] { typeof(ZXWindowMessage), typeof(Action<int>), typeof(Action), typeof(string[]) });
 
                 if (showListMethod != null)

@@ -85,8 +85,10 @@ namespace TABCoopMod.Patches
                 .Select(e => e.ID)
                 .ToArray();
 
+            // Nothing movable selected: let vanilla handle the click (e.g. right-clicking with a
+            // building selected). Swallowing it here would silently eat legitimate input.
             if (unitIds.Length == 0)
-                return false;
+                return true;
 
             var netCmd = new NetCommand
             {
@@ -197,6 +199,20 @@ namespace TABCoopMod.Patches
         public static void Finalizer()
         {
             CommandInterceptor.SuppressIndividualMoveExecution = false;
+        }
+    }
+
+    // Reset per-frame command guards at the very start of every render frame.
+    // Some input paths cannot be patched (OMiniMap.OnMouseRightDown throws in MonoMod), so the
+    // suppression flag set by GroupMove can otherwise leak into later frames and eat real orders.
+    [HarmonyPatch(typeof(DXGame), "StartFrame")]
+    public static class Patch_ResetCommandGuardsOnStartFrame
+    {
+        [HarmonyPrefix]
+        public static void Prefix()
+        {
+            CommandInterceptor.SuppressIndividualMoveExecution = false;
+            CommandInterceptor.InQueueAutoAdvance = false;
         }
     }
 

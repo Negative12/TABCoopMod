@@ -17,7 +17,11 @@ namespace TABCoopMod.Core
             {
                 string modDir = Path.GetDirectoryName(typeof(ModLogger).Assembly.Location);
                 string baseDir = !string.IsNullOrEmpty(modDir) ? modDir : AppDomain.CurrentDomain.BaseDirectory;
-                string fileName = customLogFileName ?? "TABCoopMod.log";
+                // Allow multi-instance tests to give each process its own log file.
+                string envLogName = Environment.GetEnvironmentVariable("TABCOOP_LOG_NAME");
+                string fileName = !string.IsNullOrWhiteSpace(envLogName)
+                    ? envLogName.Trim()
+                    : (customLogFileName ?? "TABCoopMod.log");
                 _logFilePath = Path.Combine(baseDir, fileName);
 
                 lock (_lock)
