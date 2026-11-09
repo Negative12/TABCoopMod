@@ -125,10 +125,12 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 
 ## 7. 截图
 
-- 目录：`<游戏目录>\tabcoop_shots\`（=`TestHarnessConfig.OutputDirectory/tabcoop_shots`）。
+- **默认目录：本工作目录 `<repo_root>\tabcoop_shots\`**（由 `run_game_with_control.ps1` 设置 `TABCOOP_SHOT_DIR`，直接写入工作目录，无需再搬）。
+- 若手动启动游戏、未设置 `TABCOOP_SHOT_DIR`，回退到 `<游戏目录>\tabcoop_shots\`。
 - 命名：`<序号>_t<tick>_<时分秒_毫秒>_<tag>.png`，例如 `00002_t32786_160213_380_move_units.png`。
-- 分辨率与渲染目标一致（实测 2880×1800，约 10MB/张）。体积较大，自动化批量跑时注意清理。
+- 分辨率与渲染目标一致（实测 2880×1800，约 10MB/张）。体积较大，自动化批量跑时注意清理；`tabcoop_shots/` 已在 `.gitignore` 中，不会误提交。
 - 画面经实测为真实游戏渲染（非黑屏）。
+- 历史截图已手动迁移至 `tabcoop_shots/`（无需重跑）。
 
 ---
 

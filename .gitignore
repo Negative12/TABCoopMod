@@ -12,5 +12,8 @@ lib/*.pdb
 # Logs
 *.log
 
+# Automation screenshots (large; written by the MCP control server)
+tabcoop_shots/
+
 # Local notes
 .notes/

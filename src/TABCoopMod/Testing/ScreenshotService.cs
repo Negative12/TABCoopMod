@@ -37,9 +37,19 @@ namespace TABCoopMod.Testing
             {
                 if (_dir == null)
                 {
-                    string baseDir = TestHarnessConfig.OutputDirectory;
-                    if (string.IsNullOrEmpty(baseDir)) baseDir = AppDomain.CurrentDomain.BaseDirectory;
-                    _dir = Path.Combine(baseDir, "tabcoop_shots");
+                    // Prefer the workspace folder supplied by the launcher (TABCOOP_SHOT_DIR), so
+                    // screenshots land in the repo for review. Fall back to <game dir>\tabcoop_shots.
+                    string configured = TestHarnessConfig.ShotDir;
+                    if (!string.IsNullOrEmpty(configured))
+                    {
+                        _dir = configured;
+                    }
+                    else
+                    {
+                        string baseDir = TestHarnessConfig.OutputDirectory;
+                        if (string.IsNullOrEmpty(baseDir)) baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                        _dir = Path.Combine(baseDir, "tabcoop_shots");
+                    }
                 }
                 return _dir;
             }

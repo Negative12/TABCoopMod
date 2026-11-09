@@ -32,6 +32,9 @@ namespace TABCoopMod.Testing
         /// <summary>Auto-save a PNG after every mutating control tool (default on; TABCOOP_AUTO_SHOT=0 disables).</summary>
         public static bool AutoShot { get; private set; }
 
+        /// <summary>Directory screenshots are written to (TABCOOP_SHOT_DIR). Set by the launcher to the workspace folder.</summary>
+        public static string ShotDir { get; private set; }
+
         /// <summary>True when the MCP control server is enabled (TABCOOP_CONTROL_PORT set).</summary>
         public static bool ControlEnabled => ControlPort > 0;
 
@@ -58,6 +61,7 @@ namespace TABCoopMod.Testing
             PosDump = Env("TABCOOP_POS_DUMP") == "1";
             ControlPort = ParseInt(Env("TABCOOP_CONTROL_PORT"), 0);
             AutoShot = Env("TABCOOP_AUTO_SHOT") != "0";
+            ShotDir = Env("TABCOOP_SHOT_DIR");
 
             string logDir = null;
             try { logDir = Path.GetDirectoryName(ModLogger.LogFilePath); } catch { }

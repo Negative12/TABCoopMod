@@ -10,6 +10,7 @@ param(
     [string]$SavePath = "",
     [int]$ControlPort = 27901,
     [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
+    [string]$ShotDir = "",
     [switch]$NoAutoLoad,
     [switch]$AutoShotOff
 )
@@ -18,10 +19,17 @@ $ErrorActionPreference = "Stop"
 $exe = Join-Path $GameDir "TheyAreBillions.exe"
 if (-not (Test-Path $exe)) { Write-Error "Game exe not found: $exe"; exit 2 }
 
+# Screenshots go to the workspace (repo) by default so they are easy to review / read back.
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot = Split-Path -Parent $ScriptDir
+if ([string]::IsNullOrEmpty($ShotDir)) { $ShotDir = Join-Path $RepoRoot "tabcoop_shots" }
+New-Item -ItemType Directory -Force -Path $ShotDir | Out-Null
+
 Get-Process *TheyAreBillions* -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 600
 
 $env:TABCOOP_CONTROL_PORT = "$ControlPort"
+$env:TABCOOP_SHOT_DIR = $ShotDir
 if ($AutoShotOff) { $env:TABCOOP_AUTO_SHOT = "0" } else { $env:TABCOOP_AUTO_SHOT = "1" }
 
 Remove-Item Env:TABCOOP_TEST -ErrorAction SilentlyContinue
@@ -35,4 +43,4 @@ if (-not $NoAutoLoad -and $SavePath) {
 
 Start-Process -FilePath $exe -WorkingDirectory $GameDir
 $auto = if ($SavePath -and -not $NoAutoLoad) { $SavePath } else { "no" }
-Write-Host "Launched TheyAreBillions. Control port=$ControlPort  autoLoad=$auto  autoShot=$($env:TABCOOP_AUTO_SHOT)"
+Write-Host "Launched TheyAreBillions. Control port=$ControlPort  autoLoad=$auto  autoShot=$($env:TABCOOP_AUTO_SHOT)  shotDir=$ShotDir"

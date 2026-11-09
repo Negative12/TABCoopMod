@@ -188,7 +188,7 @@ compare_hashes: 首个分叉仍为 tick 32001 的 pos（注入发生前）→ �
 
 ### 8.1 新增能力
 - **游戏内控制服务** `Testing/ControlServer.cs`：`TABCOOP_CONTROL_PORT` 开启后监听 `127.0.0.1`，换行 JSON；socket 线程只收发，**所有操作排队到 `DXGame.StartFrame` 主线程执行**，统一走 `CommandExecutor`/`NetCommand`。
-- **截图服务** `Testing/ScreenshotService.cs`：用引擎自带 `DXGame.CaptureScreen()` 存 PNG；改动类工具**延迟 2 帧**抓图，确保反映操作效果；目录 `<游戏目录>\tabcoop_shots\`。
+- **截图服务** `Testing/ScreenshotService.cs`：用引擎自带 `DXGame.CaptureScreen()` 存 PNG；改动类工具**延迟 2 帧**抓图，确保反映操作效果；目录为本工作目录 `tabcoop_shots/`（启动脚本经 `TABCOOP_SHOT_DIR` 指定，未设置时回退 `<游戏目录>/tabcoop_shots`）。
 - **独立 MCP 服务端** `src/TABCoopMod.Mcp/`（net10.0，无第三方依赖，手写 MCP stdio JSON-RPC）：把 10 个工具转发到控制服务，并在返回前等待截图落盘。
 - **配置/脚本**：`.mcp.json`（`tabcoop-game`）、`scripts/build_mcp_server.ps1`、`scripts/run_game_with_control.ps1`、`scripts/control_smoke.ps1`。
 - `TestHarnessConfig` 新增 `ControlPort`/`AutoShot`/`ControlEnabled`；控制模式可单独自动读档且**不触发回放验证器**。
