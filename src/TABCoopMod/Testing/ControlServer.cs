@@ -189,6 +189,8 @@ namespace TABCoopMod.Testing
                 case "set_paused": return SetPaused(args);
                 case "issue_command": return IssueRawCommand(args);
                 case "screenshot": return TakeScreenshot(args);
+                case "get_camera": return GetCamera();
+                case "set_camera": return SetCamera(args);
                 default: throw new InvalidOperationException($"unknown tool '{tool}'");
             }
         }
@@ -443,6 +445,60 @@ namespace TABCoopMod.Testing
             };
         }
 
+        private static object GetCamera()
+        {
+            var c = CameraProbe.Capture();
+            return new Dictionary<string, object>
+            {
+                ["valid"] = c.Valid,
+                ["x"] = c.X,
+                ["y"] = c.Y,
+                ["w"] = c.W,
+                ["h"] = c.H,
+                ["screenW"] = c.ScreenW,
+                ["screenH"] = c.ScreenH,
+                ["windowW"] = c.WindowW,
+                ["windowH"] = c.WindowH
+            };
+        }
+
+        private static object SetCamera(Dictionary<string, object> args)
+        {
+            var scene = DXScene.Current;
+            if (scene == null) throw new InvalidOperationException("no active scene");
+
+            RectangleF cur = scene.CameraArea;
+            float w = GetFloat(args, "w", cur.Width);
+            float h = GetFloat(args, "h", cur.Height);
+            float zoom = GetFloat(args, "zoom", 1f);
+            if (zoom > 0f && Math.Abs(zoom - 1f) > 1e-4f) { w /= zoom; h /= zoom; }
+            if (w <= 0f || h <= 0f) throw new ArgumentException("invalid camera size");
+
+            float cx, cy;
+            ulong eid = GetULong(args, "entityId", 0);
+            if (eid != 0UL)
+            {
+                var ent = DXGame.Current?.GetEntityByID(eid);
+                if (ent == null) throw new ArgumentException($"entity {eid} not found");
+                cx = ent.Position.X; cy = ent.Position.Y;
+            }
+            else
+            {
+                cx = GetFloat(args, "x", cur.X + cur.Width / 2f);
+                cy = GetFloat(args, "y", cur.Y + cur.Height / 2f);
+            }
+
+            scene.CameraArea = new RectangleF(cx - w / 2f, cy - h / 2f, w, h);
+            RectangleF applied = scene.CameraArea; // engine may clamp to map bounds
+
+            return new Dictionary<string, object>
+            {
+                ["x"] = applied.X, ["y"] = applied.Y, ["w"] = applied.Width, ["h"] = applied.Height,
+                ["centerX"] = applied.X + applied.Width / 2f,
+                ["centerY"] = applied.Y + applied.Height / 2f
+            };
+        }
+
         private static void AttachScreenshot(string tool, Dictionary<string, object> args, object result)
         {
             if (!(result is Dictionary<string, object> dict)) return;
@@ -465,6 +521,7 @@ namespace TABCoopMod.Testing
                 case "cancel_queued_order":
                 case "set_paused":
                 case "issue_command":
+                case "set_camera":
                     return true;
                 default:
                     return false;

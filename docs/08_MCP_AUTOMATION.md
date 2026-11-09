@@ -92,6 +92,8 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 | `set_paused` | 暂停/恢复 | `paused` |
 | `issue_command` | 原始 NetCommand 逃生口 | `type`,`commandId`,`ids[]`,`targetEntityId`,`x`,`y`… |
 | `screenshot` | 立即截图并返回路径 | `tag?` |
+| `get_camera` | 当前相机世界矩形 + 屏幕尺寸（用于世界→像素映射） | — |
+| `set_camera` | 移动/缩放相机到世界坐标或某个实体，并自动延迟截图 | `x`,`y`,`w`,`h`,`zoom`,`entityId` |
 
 **实体 ID 是 64 位，超过 JS 安全整数范围，工具统一以字符串返回**；传参用字符串或数字均可。
 改动类工具返回结果含 `screenshot` 字段（PNG 绝对路径）；MCP 服务端会**等待文件落盘**再返回，可直接用读图工具打开。
@@ -176,3 +178,31 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 | `unknown tool 'game_state'` | 控制端为旧 DLL，重新 `install_mod.ps1` |
 | `.mcp.json` 未被加载 | 需重启 Claude Code 并批准项目 MCP 服务器 |
 | 截图很大/很慢 | `-AutoShotOff`；或仅在需要时调 `screenshot` |
+
+---
+
+## 11. 分叉可视化 HTML 报告（同 tick 截图标注）
+
+把两进程回放的**同 tick** 数据可视化，直接看出"分叉发生在哪些位置"：
+
+1. 回放验证器在首个记录 tick 除了导出 `coop_pos_run1/2.txt`，现在还导出
+   `coop_shot_run1/2.png`（同 tick 截图）与 `coop_cam_run1/2.json`（相机变换）。
+2. 生成报告：
+   ```powershell
+   python scripts/build_divergence_report.py `
+     --pos1 "<game>\coop_pos_run1.txt" --pos2 "<game>\coop_pos_run2.txt" `
+     --tl1 "<game>\coop_replay_run1.timeline" --tl2 "<game>\coop_replay_run2.timeline" `
+     --shot1 ../../tabcoop_shots/replay_6666_run1_t168601.png `
+     --shot2 ../../tabcoop_shots/replay_6666_run2_t168601.png `
+     --cam1 "<game>\coop_cam_run1.json" --cam2 "<game>\coop_cam_run2.json" `
+     --out analysis/divergence_6666/index.html
+   ```
+   （把 `coop_shot_runN.png` 复制到 `tabcoop_shots/replay_6666_runN_t<tick>.png` 以便相对引用。）
+3. 报告内容：
+   - 左：世界坐标散点/箭头（两跑同一 tick 的逐实位移，颜色/长度表示位移大小，×表示独有实体）。
+   - 右：**两张同 tick 截图**，按坐标在每个分叉实体处画框（实线=本跑位置，虚线=另一跑位置），默认优先标注视野内分叉点。
+   - 下：逐 tick 分叉时间线（实体数曲线 + pos/life/proj/prod/resv 一致性色带）。
+   - 交互：最小位移过滤、类型过滤、最多框数、缩放/平移、悬停查看实体 id/类型/位移。
+4. 想看某个分叉点的放大实景，用 MCP：`set_camera {x,y,zoom}` 或 `set_camera {entityId}` → 自动截图到 `tabcoop_shots/`；`get_camera` 可回读相机矩形。
+
+> 说明：回放截图与坐标来自同一 tick（168601），但相机由存档恢复；两跑相机一致时可直接叠加对比。

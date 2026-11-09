@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Text;
 using DXVision;
@@ -202,6 +203,35 @@ namespace TABCoopMod.Testing
             }
         }
 
+        /// <summary>
+        /// At the first recorded tick, dump positions plus a screenshot and the camera transform so a
+        /// report can box divergent entities directly on the image (see scripts/build_divergence_report.py).
+        /// </summary>
+        private static void DumpSnapshot()
+        {
+            DumpPositions();
+            try
+            {
+                var game = DXGame.Current;
+                if (game == null) return;
+
+                string shotPath = Path.Combine(TestHarnessConfig.OutputDirectory, $"coop_shot_run{_currentRun}.png");
+                string camPath = Path.Combine(TestHarnessConfig.OutputDirectory, $"coop_cam_run{_currentRun}.json");
+
+                using (var bmp = game.CaptureScreen())
+                {
+                    if (bmp == null) return;
+                    bmp.Save(shotPath, ImageFormat.Png);
+                    CameraProbe.WriteJson(camPath, bmp.Width, bmp.Height);
+                    ModLogger.Info($"[ReplayVerifier] Dumped run{_currentRun} screenshot {bmp.Width}x{bmp.Height} -> {shotPath}; camera -> {camPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error("[ReplayVerifier] DumpSnapshot failed", ex);
+            }
+        }
+
         public static void OnAfterLogicTick(int tick)
         {
             if (_phase != Phase.Running || _baselineTick < 0) return;
@@ -228,7 +258,7 @@ namespace TABCoopMod.Testing
                 _records.Add(rec.ToJson());
 
                 if (TestHarnessConfig.PosDump && _records.Count == 1)
-                    DumpPositions();
+                    DumpSnapshot();
 
                 if (d.SimTick >= _baselineTick + _ticks)
                     FinishRun();

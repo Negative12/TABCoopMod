@@ -321,6 +321,22 @@ namespace TABCoopMod.Mcp
                 "Capture the current frame to a PNG and return its path (for human/vision review).",
                 new JsonObject { ["tag"] = Str("Optional label used in the file name.") }, new JsonArray()));
 
+            tools.Add(Tool("get_camera",
+                "Current camera world rectangle and screen size, for world→pixel mapping.",
+                new JsonObject(), new JsonArray()));
+
+            tools.Add(Tool("set_camera",
+                "Move and/or zoom the camera to a world position (or entity), then auto-capture a screenshot there.",
+                WithShot(new JsonObject
+                {
+                    ["x"] = Num("Target center world X."),
+                    ["y"] = Num("Target center world Y."),
+                    ["w"] = Num("Camera world width (optional)."),
+                    ["h"] = Num("Camera world height (optional)."),
+                    ["zoom"] = Num("Zoom factor (2 = 2x closer)."),
+                    ["entityId"] = Str("Center on this entity instead of x/y.")
+                }), new JsonArray()));
+
             return tools;
         }
     }

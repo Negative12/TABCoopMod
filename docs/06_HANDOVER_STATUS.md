@@ -212,3 +212,8 @@ compare_hashes: 首个分叉仍为 tick 32001 的 pos（注入发生前）→ �
 - **两进程确定性回放**（120 tick）：首个分叉 tick 168601 报 `[entities,pos,life,proj]`；两跑实体 7911 vs 7920、ID 集合差 18/27、`moved=3761`。**比战役档（只 `pos`）更严重** → 生存档暴露实体生成/死亡层不确定。详见 `docs/07 §0.1 追加`。
 - 结论：**后续确定性验证必须以生存档为准**，战役档仅作次要用例。
 
+### 8.6 分叉可视化与相机导航（新）
+- 回放验证器在首个记录 tick 额外导出同 tick 截图 `coop_shot_runN.png` 与相机变换 `coop_cam_runN.json`（`Testing/CameraProbe.cs`）。
+- 新增 `scripts/build_divergence_report.py`：生成自包含 HTML，左=世界坐标分叉散点/箭头，右=**两张同 tick 截图上按坐标画分叉框**（实线本跑/虚线另一跑，优先视野内），下=逐 tick 分项时间线。示例产物：`analysis/divergence_6666/index.html`（已 gitignore）。
+- MCP 新增 `get_camera` / `set_camera`：可移动到任意世界坐标/实体并缩放后自动截图，用于放大查看差异点。实测相机移动后保持、画面随之改变。
+

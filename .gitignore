@@ -15,5 +15,8 @@ lib/*.pdb
 # Automation screenshots (large; written by the MCP control server)
 tabcoop_shots/
 
+# Generated determinism reports (regenerate with scripts/build_divergence_report.py)
+analysis/
+
 # Local notes
 .notes/
