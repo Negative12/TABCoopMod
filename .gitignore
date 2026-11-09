@@ -1,0 +1,16 @@
+# Build artifacts
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Extracted engine assemblies (regenerate with scripts/extract_sdk.ps1)
+lib/*.dll
+lib/*.pdb
+
+# Logs
+*.log
+
+# Local notes
+.notes/
