@@ -100,6 +100,27 @@
 
 > 另：即使加载确定，`CoopSessionManager` 里客机加载房主快照后也必须在 `LoadSaveFileAndEnter` 前设置 `LoadingLevel=true` 并在 `InitLevel` 后置回 false，否则客机加载态同样会分叉。
 
+### 0.1 追加（会话3）：生存档 `6666.zxsav` 的分叉比战役档更严重
+
+用新 MCP/控制台设计与两进程 `run_replay_verify.ps1`，在**生存**中后期档 `6666.zxsav`（tick 168485，玩家实体 ~1020）上重跑 120 tick：
+
+```
+[compare] FAIL at index 0 (tick 168601): [entities,pos,life,proj]
+[pos] run1=7911 entities, run2=7920 entities
+[pos] ID set differs: onlyInRun1=18, onlyInRun2=27
+[pos] common=7893, moved(>0.01)=3761, maxDx=65.93, maxDy=151.68
+[pos] top moved: ZombieDressedA 908, ZombieWeakC 428, ... Worker_A 160
+```
+
+对比：**战役档 `1_Backup` 只暴露 `pos`；生存档额外暴露 `entities/life/proj`**。
+
+含义（重要）：
+- 战役档是"较容易"的用例，**仅凭战役 PASS/only-pos 会低估问题**。生存模式下还有**实体生成/死亡层面的不确定**（尸潮/僵尸生成、僵尸 AI、投射物/战斗结算）。`prod/resv/经济` 仍一致。
+- 因此后续确定性工作（hook 无参 `DXRandom`、加载并行、波次生成/死亡 RNG）**必须在生存档验证**；`6666.zxsav` 建议作为主测试档。
+- 附带观察：控制模式（不启用确定性沙盒）载入时 `entityCount≈30618`，而回放模式（载入前启用沙盒）两跑均为 ~7911/7920。两者是不同载入路径，实体总量差异很大——回放内部两跑可比，但需注意不要跨路径比较。
+
+> 结论：`docs/07 §0` 的"加载不确定"与本节"逐 tick 模拟不确定"在生存档同时存在；战役档只是恰好把后者收敛到 `pos`。
+
 ---
 
 ## 0.5 【已解决 · 会话3】指令注入撞到内部类型的 TypeAccessException

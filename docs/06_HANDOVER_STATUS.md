@@ -205,5 +205,10 @@ compare_hashes: 首个分叉仍为 tick 32001 的 pos（注入发生前）→ �
 - **存档模式实测**（`game_state` 新增 `gameMode/inCampaign/difficulty/survivalMode`）：`1_Backup.zxsav`=**Campaign**(Normal，~9.8k 实体/178 玩家实体)；`test.zxsav`/`900survival.zxsav`/`6666.zxsav`=**Survival**（`6666` 为发育完整的中后期档，1020 玩家实体，推荐做自动化操作测试）。战役与生存引擎确定性等效，但代表性不同，详见 08 §6。
 
 ### 8.4 尚未覆盖
-鼠标框选/点选/编队/摄像机、攻击/修理等需 commandId 的复合指令（可 `issue_command` 手动）、倍速/市长（executor 未实现）、真实键鼠事件注入。详见 08 §7。
+鼠标框选/点选/编队/摄像机、攻击/修理等需 commandId 的复合指令（可 `issue_command` 手动）、倍速/市长（executor 未实现）、真实键鼠事件注入。详见 08 §8。
+
+### 8.5 用新设计重走测试（生存档 `6666.zxsav`）
+- **MCP 操作链路**（控制台 + 生存档）：`game_state`(Survival,1020 玩家实体)→`set_paused(false)`→`list_entities`(3×SoldiersCenter, Worker/Sniper)→`move_units`(3 单位)→`train_unit`(Ranger)→`screenshot` 全部成功，自动截图落盘。
+- **两进程确定性回放**（120 tick）：首个分叉 tick 168601 报 `[entities,pos,life,proj]`；两跑实体 7911 vs 7920、ID 集合差 18/27、`moved=3761`。**比战役档（只 `pos`）更严重** → 生存档暴露实体生成/死亡层不确定。详见 `docs/07 §0.1 追加`。
+- 结论：**后续确定性验证必须以生存档为准**，战役档仅作次要用例。
 
