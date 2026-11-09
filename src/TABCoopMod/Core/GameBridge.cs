@@ -269,15 +269,18 @@ namespace TABCoopMod.Core
             }
         }
 
-        public static ZXCommand GetCommandById(int id) => (ZXCommand)_mCmdById.Invoke(null, new object[] { id });
-        public static ZXCommand GetCommandByName(string typeName) => (ZXCommand)_mCmdByName.Invoke(null, new object[] { typeName });
+        // NOTE: ZXCommand and ZXCommandTarget are internal types. Never cast to / `is`-check them here —
+        // the Desktop CLR throws TypeAccessException on castclass/isinst of an inaccessible type
+        // (铁律#3). All command execution paths therefore use object + reflection.
+        public static object GetCommandById(int id) => _mCmdById.Invoke(null, new object[] { id });
+        public static object GetCommandByName(string typeName) => _mCmdByName.Invoke(null, new object[] { typeName });
 
-        public static void ExecuteCommandOnEntity(ZXCommand cmd, ZXEntity executor, ZXCommandTarget target)
+        public static void ExecuteCommandOnEntity(object cmd, object executor, object target)
         {
             _mCmdExec.Invoke(cmd, new object[] { executor, target });
         }
 
-        public static void AssignGroupMoveTargets(List<DXEntity> entities, ZXCommand cmd, PointF destination)
+        public static void AssignGroupMoveTargets(List<DXEntity> entities, object cmd, PointF destination)
         {
             var levelSys = _mLevelSysCurrent.Invoke(null, null);
             if (levelSys != null)
@@ -286,18 +289,17 @@ namespace TABCoopMod.Core
             }
         }
 
-        public static ZXEntity PlaceBuilding(ZXEntity builder, ZXCommandTarget target, Type buildingType, bool isBonus = false, bool instant = false, DXEntityTemplate template = null)
+        public static object PlaceBuilding(object builder, object target, Type buildingType, bool isBonus = false, bool instant = false, DXEntityTemplate template = null)
         {
-            return (ZXEntity)_methodPlaceBuilding.Invoke(null, new object[] { builder, target, buildingType, isBonus, instant, template });
+            return _methodPlaceBuilding.Invoke(null, new object[] { builder, target, buildingType, isBonus, instant, template });
         }
 
-        public static CCommandable GetCommandable(this ZXEntity entity) => (CCommandable)_mGetEntityCmd.Invoke(entity, null);
         public static CSelectable GetSelectable(this ZXEntity entity) => (CSelectable)_mGetEntitySel.Invoke(entity, null);
         public static CLife GetLife(this ZXEntity entity) => (CLife)_mGetEntityLife.Invoke(entity, null);
 
-        public static ZXCommand GetCurrentCommand(this CCommandable commandable) => (ZXCommand)_mCurCmd.Invoke(commandable, null);
-        public static void CancelCurrentOrder(this CCommandable commandable) => _mCancelCur.Invoke(commandable, null);
-        public static void CancelQueuedOrderAt(this CCommandable commandable, int slotIndex) => _mCancelSlot.Invoke(commandable, new object[] { slotIndex });
+        public static object GetCurrentCommandObject(object commandable) => _mCurCmd?.Invoke(commandable, null);
+        public static void CancelCurrentOrderObject(object commandable) => _mCancelCur?.Invoke(commandable, null);
+        public static void CancelQueueSlotObject(object commandable, int slotIndex) => _mCancelSlot?.Invoke(commandable, new object[] { slotIndex });
 
         public static DXConcurrentList<CSelectable> GetLocallySelectedList()
         {
@@ -463,11 +465,155 @@ namespace TABCoopMod.Core
 
         private static readonly Dictionary<Type, PropertyInfo> _idCommandCache = new Dictionary<Type, PropertyInfo>();
 
-        public static ZXCommand GetCommandGeneric(Type commandType)
+        public static object GetCommandGeneric(Type commandType)
         {
             var generic = AccessTools.Method(typeof(ZXCommand), ObfuscatedSymbols.Method_ZXCommand_GetGeneric);
             if (generic == null || !generic.IsGenericMethodDefinition) return null;
-            return generic.MakeGenericMethod(commandType).Invoke(null, null) as ZXCommand;
+            return generic.MakeGenericMethod(commandType).Invoke(null, null);
+        }
+
+        // ====================================================================
+        // Command execution internals (all object + reflection; ZXCommand,
+        // ZXCommandTarget, Build, Train, CCommandable and CMovable are internal).
+        // ====================================================================
+
+        private static readonly Dictionary<Type, PropertyInfo> _cmdIdPropCache = new Dictionary<Type, PropertyInfo>();
+        private static readonly Dictionary<Type, PropertyInfo> _cmdableTargetPropCache = new Dictionary<Type, PropertyInfo>();
+        private static MethodInfo _mBuildGetForType;
+        private static MethodInfo _mTrainGetForType;
+
+        private static Type _typeCMovable;
+        private static Type _typeCCommandable;
+
+        public static Type TypeZXEntity => _mCmdExec?.GetParameters()[0].ParameterType;
+        public static Type TypeZXCommandTarget => _mCmdExec?.GetParameters()[1].ParameterType;
+
+        public static Type TypeCMovable
+        {
+            get
+            {
+                if (_typeCMovable == null) _typeCMovable = GameAssembly?.GetType("ZX.Components.CMovable");
+                return _typeCMovable;
+            }
+        }
+
+        public static Type TypeCCommandable
+        {
+            get
+            {
+                if (_typeCCommandable == null) _typeCCommandable = _mGetEntityCmd?.ReturnType ?? GameAssembly?.GetType("ZX.Components.CCommandable");
+                return _typeCCommandable;
+            }
+        }
+
+        public static int GetCommandId(object command)
+        {
+            if (command == null) return 0;
+            Type t = command.GetType();
+            if (!_cmdIdPropCache.TryGetValue(t, out PropertyInfo prop))
+            {
+                prop = t.GetProperty("ID", BindingFlags.Public | BindingFlags.Instance);
+                _cmdIdPropCache[t] = prop;
+            }
+            if (prop == null) return 0;
+            try { return Convert.ToInt32(prop.GetValue(command)); } catch { return 0; }
+        }
+
+        /// <summary>
+        /// Scan the entity's public component list instead of HasComponent&lt;T&gt;() — instantiating a
+        /// generic method with an internal type argument trips the CLR's type-access check.
+        /// </summary>
+        public static bool HasComponent(DXEntity entity, Type componentType)
+        {
+            if (entity == null || componentType == null) return false;
+            var comps = entity.Components;
+            if (comps == null) return false;
+            for (int i = 0; i < comps.Count; i++)
+            {
+                if (IsComponentOfType(comps[i], componentType)) return true;
+            }
+            return false;
+        }
+
+        private static bool IsComponentOfType(object component, Type componentType) => componentType.IsInstanceOfType(component);
+
+        public static object GetCommandableTargetObject(object commandable)
+        {
+            if (commandable == null) return null;
+            Type t = commandable.GetType();
+            if (!_cmdableTargetPropCache.TryGetValue(t, out PropertyInfo prop))
+            {
+                prop = t.GetProperty("Target", BindingFlags.Public | BindingFlags.Instance);
+                _cmdableTargetPropCache[t] = prop;
+            }
+            if (prop == null) return null;
+            try { return prop.GetValue(commandable); } catch { return null; }
+        }
+
+        public static object GetBuildCommandForType(Type entityType) => GetCreateEntityCommandForType(ref _mBuildGetForType, "ZX.Commands.Build", entityType);
+        public static object GetTrainCommandForType(Type entityType) => GetCreateEntityCommandForType(ref _mTrainGetForType, "ZX.Commands.Train", entityType);
+
+        private static object GetCreateEntityCommandForType(ref MethodInfo cache, string typeName, Type entityType)
+        {
+            if (cache == null)
+            {
+                Type cmdType = GameAssembly?.GetType(typeName);
+                if (cmdType == null) return null;
+                cache = AccessTools.Method(cmdType, ObfuscatedSymbols.Method_BuildOrTrain_GetForType, new[] { typeof(Type) });
+            }
+            return cache?.Invoke(null, new object[] { entityType });
+        }
+
+        private static Type _typeZXCommandTargetRef;
+        private static PropertyInfo _pSerPosition, _pSerSize, _pSerOrigin, _pSerEntityRef;
+        private static Type _typeEntityRefClosed;
+        private static PropertyInfo _pEntityRefEntity;
+
+        private static void EnsureCommandTargetMeta()
+        {
+            if (_typeZXCommandTargetRef != null) return;
+            _typeZXCommandTargetRef = TypeZXCommandTarget;
+            if (_typeZXCommandTargetRef == null) return;
+
+            const BindingFlags F = BindingFlags.Public | BindingFlags.Instance;
+            _pSerPosition = _typeZXCommandTargetRef.GetProperty("SerPosition", F);
+            _pSerSize = _typeZXCommandTargetRef.GetProperty("SerSize", F);
+            _pSerOrigin = _typeZXCommandTargetRef.GetProperty("SerOrigin", F);
+            _pSerEntityRef = _typeZXCommandTargetRef.GetProperty("SerEntityRef", F);
+
+            Type zxEntity = TypeZXEntity;
+            if (zxEntity != null)
+            {
+                _typeEntityRefClosed = typeof(DXEntityRef<>).MakeGenericType(zxEntity);
+                _pEntityRefEntity = _typeEntityRefClosed.GetProperty("Entity", F);
+            }
+        }
+
+        /// <summary>
+        /// Builds a boxed ZXCommandTarget struct via reflection. Setting properties on the boxed
+        /// value mutates the box in place, so the resulting object is a complete target.
+        /// </summary>
+        public static object CreateCommandTarget(PointF position, SizeF size, PointF origin, ulong targetEntityId)
+        {
+            EnsureCommandTargetMeta();
+            if (_typeZXCommandTargetRef == null) return null;
+
+            object box = Activator.CreateInstance(_typeZXCommandTargetRef);
+            _pSerPosition?.SetValue(box, position);
+            _pSerSize?.SetValue(box, size);
+            _pSerOrigin?.SetValue(box, origin);
+
+            if (targetEntityId != 0UL && _typeEntityRefClosed != null && _pEntityRefEntity != null && _pSerEntityRef != null)
+            {
+                var ent = DXGame.Current?.GetEntityByID(targetEntityId);
+                if (ent != null)
+                {
+                    object refBox = Activator.CreateInstance(_typeEntityRefClosed);
+                    _pEntityRefEntity.SetValue(refBox, ent);
+                    _pSerEntityRef.SetValue(box, refBox);
+                }
+            }
+            return box;
         }
     }
 }

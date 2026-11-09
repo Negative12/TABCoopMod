@@ -102,21 +102,43 @@
 
 ---
 
-## 0.5 【本轮实证】指令注入撞到内部类型的 TypeAccessException
+## 0.5 【已解决 · 会话3】指令注入撞到内部类型的 TypeAccessException
 
+**状态：已修复并实机验证（2026-11-09 会话3）。**
+
+### 原问题
 `GameBridge` 与 `StateHasher` 已改为纯反射/`object` 并通过。但 **`Commands/NetCommand.cs` 的 `CommandExecutor` 与 `Testing/ScriptedCommandDriver` 仍强类型引用内部类型**，实机执行时报：
 - `ExecutePlaceBuilding`：`as ZXEntity` / `Build` 强类型 → `TypeAccessException: 尝试访问类型 ZX.Entities.ZXEntity`
 - `GameBridge.GetCommandGeneric`：`as ZXCommand` → `TypeAccessException: 尝试访问类型 ZX.Commands.ZXCommand`
 - `ScriptedCommandDriver` 的 `Travel` / `Train` / `CMovable` / `CCommandable` 同理。
 
-**这正是铁律#3 的核心**：这些类都是 `internal sealed`（已用 ilspy 确认：`ZXEntity`/`CCommandable`/`CSelectable`/`ZXCommandTarget`/`Travel`/`Train`/`Build`/`CMovable`/`ZXLevelState` 全部 internal）。JIT 对内部类型做 `castclass/isinst` 会抛 `TypeAccessException`，不是 `MethodAccessException`。
+这仍是铁律#3：`ZXEntity`/`CCommandable`/`CSelectable`/`ZXCommandTarget`/`Travel`/`Train`/`Build`/`CMovable`/`ZXLevelState` 全部 `internal`。JIT 对内部类型做 `castclass/isinst`（以及用内部类型实例化泛型方法）会抛 `TypeAccessException`。注意：`typeof(内部类型)` / `AccessTools.Method(typeof(...))` 本身**不**抛（`ldtoken` 允许），真正致命的是**cast/isinst/泛型实例化**。
 
-**建议**：把 `CommandExecutor` 全量改写为 `object` + 反射：
-- 实体查表统一走 `DXGame.GetEntityByID` 返回 `DXEntity`（public），需要 ZX 语义时用 `GameBridge.GetLifeObject/GetCommandableObject`。
-- `ZXCommandTarget` 用 `Activator.CreateInstance(type)` 造 boxed 结构体，`GetField("SerPosition"/..."SerEntityRef").SetValue` 填值。
-- 命令实例用 `GameBridge.GetCommandGeneric(Type)`/`BuildOrTrain_GetForType` 反射取 `object`，调用 `_mCmdExec.Invoke(cmdObj, new object[]{entityObj, targetBox})`，**全程不写 `ZXEntity`/`ZXCommand` 等类型名**。
+### 已实施的修复（全部走 `object` + 反射，不再写死任何内部类型名）
+- **`Core/GameBridge.cs`**
+  - `GetCommandById/ByName/GetCommandGeneric` 返回 `object`，不再 `as ZXCommand`。
+  - `ExecuteCommandOnEntity(object cmd, object executor, object target)`、`AssignGroupMoveTargets(List<DXEntity>, object cmd, PointF)`、`PlaceBuilding(object ...)` 全部改为 `object` 入参（`MethodInfo.Invoke` 内部完成装箱/转型，我方代码不做 cast）。
+  - 新增 `HasComponent(DXEntity, Type)`：扫描 public `DXEntity.Components` 列表 + `Type.IsInstanceOfType`，替代会抛异常的 `HasComponent<T>()` 泛型实例化。
+  - 新增 `CreateCommandTarget(PointF, SizeF, PointF, ulong)`：用 `Activator.CreateInstance(ZXCommandTarget)` 造箱式结构体，再用反射属性 `SerPosition/SerSize/SerOrigin/SerEntityRef` 就地改写；`SerEntityRef` 通过 `DXEntityRef<ZXEntity>.MakeGenericType` + `Entity` 属性反射填充。
+  - 新增 `GetCommandableTargetObject`（反射 `CCommandable.Target`）、`GetCommandId`（反射 `ZXCommand.ID`）、`CancelCurrentOrderObject` / `CancelQueueSlotObject`、`GetBuildCommandForType` / `GetTrainCommandForType`。
+  - 内部类型一律从已绑定的 `MethodInfo` 反推（`_mCmdExec` 的参数类型即 `ZXEntity`/`ZXCommandTarget`），或 `GameAssembly.GetType("ZX.Components.CMovable")`，避免新增 `typeof(内部类型)`。
+- **`Commands/NetCommand.cs`**：`CommandExecutor` 全量 `object` 化；`BuildCommandTarget` 返回 `object`；移除 `ZXEntity/ZXCommand/ZXCommandTarget/CMovable/CCommandable/Build` 的强类型引用与 `using`。
+- **`Testing/ScriptedCommandDriver.cs`**：`Travel`/`Train` 用 `GameAssembly.GetType("ZX.Commands.Travel"/"Train")`；组件判定改 `GameBridge.HasComponent(..., TypeCMovable/TypeCCommandable)`；`as ZXCommand` 改为 `GetCommandId(object)`。
 
-（本轮为让确定性测试台先跑通，只在 `ScriptedCommandDriver.OnBeforeLogicTick` 里 try/catch 让失败的注入降级为 `SKIP`，不影响 hash 记录。）
+### 实机验证结果（`1_Backup.zxsav`，120 tick，两进程各跑一遍）
+```
+[Harmony] Classes OK=15, failed-tolerant=0        (0 missing bindings)
+[ScriptDriver] tick 32010 inject 'build_tent'    (无异常)
+[ScriptDriver] tick 32030 inject 'move_units'    (无异常)
+[ScriptDriver] tick 32060 inject 'train_ranger'  (无异常)
+ERROR 计数 = 0 / WARN = 0
+```
+- 两遍日志中 `CommandId` 完全一致（`Travel=1952427338`、`Train=584315074`），说明命令单例 ID 在确定性沙盒下稳定。
+- `compare_hashes.ps1` 首个分叉仍是 tick 32001 的 `pos`（在任何注入发生之前）→ **本次修复没有新增任何分叉类别**；`life/proj/prod/resv/经济` 仍一致。残留的 `pos` 分叉属于 §0.1（移动积分不确定），与本项无关。
+
+### 仍待单独验证（未阻塞本项）
+- **捕获侧**（`Patches/CommandInterceptorPatch.cs`）的 Prefix 方法签名仍强类型引用 `ZXCommand`/`ZXEntity`/`ZXCommandTarget`/`CCommandable`，且方法体含 `is Build` / `__0.Team` / `__1.SerEntityRef` / `HasComponent<CMovable>()`。本次注入路径因 `IsReplayingCommand=true` 早退，未真正执行到这些语句（JIT 是否会在首调用时抛 `TypeAccessException` 尚需以 `TABCOOP_INTERCEPT=1` + 真实输入复核）。若复现，按同一套 `object + 反射` 改法处理 `isinst`/属性访问/泛型实例化即可。
+
 
 ---
 

@@ -151,3 +151,32 @@ TABCoopMod.log
 1. 按 `docs/07 §0` 攻克**存档加载确定性**（Hook `DXRandom` 无参构造函数 / 所有 `System.Random` / 加载期并行实体创建）。
 2. 按 `docs/07 §0.5` 把 `CommandExecutor` 全量反射化，让脚本注入真正生效。
 3. 之后才回到原 Step 2（暂停/倍速/市长同步，见 `docs/07 §5`）。
+
+---
+
+## 7. 2026-11-09 会话3：完成 07 §0.5（指令注入反射化）并实机验证
+
+### 7.1 已完成
+- **`CommandExecutor` + `ScriptedCommandDriver` 全量 `object` + 反射化**（07 §0.5 已标记解决）：
+  - `GameBridge` 的 `GetCommandById/ByName/GetCommandGeneric/ExecuteCommandOnEntity/AssignGroupMoveTargets/PlaceBuilding` 全部返回/接收 `object`，不再 `as ZXCommand/ZXEntity/ZXCommandTarget`。
+  - 新增 `CreateCommandTarget`（`Activator` 造 `ZXCommandTarget` 箱式结构体 + 反射改 `SerPosition/SerSize/SerOrigin/SerEntityRef`）、`HasComponent(DXEntity, Type)`（扫描 public `Components`，替代 `HasComponent<T>()` 泛型实例化）、`GetCommandableTargetObject`、`GetCommandId`、`GetBuild/TrainCommandForType`、`CancelCurrentOrderObject/CancelQueueSlotObject`。
+  - 内部类型一律从已绑定 `MethodInfo` 反推或 `GameAssembly.GetType(...)`，不新增 `typeof(内部类型)`。
+- 构建 0 警告 0 错误；部署到游戏目录。
+
+### 7.2 实机验证（`1_Backup.zxsav`，120 tick，两进程各跑一遍）
+```
+[Harmony] Classes OK=15, failed-tolerant=0     (0 missing bindings)
+[ScriptDriver] tick 32010 inject 'build_tent'   (无异常)
+[ScriptDriver] tick 32030 inject 'move_units'   (无异常)
+[ScriptDriver] tick 32060 inject 'train_ranger' (无异常)
+ERROR=0  WARN=0
+两遍 CommandId 完全一致：Travel=1952427338 / Train=584315074
+compare_hashes: 首个分叉仍为 tick 32001 的 pos（注入发生前）→ 未新增分叉类别
+```
+**结论：§0.5 完成；脚本化指令注入现在能真正执行（不再 TypeAccessException/SKIP）。**
+
+### 7.3 仍未解决 / 下一步
+1. **§0.1 移动积分不确定**（唯一残留分叉 `pos`）——仍交更大模型，切入点见 07 §0.1。
+2. **捕获侧内部类型**（`CommandInterceptorPatch` 的 `is Build`/`__0.Team`/`__1.SerEntityRef`/`HasComponent<CMovable>()`）尚未以真实输入复核；若 `TABCOOP_INTERCEPT=1` 下复现 `TypeAccessException`，按 §0.5 同法反射化。
+3. 之后回到 07 §1（网络帧同步门控）与 §5（暂停/倍速/市长同步）。
+

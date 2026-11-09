@@ -6,9 +6,6 @@ using System.Linq;
 using DXVision;
 using TABCoopMod.Core;
 using TABCoopMod.Determinism;
-using ZX.Commands;
-using ZX.Components;
-using ZX.Entities;
 
 namespace TABCoopMod.Commands
 {
@@ -223,38 +220,40 @@ namespace TABCoopMod.Commands
 
         private static void ExecuteSingleOrBatchCommand(NetCommand netCmd)
         {
-            var zxCmd = GameBridge.GetCommandById(netCmd.CommandId);
-            if (zxCmd == null)
+            object cmd = GameBridge.GetCommandById(netCmd.CommandId);
+            if (cmd == null)
             {
                 ModLogger.Warn($"[CommandExecutor] Unknown CommandId: {netCmd.CommandId}");
                 return;
             }
 
-            var target = BuildCommandTarget(netCmd);
+            object target = BuildCommandTarget(netCmd);
 
             foreach (ulong entityId in netCmd.ExecutorEntityIds)
             {
-                var executor = DXGame.Current?.GetEntityByID(entityId) as ZXEntity;
-                if (executor == null || executor.Disposed)
+                object executor = DXGame.Current?.GetEntityByID(entityId);
+                if (!IsLiveExecutableEntity(executor))
                     continue;
 
-                GameBridge.ExecuteCommandOnEntity(zxCmd, executor, target);
+                GameBridge.ExecuteCommandOnEntity(cmd, executor, target);
             }
         }
 
         private static void ExecuteGroupMoveCommand(NetCommand netCmd)
         {
-            var zxCmd = GameBridge.GetCommandById(netCmd.CommandId);
-            if (zxCmd == null) return;
+            object cmd = GameBridge.GetCommandById(netCmd.CommandId);
+            if (cmd == null) return;
+
+            Type movable = GameBridge.TypeCMovable;
+            Type commandable = GameBridge.TypeCCommandable;
 
             var entities = new List<DXEntity>(netCmd.ExecutorEntityIds.Length);
             foreach (ulong id in netCmd.ExecutorEntityIds)
             {
                 var ent = DXGame.Current?.GetEntityByID(id);
-                if (ent != null && !ent.Disposed && ent.HasComponent<CMovable>() && ent.HasComponent<CCommandable>())
-                {
-                    entities.Add(ent);
-                }
+                if (ent == null || ent.Disposed) continue;
+                if (!GameBridge.HasComponent(ent, movable) || !GameBridge.HasComponent(ent, commandable)) continue;
+                entities.Add(ent);
             }
 
             if (entities.Count == 0) return;
@@ -263,19 +262,18 @@ namespace TABCoopMod.Commands
             var entitiesForExecution = new List<DXEntity>(entities);
 
             // 1. Assign distributed target positions to each unit's CCommandable.Target
-            GameBridge.AssignGroupMoveTargets(entities, zxCmd, netCmd.TargetPosition);
+            GameBridge.AssignGroupMoveTargets(entities, cmd, netCmd.TargetPosition);
 
             // 2. Trigger command execution on each unit using its assigned CCommandable.Target
-            foreach (var dXEntity in entitiesForExecution)
+            foreach (var entity in entitiesForExecution)
             {
-                if (dXEntity is ZXEntity zxEnt)
-                {
-                    var cmdComp = zxEnt.GetCommandable();
-                    if (cmdComp != null)
-                    {
-                        GameBridge.ExecuteCommandOnEntity(zxCmd, zxEnt, cmdComp.Target);
-                    }
-                }
+                object cmdComp = GameBridge.GetCommandableObject(entity);
+                if (cmdComp == null) continue;
+
+                object unitTarget = GameBridge.GetCommandableTargetObject(cmdComp);
+                if (unitTarget == null) continue;
+
+                GameBridge.ExecuteCommandOnEntity(cmd, entity, unitTarget);
             }
         }
 
@@ -291,14 +289,14 @@ namespace TABCoopMod.Commands
             }
 
             ulong builderId = netCmd.ExecutorEntityIds.Length > 0 ? netCmd.ExecutorEntityIds[0] : 0UL;
-            ZXEntity builder = (builderId != 0 ? DXGame.Current?.GetEntityByID(builderId) as ZXEntity : null)
-                               ?? (GameBridge.GetCommandCenterEntity() as ZXEntity);
+            object builder = builderId != 0UL ? DXGame.Current?.GetEntityByID(builderId) : null;
+            if (!IsLiveExecutableEntity(builder))
+                builder = GameBridge.GetCommandCenterEntity();
 
-            if (builder == null) return;
+            if (!IsLiveExecutableEntity(builder)) return;
 
-            var target = BuildCommandTarget(netCmd);
-            var getBuildCmdMethod = HarmonyLib.AccessTools.Method(typeof(Build), ObfuscatedSymbols.Method_BuildOrTrain_GetForType, new[] { typeof(Type) });
-            var buildCmd = getBuildCmdMethod?.Invoke(null, new object[] { buildingType }) as ZXCommand;
+            object target = BuildCommandTarget(netCmd);
+            object buildCmd = GameBridge.GetBuildCommandForType(buildingType);
             if (buildCmd != null)
             {
                 // Execute through Build.#=zfmgzkuw= so resource deduction and statistics are properly applied!
@@ -314,8 +312,8 @@ namespace TABCoopMod.Commands
         {
             foreach (ulong id in netCmd.ExecutorEntityIds)
             {
-                var zxEnt = DXGame.Current?.GetEntityByID(id) as ZXEntity;
-                zxEnt?.GetCommandable()?.CancelCurrentOrder();
+                object cmdComp = GameBridge.GetCommandableObject(DXGame.Current?.GetEntityByID(id));
+                if (cmdComp != null) GameBridge.CancelCurrentOrderObject(cmdComp);
             }
         }
 
@@ -323,24 +321,23 @@ namespace TABCoopMod.Commands
         {
             foreach (ulong id in netCmd.ExecutorEntityIds)
             {
-                var zxEnt = DXGame.Current?.GetEntityByID(id) as ZXEntity;
-                zxEnt?.GetCommandable()?.CancelQueuedOrderAt(netCmd.QueueSlotIndex);
+                object cmdComp = GameBridge.GetCommandableObject(DXGame.Current?.GetEntityByID(id));
+                if (cmdComp != null) GameBridge.CancelQueueSlotObject(cmdComp, netCmd.QueueSlotIndex);
             }
         }
 
-        public static ZXCommandTarget BuildCommandTarget(NetCommand netCmd)
+        private static bool IsLiveExecutableEntity(object entity)
         {
-            var target = default(ZXCommandTarget);
-            target.SerPosition = netCmd.TargetPosition;
-            target.SerSize = netCmd.TargetSize;
-            target.SerOrigin = netCmd.TargetOrigin;
+            var ent = entity as DXEntity; // DXEntity is public; safe to cast
+            if (ent == null || ent.Disposed) return false;
+            Type zxEntity = GameBridge.TypeZXEntity;
+            return zxEntity == null || zxEntity.IsInstanceOfType(ent);
+        }
 
-            if (netCmd.TargetEntityId != 0UL)
-            {
-                var targetEnt = DXGame.Current?.GetEntityByID(netCmd.TargetEntityId) as ZXEntity;
-                target.SerEntityRef = targetEnt;
-            }
-            return target;
+        public static object BuildCommandTarget(NetCommand netCmd)
+        {
+            return GameBridge.CreateCommandTarget(
+                netCmd.TargetPosition, netCmd.TargetSize, netCmd.TargetOrigin, netCmd.TargetEntityId);
         }
     }
 }

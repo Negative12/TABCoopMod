@@ -4,12 +4,8 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using DXVision;
-using HarmonyLib;
 using TABCoopMod.Commands;
 using TABCoopMod.Core;
-using ZX.Commands;
-using ZX.Components;
-using ZX.Entities;
 
 namespace TABCoopMod.Testing
 {
@@ -161,13 +157,15 @@ namespace TABCoopMod.Testing
             {
                 // Fallback: any player entity that can move and be commanded.
                 units = GameBridge.GetPlayerEntities()
-                    .Where(e => e.HasComponent<CMovable>() && e.HasComponent<CCommandable>())
+                    .Where(e => GameBridge.HasComponent(e, GameBridge.TypeCMovable) &&
+                                GameBridge.HasComponent(e, GameBridge.TypeCCommandable))
                     .Take(Math.Max(1, count))
                     .ToList();
             }
             if (units.Count == 0) return null;
 
-            var travel = GameBridge.GetCommandGeneric(typeof(Travel));
+            Type travelType = GameBridge.GameAssembly?.GetType("ZX.Commands.Travel");
+            object travel = travelType != null ? GameBridge.GetCommandGeneric(travelType) : null;
             if (travel == null)
             {
                 ModLogger.Warn("[ScriptDriver] Travel command singleton unresolved");
@@ -182,7 +180,7 @@ namespace TABCoopMod.Testing
             {
                 Type = NetCommandType.GroupMoveOrPatrol,
                 PlayerId = 1,
-                CommandId = travel.ID,
+                CommandId = GameBridge.GetCommandId(travel),
                 ExecutorEntityIds = units.Select(u => u.ID).ToArray(),
                 TargetPosition = destination,
                 IsShiftQueued = false
@@ -198,22 +196,21 @@ namespace TABCoopMod.Testing
             Type unitType = GameBridge.GameAssembly?.GetType(unitTypeName);
             if (unitType == null) return null;
 
-            var getForType = AccessTools.Method(typeof(Train), ObfuscatedSymbols.Method_BuildOrTrain_GetForType, new[] { typeof(Type) });
-            var trainCmd = getForType?.Invoke(null, new object[] { unitType }) as ZXCommand;
+            object trainCmd = GameBridge.GetTrainCommandForType(unitType);
             if (trainCmd == null) return null;
 
             return new NetCommand
             {
                 Type = NetCommandType.ExecuteCommand,
                 PlayerId = 1,
-                CommandId = trainCmd.ID,
+                CommandId = GameBridge.GetCommandId(trainCmd),
                 ExecutorEntityIds = new[] { barracks[0].ID }
             };
         }
 
         private static NetCommand CancelFirstUnit()
         {
-            var unit = GameBridge.GetPlayerEntities().FirstOrDefault(e => e.HasComponent<CCommandable>());
+            var unit = GameBridge.GetPlayerEntities().FirstOrDefault(e => GameBridge.HasComponent(e, GameBridge.TypeCCommandable));
             if (unit == null) return null;
             return new NetCommand
             {
