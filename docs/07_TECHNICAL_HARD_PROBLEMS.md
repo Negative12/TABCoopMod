@@ -123,6 +123,33 @@
 
 ---
 
+## 0.6 【会话3 实证】运行时“移相机 / 开全图 / 截交互区”遇到引擎阻力
+
+**目标**：让分叉可视化 HTML 的两张同 tick 截图看向“有单位交互的区域”，并去除迷雾。
+
+**已确认可行**：
+- 控制模式（非确定性）下，`reveal_map`（`ZXLevelState.ShowFullMap=true` + `ZXSystemMapLayers.FogEnabled=false`）能把一片**地形**从全黑变为可见（对照组：同相机、未开图=全黑，开图=地形）。
+- MCP `set_camera`（改 `DXScene.CameraArea`）在该帧附近能改变画面。
+
+**已确认不可行 / 受引擎限制**：
+1. **确定性回放里截图不跟随相机/开图**：`run_replay_verify` 中 `SetShowFullMap/FogEnabled` 返回 True、`CameraArea` 读回也是新值，
+   但 `DXGame.CaptureScreen()` 得到的帧仍是**载入时的默认相机**，开图也不改变该帧。额外显式调用 `DXGame.SetCamera()` 无效。
+   → 回放的渲染管线/呈现被确定性模式影响，截图不可用来自定义视角。
+2. **控制模式下游戏会每帧重控相机**：`set_camera` 之后约 1 秒再 `get_camera`，`CameraArea` 已被改回（实测 x58,y75 → x138,y54），
+   且 `CameraArea` 会被夹紧（请求 110×69 → 实际 72×45，且位置被挪）。→ 无法稳定固定视角。
+3. **即便开图，敌人仍可能不渲染**：`FogEnabled=false`/`ShowFullMap=true` 后地形可见，但僵尸在“未注视”区域仍不可见
+   （`ZXSystemMapLayers` 的敌人渲染分支似乎仍依赖 `hideEnemiesIfNotWatched`/“已探索”标记），导致截图常是空林地。
+
+**建议方向（给更大模型）**：
+- 反编译 `DXSystemMapLayers`（`#=zJme8KFhmikprnkg_2CDeiQE=`）的可见性/敌人渲染分支，找到 `hideEnemiesIfNotWatched` 与 `LayerFog` 的“已探索”填充逻辑，
+  直接把这些格标记为已探索/已可见，从而真正显示僵尸。
+- 找到每帧写 `DXScene.CameraArea` 的源头（输入/相机控制器），临时停用或直接设置其“目标相机”字段，使自定义视角稳定。
+- 或研究：在截帧前临时 `DXGame.IsIADeterministic=false` 并强制一帧渲染/呈现，再 `CaptureScreen()`。
+
+**现阶段结论**：**世界坐标散点/箭头图是“分叉在哪”的可靠依据**；截图目前只能尽力而为，不能保证落在指定交互区并显示敌人。
+
+---
+
 ## 0.5 【已解决 · 会话3】指令注入撞到内部类型的 TypeAccessException
 
 **状态：已修复并实机验证（2026-11-09 会话3）。**

@@ -282,7 +282,9 @@ namespace TABCoopMod.Testing
                 string path = Path.Combine(dir, "latest_replay_shots.json");
                 var ser = new System.Web.Script.Serialization.JavaScriptSerializer();
                 Dictionary<string, object> root = null;
-                if (File.Exists(path))
+                // Start a fresh manifest on run1 so two-pass pairs never mix with a prior session;
+                // run2 merges into the run1 entry of the same session.
+                if (_currentRun != 1 && File.Exists(path))
                 {
                     try { root = ser.Deserialize<Dictionary<string, object>>(File.ReadAllText(path)); } catch { }
                 }

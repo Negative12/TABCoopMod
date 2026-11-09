@@ -90,6 +90,11 @@ namespace TABCoopMod.Testing
             if (scene == null || w <= 0f || h <= 0f) return false;
 
             scene.CameraArea = new RectangleF(cx - w / 2f, cy - h / 2f, w, h);
+
+            // In deterministic replay the per-frame camera pass may not run, so the renderer keeps the
+            // initial view even though CameraArea changed. Force one propagation pass.
+            try { HarmonyLib.AccessTools.Method(typeof(DXGame), "SetCamera")?.Invoke(DXGame.Current, null); } catch { }
+
             Core.ModLogger.Info($"[CameraProbe] applied camera override center=({cx},{cy}) size=({w},{h})");
             return true;
         }

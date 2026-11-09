@@ -16,7 +16,7 @@
 #     --shot2 ../../tabcoop_shots/replay_6666_run2_t168601.png \
 #     --cam1 <game>/coop_cam_run1.json --cam2 <game>/coop_cam_run2.json \
 #     --out analysis/divergence_6666/index.html
-import argparse, json, os, hashlib, shutil
+import argparse, json, os, hashlib, shutil, datetime, base64, io
 
 def load_pos(path):
     d = {}
@@ -142,7 +142,87 @@ def main():
             r = p
         return r.replace("\\", "/")
 
-    shot1_src, shot2_src = rel_src(args.shot1), rel_src(args.shot2)
+    def embed_shot(p):
+        if not p:
+            return ""
+        ap = p if os.path.isabs(p) else os.path.abspath(p)
+        try:
+            from PIL import Image
+            if not os.path.exists(ap):
+                return rel_src(p)
+            im = Image.open(ap)
+            if im.mode != "RGB":
+                im = im.convert("RGB")
+            maxw = 1600
+            if im.width > maxw:
+                im = im.resize((maxw, int(im.height * maxw / im.width)), Image.LANCZOS)
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=88)
+            return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception as e:
+            print(f"warning: embed failed ({e}); using relative path")
+            return rel_src(p)
+
+    shot1_src, shot2_src = embed_shot(args.shot1), embed_shot(args.shot2)
+    generated = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # ---- per-entity-type breakdown + classification + sync impact hints ----
+    from collections import defaultdict
+    UNIT_HINTS = ["zombie", "ranger", "sniper", "soldier", "worker", "dressed", "weak",
+                  "strong", "venom", "harpy", "titan", "lucifer", "mutant", "infected",
+                  "veteran", "mayor", "colonel", "engineer", "archer", "swarm", "brute"]
+    BUILDING_HINTS = ["house", "center", "tower", "wall", "gate", "cottage", "farm", "hunter",
+                      "fisherman", "warehouse", "storehouse", "mill", "foundry", "mine",
+                      "radar", "executive", "bank", "market", "inn", "tent", "outpost",
+                      "barracks", "stone", "wood", "energy", "power", "storage", "sawmill",
+                      "quarry", "lookout", "watchtower", "turret"]
+
+    def classify(ty):
+        tl = ty.lower()
+        if "proyectile" in tl or "projectile" in tl:
+            return "projectile"
+        if ty == "DXEntity":
+            return "engine"
+        for h in UNIT_HINTS:
+            if h in tl:
+                return "unit"
+        for h in BUILDING_HINTS:
+            if h in tl:
+                return "building"
+        return "other"
+
+    IMPACT = {
+        "unit": "高 · 单位位置/集合不同 → 战斗、寻路、死亡不同步",
+        "projectile": "高 · 投射物位置不同 → 伤害结算不同步（但低 ID 投射物可能是 ID 复用假象）",
+        "building": "中 · 建筑位置/集合不同 → 布局/生产/资源不同步",
+        "engine": "待核实 · DXEntity 为引擎基类/场景，多为低 ID；疑似跨跑 ID 复用假位移，非真实单位",
+        "other": "待核实 · 未归类，需人工确认",
+    }
+
+    ts = defaultdict(lambda: {"total": 0, "same": 0, "moved": 0, "only1": 0, "only2": 0, "max": 0.0})
+    for e in entities:
+        ty, st, delta = e[1], e[6], e[7]
+        s = ts[ty]; s["total"] += 1
+        if st == 0: s["same"] += 1
+        elif st == 1: s["moved"] += 1; s["max"] = max(s["max"], delta)
+        elif st == 2: s["only1"] += 1
+        else: s["only2"] += 1
+
+    type_stats = []
+    for ty, s in ts.items():
+        cat = classify(ty)
+        type_stats.append([ty, cat, s["total"], s["same"], s["moved"], s["only1"], s["only2"],
+                           round(s["max"], 2), IMPACT[cat]])
+    type_stats.sort(key=lambda r: (-(r[4] + r[5] + r[6]), -r[2]))
+
+    components = {
+        "entities": bool(len(a) != len(b) or only1 or only2),
+        "pos": any(timeline["pos"]),
+        "life": any(timeline["life"]),
+        "proj": any(timeline["proj"]),
+        "prod": any(timeline["prod"]),
+        "resv": any(timeline["resv"]),
+    }
 
     data = {
         "tick": common_ticks[0] if common_ticks else 0,
@@ -153,14 +233,34 @@ def main():
         "timeline": timeline,
         "shots": {"a": {"src": shot1_src, "cam": cam1}, "b": {"src": shot2_src, "cam": cam2}},
         "sameCam": same_cam,
+        "generated": generated,
+        "shotFiles": [os.path.basename(args.shot1) if args.shot1 else "",
+                      os.path.basename(args.shot2) if args.shot2 else ""],
+        "typeStats": type_stats,
+        "components": components,
     }
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8", newline="\n") as f:
-        f.write(HTML_TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(",", ":"))))
-    print(f"report -> {args.out}")
+    doc = HTML_TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+
+    # Write a timestamped report so a browser never serves a cached older page.
+    base, ext = os.path.splitext(os.path.abspath(args.out))
+    if not ext:
+        ext = ".html"
+    versioned = f"{base}_{generated}{ext}"
+    with open(versioned, "w", encoding="utf-8", newline="\n") as f:
+        f.write(doc)
+    # Also update the requested path for scripts/automation (may be browser-cached).
+    try:
+        with open(args.out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(doc)
+    except Exception:
+        pass
+
+    print(f"OPEN THIS -> {versioned}")
+    print(f"  (also wrote {args.out})")
     print(f"  tick={data['tick']} run1={len(a)} run2={len(b)} same={same} moved={moved} "
           f"only1={only1} only2={only2} maxDelta={max_delta:.3f} camA={bool(cam1)} camB={bool(cam2)} sameCam={same_cam}")
+    print(f"  shots: {data['shotFiles'][0]} | {data['shotFiles'][1]}")
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="zh">
@@ -174,6 +274,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   header { padding:12px 18px; background:var(--panel); border-bottom:1px solid #242c36; }
   h1 { font-size:16px; margin:0 0 6px; }
   .mut { color:var(--mut); }
+  #meta { color:var(--acc); font-weight:600; margin-top:4px; }
+  .explain h3 { margin:10px 0 6px; font-size:14px; }
+  table.x { border-collapse:collapse; width:100%; font-size:12px; margin:6px 0; }
+  table.x th, table.x td { border:1px solid #2c3642; padding:4px 7px; text-align:left; vertical-align:top; }
+  table.x th { background:#1f2731; color:#cdd6e0; position:sticky; top:0; }
+  table.x td.n { text-align:right; font-variant-numeric:tabular-nums; }
+  .tag { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; color:#0b0e12; font-weight:600; }
+  .ok { color:#43aa8b; font-weight:600; } .bad { color:#ef476f; font-weight:600; }
+  .guide li { margin:2px 0; }
+  .scroll { max-height:360px; overflow:auto; }
   .wrap { display:flex; gap:14px; padding:14px 18px; align-items:flex-start; flex-wrap:wrap; }
   .panel { background:var(--panel); border:1px solid #242c36; border-radius:8px; padding:10px; }
   #mapwrap { position:relative; }
@@ -203,7 +313,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <header>
   <h1>确定性分叉可视化 <span class="mut" id="hdr"></span></h1>
   <div class="mut">左：世界坐标散点/箭头（两跑同一 tick）。右：同 tick 两张截图，方框=按坐标标出的分叉实体（实线=本跑位置，虚线=另一跑位置）。</div>
+  <div class="mut" id="meta"></div>
 </header>
+
+<div class="wrap"><div class="panel explain" id="explain" style="flex:1; min-width:900px"></div></div>
 
 <div class="wrap">
   <div class="panel" id="mapwrap">
@@ -417,6 +530,9 @@ const types=[...new Set(DATA.entities.filter(e=>e[6]===1).map(e=>e[1]))].sort();
 for(const t of types){const o=document.createElement('option');o.value=t;o.textContent=t;sel.appendChild(o);}
 
 // screenshots
+document.getElementById('meta').textContent =
+  `生成 ${DATA.generated||''} · tick ${DATA.tick} · 截图 ${(DATA.shotFiles&&DATA.shotFiles[0])||''} | ${(DATA.shotFiles&&DATA.shotFiles[1])||''}`;
+document.title = `TABCoopMod 分叉报告 · ${DATA.generated||''} · tick ${DATA.tick}`;
 if(DATA.shots.a&&DATA.shots.a.src) document.getElementById('imgA').src=DATA.shots.a.src;
 if(DATA.shots.b&&DATA.shots.b.src) document.getElementById('imgB').src=DATA.shots.b.src;
 document.getElementById('camNote').textContent = (camA&&camB)
@@ -444,7 +560,50 @@ function drawTimeline(){
   g.strokeStyle='#4ea8de'; g.setLineDash([4,3]); g.beginPath(); T.e2.forEach((v,i)=>{const x=ex(i),y=ey(v);i?g.lineTo(x,y):g.moveTo(x,y);}); g.stroke(); g.setLineDash([]);
 }
 
-fit(); draw(); renderShots(); drawTimeline();
+function esc(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function catColor(c){ return {unit:'#ff9f1c',projectile:'#9b5de5',building:'#43aa8b',engine:'#8b97a7',other:'#cdd6e0'}[c]||'#888'; }
+function catName(c){ return {unit:'单位',projectile:'投射物',building:'建筑',engine:'引擎/场景',other:'其他'}[c]||c; }
+
+function renderExplanations(){
+  let h='';
+  h+='<h3>一、术语（本页如何标记分叉）</h3>';
+  h+='<div class="mut">实体按 64 位 ID 在两跑间对齐。<b>未移动</b>=同 ID 位移≤0.01；<b>移动</b>=同 ID 位移&gt;阈值（箭头）；<b>仅 run1 / 仅 run2</b>=该 ID 只在一跑出现（生成/消失或 ID 分配不同）。</div>';
+  h+='<h3>二、事件/分项说明（该 tick 各子系统是否一致）</h3>';
+  const comps=[
+    ['entities','实体集合','生成/消失/ID 分配是否一致'],
+    ['pos','位置 pos','单位移动/寻路是否一致'],
+    ['life','生命 life','战斗/死亡是否一致'],
+    ['proj','投射物 proj','伤害结算是否一致'],
+    ['prod','生产队列 prod','生产是否一致'],
+    ['resv','预留 resv','资源分配/工人/食物等'],
+  ];
+  h+='<table class="x"><tr><th>分项</th><th>含义</th><th>本 tick</th><th>同步影响</th></tr>';
+  for(const [k,name,desc] of comps){
+    const bad=DATA.components[k];
+    h+='<tr><td>'+name+'</td><td class="mut">'+desc+'</td><td class="'+(bad?'bad':'ok')+'">'+(bad?'不一致':'一致')+'</td><td>'+(bad?'可能影响同步':'无影响')+'</td></tr>';
+  }
+  h+='</table>';
+  h+='<h3>三、分叉实体按类型明细（用于判断哪些影响同步）</h3>';
+  h+='<div class="mut">按“分叉数(移动+仅出现)”降序；分类与判断为启发式。</div>';
+  h+='<div class="scroll"><table class="x"><tr><th>实体类型</th><th>分类</th><th>总数</th><th>未移动</th><th>移动</th><th>仅run1</th><th>仅run2</th><th>最大位移</th><th>是否影响同步（提示）</th></tr>';
+  for(const r of DATA.typeStats){
+    const ty=r[0],cat=r[1],total=r[2],same=r[3],moved=r[4],o1=r[5],o2=r[6],maxd=r[7],impact=r[8];
+    h+='<tr><td>'+esc(ty)+'</td><td><span class="tag" style="background:'+catColor(cat)+'">'+catName(cat)+'</span></td>'+
+       '<td class="n">'+total+'</td><td class="n">'+same+'</td><td class="n">'+moved+'</td><td class="n">'+o1+'</td><td class="n">'+o2+'</td><td class="n">'+maxd+'</td>'+
+       '<td class="mut">'+esc(impact)+'</td></tr>';
+  }
+  h+='</table></div>';
+  h+='<h3>四、如何快速判断“是否影响同步”</h3>';
+  h+='<ul class="guide">'+
+     '<li><b>高优先</b>：分类=单位/投射物，且移动或仅出现在某跑 → 战斗、寻路、死亡、伤害会不同步。</li>'+
+     '<li><b>中优先</b>：分类=建筑，位置/集合不同 → 布局、生产、资源不同步。</li>'+
+     '<li><b>需甄别</b>：类型为 <code>DXEntity</code> 或低 ID 投射物 → 常见为跨跑 <b>ID 复用</b>导致的“假位移”（同 ID 指向不同对象），不一定代表真实单位移动；可用类型过滤器排除后再看。</li>'+
+     '<li><b>可靠依据</b>：左侧世界坐标散点/箭头图；右侧截图为背景参考（确定性回放渲染可能不跟随相机/迷雾）。</li>'+
+     '</ul>';
+  document.getElementById('explain').innerHTML=h;
+}
+
+fit(); draw(); renderShots(); drawTimeline(); renderExplanations();
 </script>
 </body>
 </html>
