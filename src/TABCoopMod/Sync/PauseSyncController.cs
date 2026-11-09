@@ -17,6 +17,10 @@ namespace TABCoopMod.Sync
         public static bool CountdownActive { get; private set; }
         public static int SecondsRemaining { get; private set; }
 
+        /// <summary>True while this controller is applying a pause command, so the DXGame.Paused
+        /// setter patch does not re-intercept our own application.</summary>
+        public static bool IsApplying { get; private set; }
+
         private static DateTime _resumeAtUtc;
         private static int _lastShown = -1;
 
@@ -80,12 +84,21 @@ namespace TABCoopMod.Sync
 
         private static void Apply(bool paused)
         {
-            CommandExecutor.Execute(new NetCommand
+            bool prev = IsApplying;
+            IsApplying = true;
+            try
             {
-                Type = NetCommandType.SetPaused,
-                PlayerId = 1,
-                TargetPausedState = paused
-            });
+                CommandExecutor.Execute(new NetCommand
+                {
+                    Type = NetCommandType.SetPaused,
+                    PlayerId = 1,
+                    TargetPausedState = paused
+                });
+            }
+            finally
+            {
+                IsApplying = prev;
+            }
         }
     }
 }

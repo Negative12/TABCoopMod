@@ -285,7 +285,12 @@ ERROR 计数 = 0 / WARN = 0
 **会话3 进展**：`SetGameSpeed` 已补全——`CommandExecutor` 新增 `case SetGameSpeed`（写 `DXGame.GameSpeed`，0..20），`NetCommand` 增加 `GameSpeed` 字段并序列化，MCP 暴露 `set_game_speed {speed}`。实测：暂停(0)→3→1 生效，`game_state` 的 `gameSpeed` 与实际推进一致。
 **市长接口已解析并实现 executor**：`ZXMayor` 有静态注册表 `Dictionary<string,ZXMayor> #=zoTuFkHI=`、`ID/Name/Level/Gender`，应用方法 `#=zPTw8CXGE0RqF(ZXLevelState)`；弹窗 `ZXGame.#=zcITiOSD6YNmD()` 按 `Level=MayorStates.Count+1` 用 `DXLevel.Current.Random` 随机选男/女，左右按钮分别应用。**设计：用 `MayorId` 传参应用**（`GameBridge.ApplyMayor`），避免两端重抽样；新增 MCP `list_mayors`/`mayor_select`。实测 level1 有 40 名，`mayor_select Mayor_001` 后 `MayorStates` 4→5。
 **暂停恢复 3 秒倒计时**：`PauseSyncController`（横幅倒计时，引擎无专门倒计时渲染器）+ MCP `request_pause`；实测请求恢复→3→2→1→自动恢复。
-**仍待**：`PauseSyncPatch`/`MayorSyncPatch` 这些 **producer**（把玩家真实空格/暂停按钮、市长左右按钮转成 NetCommand；注意暂停是空格微操核心，先别用它掩盖确定性 bug）。
+
+**producer 拦截尝试与回退（重要教训）**：曾实现 `PauseSyncPatch`（Hook `DXGame.set_Paused`）与 `MayorSyncPatch`（Hook `ZXMayor.#=zPTw8CXGE0RqF`），补丁本身能应用（`Classes OK=17`），但**启用后游戏在载入期报错/退出**：`DXGame.set_Paused` 在关卡载入阶段就会被游戏调用，producer 前缀 `return false` 打断原始 setter，破坏载入路径（`TABCoopMod.log` 在“All Harmony patches applied”后即中断、无异常记录，属硬中断）。**已回退并删除这两个 producer 补丁**，恢复稳定（控制模式实测 `control-ready`、进程存活、`ping/get_state` 正常、0 错误）。
+**不要**再直接 Hook `DXGame.set_Paused` 做 producer。后续正确方向：
+- 改 Hook **输入层**（空格键/暂停按钮的输入处理），或仅在“会话已建立 + 关卡已稳定运行（`IAIterationInt>0`、`!LoadingLevel`）+ 显式 opt-in”时才允许 producer 生效；测试期（仅拦截、无会话）保持完全惰性。
+- 市长同理：Hook 弹窗按钮的 `Activated` 回调（而非 `apply` 方法），或仅在会话中启用。
+- 现有可用路径：`request_pause`（本地暂停/倒计时恢复）、`mayor_select`（按 ID 应用，确定性）、`set_game_speed` 均已实测通过。
 
 **现象**：`NetCommandType.SetGameSpeed(7)` 与 `MayorVoteOrSelect(8)` 已定义且可序列化，但 `CommandExecutor.Execute` 的 switch **没有这两个 case**（静默 no-op），且没有任何拦截点会产生它们。`SetPaused(6)` executor 有 case，但同样**没有 producer**——玩家按空格暂停只改本地 `DXGame.Paused`，另一端继续跑 → 立即分叉。
 

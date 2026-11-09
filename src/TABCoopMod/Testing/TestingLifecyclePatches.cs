@@ -64,7 +64,7 @@ namespace TABCoopMod.Testing
             {
                 try
                 {
-                    if (TestHarnessConfig.Enabled && TestHarnessConfig.Intercept)
+                    if (TestHarnessConfig.Intercept)
                     {
                         if (CommandInterceptor.OnLocalCommandCaptured == null)
                             CommandInterceptor.OnLocalCommandCaptured = cmd => CommandExecutor.Execute(cmd);
