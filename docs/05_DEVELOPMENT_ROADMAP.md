@@ -8,10 +8,10 @@
 
 | 阶段 | 名称 | 核心交付目标 | 状态 |
 | :---: | :--- | :--- | :---: |
-| **Phase 0** | **工具链就位与注入破冰** | 提取内嵌 SDK，搭建 `TABCoopMod.csproj`，实现免改 EXE 注入、Harmony 挂载、`GameBridge` 封装层与主菜单【联机按钮】显示。 | ⏳ 待开始 |
-| **Phase 1** | **确定性沙盒与单机指令录制回放** | 接管 `IsIADeterministic`、`LoadPhysics`、`DXGuid`、`DXRandom`；完成 7 大类玩家指令拦截与脱离 `CSelectable` 的回放执行器；通过单机录制回放 `StateHash` 100% 一致性测试。 | ⏳ 待开始 |
-| **Phase 2** | **双模网络层与内存存档流秒传** | 实现 `LocalTcpLoopbackTransport` 与 `SteamP2PTransport`；完成原生 UI 联机大厅；跑通房主建图 -> `.zxsav` 内存流分片传输 -> 客机自动加载进入同一局游戏。 | ⏳ 待开始 |
-| **Phase 3** | **执政官模式完整联调与协同 UX** | 跑通 2-3 人 Lockstep 实时共控（含暂停态实时建房/拉兵、市长选择同步、建筑抢地冲突消解）；完成盟友鼠标光标、小地图视野框、战术 Ping 与自动 Resync 热同步。 | ⏳ 待开始 |
+| **Phase 0** | **工具链就位与注入破冰** | 提取内嵌 SDK，搭建 `TABCoopMod.csproj`，实现免改 EXE 注入、Harmony 挂载、`GameBridge` 封装层与主菜单【联机按钮】显示。 | ✅ 已完成 (100% 实机验证) |
+| **Phase 1** | **确定性沙盒与单机指令录制回放** | 接管 `IsIADeterministic`、`LoadPhysics`、`DXGuid`、`DXRandom`；完成 7 大类玩家指令拦截与脱离 `CSelectable` 的回放执行器；通过单机录制回放 `StateHash` 100% 一致性测试。 | 🔄 进行中 (85%，见 `docs/09` P0) |
+| **Phase 2** | **双模网络层与内存存档流秒传** | 实现 `LocalTcpLoopbackTransport` 与 `SteamP2PTransport`；完成原生 UI 联机大厅；跑通房主建图 -> `.zxsav` 内存流分片传输 -> 客机自动加载进入同一局游戏。 | 🔄 骨架已落地 (60%，待双端联调) |
+| **Phase 3** | **执政官模式完整联调与协同 UX** | 跑通 2-3 人 Lockstep 实时共控（含暂停态实时建房/拉兵、市长选择同步、建筑抢地冲突消解）；完成盟友鼠标光标、小地图视野框、战术 Ping 与自动 Resync 热同步。 | 🔄 进行中 (35%，见 `docs/09` P2/P3) |
 | **Phase 4** | **独立基地模式拓展（第二阶段）** | 开局多指挥中心生成、Mod 层虚拟阵营资源账本隔离、单位所有权锁定与多路尸潮分流。 | ⏳ 远期规划 |
 
 ---

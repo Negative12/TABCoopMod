@@ -221,3 +221,24 @@ compare_hashes: 首个分叉仍为 tick 32001 的 pos（注入发生前）→ �
 - Step 2 进展：`SetGameSpeed` executor + `NetCommand.GameSpeed` 字段 + MCP `set_game_speed` 已实现并实测（暂停0→3→1 生效）。`MayorVoteOrSelect` 与 Pause/Mayor 的 producer 拦截仍待，见 `docs/07 §5`。
 - 注意：确定性回放里截图不跟随相机/开图、游戏每帧重控相机、开图后敌人仍隐藏——均记录在 `docs/07 §0.6` 待研究清单。
 
+---
+
+## 9. 2026-11-09 会话4（审计与规划）：全量反编译根因解答与 P0~P3 工作计划
+
+> **必读文档**：**[`docs/09_AUDIT_AND_WORKPLAN.md`](09_AUDIT_AND_WORKPLAN.md)**
+
+本轮对全部现有源码与反编译引擎代码（`DXGame` / `DXPhysicWorld` / `CMovable` / `ZXSystemMapLayers` / `CInvisibleWhenNotWatched` / `ZXSystemGameLevel` / `OMiniMap`）进行了深度交叉审计，**彻底查明了 `docs/07` 中所有遗留问题的源码级根因**，并排查出 7 处关键错漏：
+1. **查明 `pos` 与生存档分叉的 3 大真凶**：
+   - 未开启游戏内置 `ZXGame.#=zB3Vhdin5PerfrubjO4AblAA=()`（`IsMultiplayer`）标志，导致 `CMovable.#=zUPt0E_k=` 走后台多线程异步寻路 `DXWorldGrid.FindPathConcurrent`（且 `PendingPathfindingCount > 10` 时僵尸直接跳过寻路）；一旦开启该标志，寻路自动切为主线程同步 `DXWorldGrid.FindPath`！
+   - `DXPhysicWorld.UpdateDefaultTime()` 内部仍有两处 `DXHelper_Task.For` 多线程并发调用 `StartUpdatePhysics()` 与 `OnNewPositionComputed()`；
+   - `DeterministicReplayVerifier.ResetStaticsForRun()` 将 `DXPhysicWorld.LastGameTimeUpdatePhysics` 置为 `0.0`，且 `CalibrateEntityIdCounterFromLoadedLevel` 早于异步读档完成前执行，导致新生成实体 ID 从 `101000` 起跳发生跨跑错位（即 R6 低 ID 假位移的根因）。
+2. **查明 R1~R4 相机与开图僵尸隐身根因**：
+   - `DXScene.Current.CameraArea` 是**等轴测场景坐标（ScenePoint）**而非世界网格坐标（WorldPoint），必须通过 `DXWorldGrid.ScenePointFromWorldPoint` 转换并用 `SetCameraCenter` 设置，同时关闭开局镜头拉近动画标志 `#=zfFXkD0aj1o9gF76ANQ==`；
+   - 僵尸挂载了 `CInvisibleWhenNotWatched`（将 `SceneObject.Opacity` 置 `0f`），且 `ZXSystemMapLayers.#=z4SfTR0oOSoLp(Point)` 未检查 `ShowFullMap`/`!FogEnabled` 而是直接读前台视野数组 `#=z69ntQguW1qCr`。清零该数组并置所有实体 `SceneObject.Opacity = 1f` 即可立即显示全部僵尸。
+3. **查明捕获侧与暂停控制器隐患**：
+   - `CommandInterceptorPatch.cs:84` 仍残留 `e.HasComponent<CMovable>()` 泛型内部类型调用（真人右键必抛 `TypeAccessException`）；
+   - `PauseSyncController` 直接调了 `CommandExecutor.Execute` 且使用本地 `DateTime.UtcNow`，联机下不广播且恢复帧不同步。
+
+**下一步请直接按 `docs/09_AUDIT_AND_WORKPLAN.md` 第 3 节的 P0 → P1 → P2 → P3 计划依次推进。**
+
+

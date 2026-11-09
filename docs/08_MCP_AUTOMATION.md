@@ -1,6 +1,7 @@
 # 08 — MCP 自动化测试台（模拟人类操作）
 
 > **创建**: 2026-11-09（会话3）
+> **更新**: 已扩展至 **17 个工具**（含倍速 `set_game_speed`、暂停倒计时 `request_pause`、市长查询/选择 `list_mayors`/`mayor_select`、相机导航 `get_camera`/`set_camera`、开全图 `reveal_map`）。相机等轴测坐标转换与开图显示僵尸的修复方案见 `docs/09_AUDIT_AND_WORKPLAN.md` §2.2。
 > **用途**: 让 Agent / 视觉模型通过 MCP 驱动正在运行的《They Are Billions》，自动执行游戏内操作并自动截图复核，实现"人类操作"的自动化测试。
 
 ---
@@ -143,15 +144,16 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 
 ## 8. 已覆盖 vs 未覆盖的人类操作
 
-**已覆盖（走确定性指令路径）**
-- 移动、建造、训练、取消当前/队列、暂停。
-- 实体/资源/暂停状态查询。
+**已覆盖（走确定性指令路径或渲染辅助）**
+- 移动、建造、训练、取消当前/队列、暂停/恢复（含 3 秒倒计时 `request_pause`）。
+- 倍速调节（`set_game_speed`）、市长列表查询与按 ID 确定性应用（`list_mayors` / `mayor_select`）。
+- 实体/资源/暂停/模式状态查询（`game_state` / `list_entities`）。
+- 摄像机查询/移动缩放（`get_camera` / `set_camera`）与开全图去黑雾（`reveal_map`）。
 
 **未覆盖（后续可加）**
-- 鼠标框选/点选、编队、摄像机移动（UI 层，通常不影响确定性）。
-- 攻击/修理等需要 `commandId` 的复合指令（可用 `issue_command` 手动指定，但缺少按名查 commandId 的便利工具）。
-- 倍速、市长二选一（`NetCommandType.SetGameSpeed/MayorVoteOrSelect` 的 executor 尚未实现，见 `docs/07 §5`）。
-- 真实键鼠事件注入（当前是"命令级"注入，不模拟输入设备）。
+- 鼠标框选/点选、编队（UI 层，本地独立状态，不影响确定性）。
+- 攻击/修理等需要 `commandId` 的复合指令（可用 `issue_command` 手动指定，后续可加按名查 commandId 的便利工具）。
+- 真实键鼠硬件事件注入（当前是"命令级"注入，不模拟输入设备）。
 
 ---
 
