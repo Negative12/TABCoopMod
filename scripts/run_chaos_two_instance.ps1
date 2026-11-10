@@ -15,7 +15,8 @@ param(
     [Parameter(Mandatory=$true)][string]$SavePath,
     [string]$Chaos = "latency=120;jitter=30;loss=0.02;disconnect=4000-5000;seed=42",
     [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
-    [int]$TimeoutSeconds = 240
+    [int]$TimeoutSeconds = 240,
+    [int]$HoldSeconds = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,13 +63,18 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 1500
     if (Test-Path $hostLog) {
         $h = Get-Content $hostLog -Tail 60 -ErrorAction SilentlyContinue
-        if ($h | Select-String -Pattern "Broadcasting Snapshot|Chaos injection active|ChaosTransport" -Quiet) { $hostOk = $true }
+        if ($h | Select-String -Pattern "Broadcasting Snapshot" -Quiet) { $hostOk = $true }
     }
     if (Test-Path $clientLog) {
         $c = Get-Content $clientLog -Tail 80 -ErrorAction SilentlyContinue
-        if ($c | Select-String -Pattern "HandshakeAccepted|Receiving Snapshot|Saved received snapshot|Loading level" -Quiet) { $clientOk = $true }
+        if ($c | Select-String -Pattern "Entered synced level" -Quiet) { $clientOk = $true }
     }
     if ($hostOk -and $clientOk) { break }
+}
+
+if (($hostOk -and $clientOk) -and $HoldSeconds -gt 0) {
+    Write-Host "[chaos] both milestones reached; holding ${HoldSeconds}s to observe lockstep..."
+    Start-Sleep -Seconds $HoldSeconds
 }
 
 Write-Host "=================== HOST LOG (tail) ==================="

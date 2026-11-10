@@ -49,6 +49,9 @@ namespace TABCoopMod.Core
         public const string Method_ZXGame_ReadSaveFile         = "#=z3YFOTVtBw_rT7oSQRA==";
         public const string Method_ZXGame_SaveGameFlow         = "#=zSV0_oCta8rEv";
         public const string Method_ZXGame_LoadGameAndEnter     = "#=z9IpK6P4YlW8GIY7olg==";
+        /// <summary>private static bool ZXGame.#=zGQN$8GM48urIpvI5bA==(string path) — save-file validity gate.
+        /// LoadGameAndEnter returns silently (no exception) when this returns false.</summary>
+        public const string Method_ZXGame_IsSaveLoadable       = "#=zGQN$8GM48urIpvI5bA==";
         public const string Method_ZXGame_ShowMayorSelection   = "#=zcITiOSD6YNmD";
         public const string Method_ZXGame_ShowSelectedMayors   = "#=zx3_1WsJs4Dyck79oqg==";
         public const string Method_ZXGame_ReturnToMainMenu     = "#=zqF2tlklT$8RE";

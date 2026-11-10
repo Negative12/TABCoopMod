@@ -196,6 +196,9 @@ namespace TABCoopMod.Commands
                     case NetCommandType.SetPaused:
                         if (DXGame.Current != null)
                         {
+                            // Drive the fixed-step clock's freeze off this session flag, not the
+                            // engine's DXGame.Paused (which the save loader leaves set).
+                            TABCoopMod.Determinism.LockstepClock.SetSessionPause(netCmd.TargetPausedState);
                             DXGame.Current.Paused = netCmd.TargetPausedState;
                             GameBridge.ShowTopBanner(
                                 netCmd.TargetPausedState ? $"Player {netCmd.PlayerId} Paused Game" : $"Player {netCmd.PlayerId} Resumed Game",

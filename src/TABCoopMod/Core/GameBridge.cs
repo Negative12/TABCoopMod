@@ -314,6 +314,78 @@ namespace TABCoopMod.Core
         }
 
         /// <summary>
+        /// Checks ZXGame's own save-file validity gate (the private static bool that
+        /// LoadGameAndEnter consults at its very top). A false result makes that call return
+        /// silently in ~5 ms with no exception and no loading — the exact symptom we chase.
+        /// </summary>
+        public static bool IsSaveLoadable(string path)
+        {
+            try
+            {
+                var m = AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_ZXGame_IsSaveLoadable, new[] { typeof(string) });
+                if (m == null) return true; // cannot check; let the engine decide
+                return (bool)m.Invoke(null, new object[] { path });
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] IsSaveLoadable check failed: {ex.Message}");
+                return true;
+            }
+        }
+
+        private static MethodInfo _methodAnimate;
+        private static int _kickFadeDiag;
+        private static PropertyInfo _propZXGameIsLoading;
+
+        public static bool IsGameLoading()
+        {
+            try
+            {
+                var game = _mZXGameCurrent?.Invoke(null, null);
+                if (game == null) return false;
+                if (_propZXGameIsLoading == null)
+                    _propZXGameIsLoading = AccessTools.Property(TypeZXGame, "IsLoading");
+                return _propZXGameIsLoading != null && (bool)_propZXGameIsLoading.GetValue(game, null);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// Advances the engine's black loading-fade DXObject by hand. LoadGameAndEnter gates the real
+        /// load behind three DXAnimation fades (see ZXGame.#=zXAMaTPI=); if the scene renders the fade
+        /// object but never advances its animation (unfocused/background window, no scene frames), the
+        /// callback chain never fires and the level never loads. Driving the animation keeps the
+        /// engine's own state machine intact instead of skipping callbacks.
+        /// </summary>
+        public static void KickLoadingFade(double advanceMs = 700.0)
+        {
+            try
+            {
+                var game = _mZXGameCurrent?.Invoke(null, null);
+                if (game == null) return;
+                var field = AccessTools.Field(TypeZXGame, ObfuscatedSymbols.Field_ZXGame_LoadingFadeObj);
+                if (!(field?.GetValue(game) is DXObject fade))
+                {
+                    if (++_kickFadeDiag <= 5) ModLogger.Info("[GameBridge] KickLoadingFade: fade object is null.");
+                    return;
+                }
+                bool inScene = fade.Scene != null;
+                bool hasAnim = fade.Animation != null;
+                if (++_kickFadeDiag <= 5)
+                    ModLogger.Info($"[GameBridge] KickLoadingFade: inScene={inScene} hasAnimation={hasAnim} opacity={fade.Opacity:F2} visible={fade.Visible}.");
+
+                if (!inScene || !hasAnim) return;
+                if (_methodAnimate == null)
+                    _methodAnimate = AccessTools.Method(typeof(DXObject), "Animate", new[] { typeof(double) });
+                _methodAnimate?.Invoke(fade, new object[] { advanceMs });
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] KickLoadingFade failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// ZXGame.#=z9DPDdq9qP9lZ silently returns when its black loading-fade object is already in
         /// the scene (e.g. a main-menu transition still animating), so a programmatic load during a
         /// snapshot arrival becomes a no-op. Detach the stale fade first.

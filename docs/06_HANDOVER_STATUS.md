@@ -244,3 +244,15 @@ compare_hashes: 首个分叉仍为 tick 32001 的 pos（注入发生前）→ �
 **下一步请直接按 `docs/09_AUDIT_AND_WORKPLAN.md` 第 3 节的 P0 → P1 → P2 → P3 计划依次推进。**
 
 
+
+---
+
+## 10. 2026-11-10 会话5：执行 docs/11 的 Step A~D（实测结果）
+
+> 详情与证据见 **`docs/11_DEEP_DIAGNOSIS_AND_NEXT_DESIGN.md` §5**。
+
+- **Gate B（Client 快照加载）已打通**：根因是引擎 `.zxcheck` 校验与存档**文件名**绑定（Client 曾改名保存 → 读档失败），以及 Chaos 抖动会重排 Snapshot 分片（改为按索引缓冲组装）。Client 实测 `Entered synced level at tick 31906`，双端 SimTick 推进到同一值（32805），无崩溃。
+- **Gate A（pos 确定性）仍未通过**：`entities/life/proj/prod/resv/经济` 一致，`pos` 仍在 tick≈31938~31945 出现每进程二值分叉。已落地并排除多类原因（详见 §5.1）；docs/11 §2.1 的三条根因中，`WindowActive`、`ZXLevelState.DXRandom` 字段在本版本**不存在**，`DXBehaviour<BData>._GlobalRandom` 实为 `[ThreadStatic]` 且 getter 无法被 HarmonyX 补丁。
+- **Gate C 部分通过**：`set_paused` 后 tick 冻结、恢复倒计时后继续；暂停期建造尚缺实机证据。
+- **6666 载入**：恢复并行读档后仍 >210s 未完成，瓶颈不在 `DXHelper_Task.For` 串行化。
+- **自动 Resync 暂时关闭**：关卡内二次读档会触发 `CShadow` NRE 崩溃，待 pos 修复或改为“回主菜单再加载”。

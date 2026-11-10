@@ -63,6 +63,29 @@ namespace TABCoopMod.Determinism
         public static volatile bool InPhysicsContext;
 
         /// <summary>
+        /// Same span as InPhysicsContext, but also gates DeterministicTaskPatch: only the two
+        /// DXPhysicWorld.UpdateDefaultTime For-loops affect simulated positions. Serializing every
+        /// other For (scene culling, texture baking, level tables) made big saves take minutes.
+        /// </summary>
+        public static volatile bool InPhysicsStep;
+
+        /// <summary>
+        /// Managed thread id of the render/frame thread (captured from DXGame.StartFrame). Used to
+        /// tell the level-loading worker thread apart from UI/render threads that also construct
+        /// DXRandom while a save is deserializing.
+        /// </summary>
+        public static int MainThreadId { get; private set; }
+
+        /// <summary>
+        /// True while the game is paused by an explicit synchronized pause command. The engine's
+        /// save loader sets DXGame.Paused=true for its own bookkeeping and never clears it, so the
+        /// fixed-step clock must key off THIS flag rather than DXGame.Paused.
+        /// </summary>
+        public static bool PausedBySession { get; private set; }
+
+        public static void SetSessionPause(bool paused) => PausedBySession = paused;
+
+        /// <summary>
         /// Seed stashed by the session/verifier before LoadSaveFileAndEnter. The counter must not be
         /// calibrated until the async loader finishes (see OnLevelLoadComplete), because at load start
         /// DXGame.Current.Entities still holds the OLD level and the save's GameTime is not restored.
@@ -70,7 +93,19 @@ namespace TABCoopMod.Determinism
         public static int PendingLoadSeed { get; private set; } = 1337;
         public static bool HasPendingPostLoadCalibration { get; private set; }
 
+        /// <summary>Host's synced entity-id counter at snapshot time; applied to the Client after load.</summary>
+        public static long PendingSnapshotEntityIdCounter { get; private set; }
+
         public static long CurrentSyncedEntityIdCounter => _syncedEntityIdCounter;
+
+        /// <summary>Adopt the Host's entity-id counter captured in the snapshot header.</summary>
+        public static void SetSyncedEntityIdCounter(long value)
+        {
+            if (value > 0) _syncedEntityIdCounter = value;
+        }
+
+        /// <summary>Record the current (render/frame) thread for load-vs-UI thread classification.</summary>
+        public static void CaptureMainThread() => MainThreadId = Thread.CurrentThread.ManagedThreadId;
 
         public static void EnableDeterministicSandbox(int initialSeed, long startingEntityIdCounter = 100000L)
         {
@@ -102,8 +137,11 @@ namespace TABCoopMod.Determinism
             InDeterministicContext = false;
             LogicTickActive = false;
             InPhysicsContext = false;
+            InPhysicsStep = false;
             LoadingLevel = false;
             HasPendingPostLoadCalibration = false;
+            PendingSnapshotEntityIdCounter = 0;
+            PausedBySession = false;
             TickGate = new AlwaysReadyTickGate();
             DXGame.IsIADeterministic = false;
             SetEngineMultiplayerMode(false);
@@ -190,29 +228,95 @@ namespace TABCoopMod.Determinism
 
         public static int SyncedRandomSeed => _syncedRandomSeed;
 
-        private static FieldInfo _behaviourGlobalRandomField;
+        private static int _behaviourResetGeneration;
+        [ThreadStatic] private static int _behaviourResetGenerationOnThread;
 
         /// <summary>
-        /// DXBehaviour&lt;TData&gt;.GlobalRandom is a SEPARATE static RNG used by the AI behaviour trees
-        /// (zombie roaming etc.). Its seed is captured at type-init from DXRandom.Global, so it is
-        /// nondeterministic across processes and is NOT covered by the DXRandom.Global patch.
-        /// Re-seat it to a fixed-seed DXRandom so behaviour-driven movement is reproducible.
+        /// DXBehaviour&lt;TData&gt;._GlobalRandom is [ThreadStatic], so the main-thread reset in
+        /// ResetBehaviourRandom never reaches the logic worker thread. Called from DXEntity.Update
+        /// (which runs on that worker): re-seat the current thread's cached instance once per level
+        /// load with a fixed seed, so behaviour trees (zombie wandering etc.) are reproducible.
+        /// </summary>
+        public static void EnsureBehaviourRandomOnCurrentThread()
+        {
+            int gen = Volatile.Read(ref _behaviourResetGeneration);
+            if (_behaviourResetGenerationOnThread == gen) return;
+            _behaviourResetGenerationOnThread = gen;
+
+            try
+            {
+                var asm = Core.GameBridge.GameAssembly;
+                if (asm == null) return;
+                Type open = typeof(DXBehaviour<>);
+                Type baseData = typeof(DXBehaviourData);
+                int seed = _syncedRandomSeed;
+
+                Type[] types;
+                try { types = asm.GetTypes(); }
+                catch (ReflectionTypeLoadException rtle) { types = rtle.Types; }
+
+                int count = 0;
+                foreach (var t in types)
+                {
+                    if (t == null || t.IsAbstract || t.IsGenericTypeDefinition || !baseData.IsAssignableFrom(t))
+                        continue;
+                    try
+                    {
+                        Type closed = open.MakeGenericType(t);
+                        AccessTools.Field(closed, "_Seed")?.SetValue(null, seed);
+                        AccessTools.Field(closed, "_GlobalRandom")?.SetValue(null, new DXRandom(seed));
+                        count++;
+                    }
+                    catch { }
+                }
+                ModLogger.Info($"[LockstepClock] Re-seeded behaviour RNG on logic thread {Thread.CurrentThread.ManagedThreadId} (types={count}, seed={seed}).");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[LockstepClock] EnsureBehaviourRandomOnCurrentThread failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// DXBehaviour&lt;TData&gt;.GlobalRandom seeds itself at type-init from DXRandom.Global
+        /// (<c>private static int _Seed = DXRandom.Global.Next()</c>), which is nondeterministic
+        /// across processes. Reset the static seed for every DXBehaviourData closed generic, plus
+        /// the calling thread's cached instance, so behaviour-driven movement (zombie roaming) is
+        /// reproducible. Worker threads lazily create their [ThreadStatic] instance from the same
+        /// _Seed on first access, so they inherit the deterministic value.
         /// </summary>
         public static void ResetBehaviourRandom(int seed)
         {
             try
             {
-                Type bData = Core.GameBridge.GameAssembly?.GetType("ZX.Behaviours.BData");
-                if (bData == null) return;
-                Type closed = typeof(DXBehaviour<>).MakeGenericType(bData);
-                if (_behaviourGlobalRandomField == null)
-                    _behaviourGlobalRandomField = closed.GetField("_GlobalRandom",
-                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                if (_behaviourGlobalRandomField == null) return;
-                _behaviourGlobalRandomField.SetValue(null, new DXRandom(seed));
-                ModLogger.Info($"[LockstepClock] Reset DXBehaviour<{bData.Name}>.GlobalRandom (seed={seed}).");
-            }
-            catch (Exception ex)
+                var asm = Core.GameBridge.GameAssembly;
+                if (asm == null) return;
+
+                Type open = typeof(DXBehaviour<>);
+                Type baseData = typeof(DXBehaviourData);
+                int resetCount = 0;
+
+                Type[] types;
+                try { types = asm.GetTypes(); }
+                catch (ReflectionTypeLoadException rtle) { types = rtle.Types; }
+
+                foreach (var t in types)
+                {
+                    if (t == null || t.IsAbstract || t.IsGenericTypeDefinition || !baseData.IsAssignableFrom(t))
+                        continue;
+                    try
+                    {
+                        Type closed = open.MakeGenericType(t);
+                        AccessTools.Field(closed, "_Seed")?.SetValue(null, seed);
+                        AccessTools.Field(closed, "_GlobalRandom")?.SetValue(null, new DXRandom(seed));
+                        resetCount++;
+                    }
+                    catch { /* closed generic not constructible for this T — skip */ }
+                }
+
+                ModLogger.Info($"[LockstepClock] Reset DXBehaviour<*>.GlobalRandom (types={resetCount}, seed={seed}).");
+                Interlocked.Increment(ref _behaviourResetGeneration);
+            }            catch (Exception ex)
             {
                 ModLogger.Warn($"[LockstepClock] ResetBehaviourRandom failed: {ex.Message}");
             }
@@ -245,9 +349,10 @@ namespace TABCoopMod.Determinism
         /// Called before LoadSaveFileAndEnter. The actual calibration is deferred to the level-load
         /// completion postfix, when the async loader has restored every entity and GameTime.
         /// </summary>
-        public static void RequestPostLoadCalibration(int seed)
+        public static void RequestPostLoadCalibration(int seed, long snapshotEntityIdCounter = 0)
         {
             PendingLoadSeed = seed;
+            PendingSnapshotEntityIdCounter = snapshotEntityIdCounter;
             HasPendingPostLoadCalibration = true;
             LoadingLevel = true;
         }
@@ -268,15 +373,37 @@ namespace TABCoopMod.Determinism
             try
             {
                 int seed = HasPendingPostLoadCalibration ? PendingLoadSeed : _syncedRandomSeed;
+                long snapshotCounter = PendingSnapshotEntityIdCounter;
                 HasPendingPostLoadCalibration = false;
+                PendingSnapshotEntityIdCounter = 0;
 
                 CalibrateEntityIdCounterFromLoadedLevel(seed);
+
+                // A Client adopts the Host's snapshot-time counter so entities spawned on either side
+                // after the snapshot share one ID space. Only move forward, never rewind below loaded IDs.
+                if (snapshotCounter > _syncedEntityIdCounter)
+                    _syncedEntityIdCounter = snapshotCounter;
                 LoadingLevel = false;
 
                 GameBridge.SortEntitiesById();
                 GameBridge.SeedLevelRandom(seed);
                 ResetBehaviourRandom(seed);
                 GameBridge.AlignSimulationClocks();
+                // The 6s opening camera pan is wall-clock driven; on two processes it lands on
+                // different frames, changing which cells are "watched" (and thus visibility-driven
+                // RNG/sprite work). Freeze it to the save's camera for a reproducible world.
+                GameBridge.DisableCameraIntroAnimation();
+
+                // The engine's save loader leaves DXGame.Paused = true (only the "Continue" button
+                // clears it). Our fixed-step clock honors Paused by freezing, so a programmatic load
+                // would never tick. Restore the running state here.
+                PausedBySession = false;
+                var game = DXGame.Current;
+                if (game != null && game.Paused)
+                {
+                    game.Paused = false;
+                    ModLogger.Info("[LockstepClock] Cleared load-time pause at level completion.");
+                }
 
                 ModLogger.Info($"[LockstepClock] Level load complete: ID counter -> {_syncedEntityIdCounter}, seed={seed}, clocks aligned.");
             }
@@ -332,9 +459,15 @@ namespace TABCoopMod.Determinism
                 return true;
 
             // DXRandom.Global is [ThreadStatic] and seeded from new Random()/real ticks, so it must
-            // never be handed out while the sandbox is active. Logic/load draws use the shared synced
-            // stream; everything else (physics callbacks, rendering) uses a separate fixed-seed stream.
-            if (LockstepClock.InDeterministicContext || LockstepClock.LogicTickActive || LockstepClock.LoadingLevel)
+            // never be handed out while the sandbox is active. Only the logic worker and the level-
+            // loading worker may draw from the shared synced stream: the main/render thread runs
+            // menu animations and loader fades whose frame counts differ between processes, and
+            // feeding those into the synced stream shifted every later draw (the A/B attractor).
+            int main = LockstepClock.MainThreadId;
+            bool onMain = main != 0 && Thread.CurrentThread.ManagedThreadId == main;
+
+            if (LockstepClock.InDeterministicContext || (LockstepClock.LogicTickActive && !onMain)
+                || (LockstepClock.LoadingLevel && !onMain))
                 __result = LockstepClock.GetSyncedGlobalRandom();
             else if (LockstepClock.InPhysicsContext)
                 __result = LockstepClock.GetAuxGlobalRandom();
@@ -359,13 +492,18 @@ namespace TABCoopMod.Determinism
             // entity timers initialized during deserialization.
             if (LockstepClock.LoadingLevel)
             {
-                DXGame.LastGameTimeIAUpdate = __instance.GameTime;
-                DXPhysicWorld.LastGameTimeUpdatePhysics = __instance.GameTime;
+                HoldClocks(__instance);
                 return;
             }
 
             LockstepClock.LogicTickActive = true;
             LockstepClock.InDeterministicContext = true;
+
+            // Background windows report Focused=false, and some engine paths branch on focus/render
+            // state. Force the flags true so a second (unfocused) process cannot take a different
+            // branch from the first one.
+            if (!__instance.Focused) __instance.Focused = true;
+            if (!__instance.Visible) __instance.Visible = true;
 
             if (DXGame.LastGameTimeIAUpdate == 0.0)
                 DXGame.LastGameTimeIAUpdate = __instance.GameTime;
@@ -374,11 +512,34 @@ namespace TABCoopMod.Determinism
             double boundary = DXGame.LastGameTimeIAUpdate + LockstepClock.MsPerLogicTick;
             bool ready = LockstepClock.TickGate == null || LockstepClock.TickGate.IsTickReady(nextTick);
 
+            if (!ready)
+            {
+                __instance.GameTime = boundary - 0.001;
+                return;
+            }
+
             // Network lockstep: apply the turn's buffered commands exactly at its tick boundary.
-            if (ready && Sync.CoopSessionManager.IsInSyncedLevel)
+            // This runs even while paused so pause-time build/move orders and SetPaused(false) are
+            // executed on the frozen tick.
+            if (Sync.CoopSessionManager.IsInSyncedLevel)
                 Sync.CoopSessionManager.FlushDueTurnCommands(nextTick);
 
-            __instance.GameTime = ready ? boundary : boundary - 0.001;
+            // Honor a synchronized pause: after flushing this frame's commands, freeze SimTick and
+            // GameTime while LockstepClock.PausedBySession is set. The engine's own DXGame.Paused is
+            // NOT used here — the save loader leaves it set (and re-sets it) for its own purposes.
+            if (LockstepClock.PausedBySession)
+            {
+                HoldClocks(__instance);
+                return;
+            }
+
+            __instance.GameTime = boundary;
+        }
+
+        private static void HoldClocks(DXGame game)
+        {
+            DXGame.LastGameTimeIAUpdate = game.GameTime;
+            DXPhysicWorld.LastGameTimeUpdatePhysics = game.GameTime;
         }
 
         [HarmonyPatch(typeof(DXGame), "UpdateGameLogic")]
@@ -405,17 +566,33 @@ namespace TABCoopMod.Determinism
         public static bool LoadPhysicsOld_Prefix() => !LockstepClock.IsDeterministicModeActive;
 
         // Mark the physics section so DXRandom.Global draws from physics callbacks use a stream that
-        // render-phase draws cannot perturb.
+        // render-phase draws cannot perturb, and so DeterministicTaskPatch only serializes the two
+        // position-affecting For-loops (not scene culling / texture baking / level tables).
         [HarmonyPatch(typeof(DXGame), "UpdatePhysics")]
         [HarmonyPrefix]
         public static void UpdatePhysics_Enter()
         {
-            if (LockstepClock.IsDeterministicModeActive) LockstepClock.InPhysicsContext = true;
+            if (!LockstepClock.IsDeterministicModeActive) return;
+            LockstepClock.InPhysicsContext = true;
+            LockstepClock.InPhysicsStep = true;
         }
 
         [HarmonyPatch(typeof(DXGame), "UpdatePhysics")]
         [HarmonyPostfix]
-        public static void UpdatePhysics_Exit() => LockstepClock.InPhysicsContext = false;
+        public static void UpdatePhysics_Exit()
+        {
+            LockstepClock.InPhysicsContext = false;
+            LockstepClock.InPhysicsStep = false;
+        }
+
+        // Remember which thread runs the frame loop; DXRandomCtorPatch uses it to keep the
+        // level-loading worker's seed sequence synced while the UI thread stays off that counter.
+        [HarmonyPatch(typeof(DXGame), "StartFrame")]
+        [HarmonyPrefix]
+        public static void StartFrame_CaptureMainThread()
+        {
+            if (LockstepClock.MainThreadId == 0) LockstepClock.CaptureMainThread();
+        }
     }
 
     /// <summary>
@@ -459,6 +636,60 @@ namespace TABCoopMod.Determinism
             LockstepClock.OnLevelLoadComplete();
             Testing.DeterministicReplayVerifier.OnLevelLoadComplete();
             Sync.CoopSessionManager.OnLevelLoadComplete();
+        }
+    }
+
+    /// <summary>
+    /// DXEntity.Update runs on the deterministic logic worker thread (single-threaded branch in
+    /// DXGame.UpdateGameLogic). Use it to re-seed that thread's [ThreadStatic] behaviour RNG once
+    /// per level load before any behaviour node executes.
+    /// </summary>
+    [HarmonyPatch(typeof(DXEntity), "Update")]
+    public static class EntityUpdateBehaviourRandomPatch
+    {
+        [HarmonyPrefix]
+        public static void Prefix()
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                LockstepClock.EnsureBehaviourRandomOnCurrentThread();
+        }
+    }
+
+    /// <summary>
+    /// Logs any engine message-box alert raised while deterministic mode is active. The save loader
+    /// reports deserialization failures this way (no exception escapes), so a silent Client-side
+    /// load failure shows up here.
+    /// </summary>
+    [HarmonyPatch]
+    public static class MessageBoxAlertDiagPatch
+    {
+        public static MethodBase TargetMethod() =>
+            AccessTools.Method(GameBridge.TypeZXMessageBoxHelper, ObfuscatedSymbols.Method_MsgBox_ShowAlert,
+                new[] { typeof(string), typeof(string), typeof(Action) });
+
+        [HarmonyPrefix]
+        public static void Prefix(string __0, string __1)
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                ModLogger.Warn($"[MsgBox] {__0}: {__1}");
+        }
+    }
+
+    /// <summary>
+    /// DXGame.IsFrameSceneModule(n) is true when the RENDER frame counter is a multiple of n. Two
+    /// processes render at different rates (focused vs background window), so any logic or UI action
+    /// gated on it drifts apart. In deterministic mode, gate on the logic tick counter instead.
+    /// </summary>
+    [HarmonyPatch(typeof(DXGame), "IsFrameSceneModule")]
+    public static class FrameSceneModuleDeterminismPatch
+    {
+        [HarmonyPrefix]
+        public static bool Prefix(int iteration, ref bool __result)
+        {
+            if (!LockstepClock.IsDeterministicModeActive) return true;
+            var game = DXGame.Current;
+            __result = iteration > 0 && game != null && (game.IAIterationInt % iteration) == 0;
+            return false;
         }
     }
 

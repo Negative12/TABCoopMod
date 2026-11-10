@@ -54,6 +54,12 @@ namespace TABCoopMod.Testing
             if (!TestHarnessConfig.Enabled || string.IsNullOrEmpty(TestHarnessConfig.ReplaySave) || _phase != Phase.Idle)
                 return;
 
+            // Co-op host/client sessions also auto-load a save, but must not run the single-process
+            // replay verifier (it would reload the level for its second pass mid-session).
+            if (string.Equals(TestHarnessConfig.Role, "host", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(TestHarnessConfig.Role, "client", StringComparison.OrdinalIgnoreCase))
+                return;
+
             _savePath = TestHarnessConfig.ReplaySave;
             _ticks = TestHarnessConfig.ReplayTicks;
             _scenarioPath = string.Equals(TestHarnessConfig.Scenario, "default", StringComparison.OrdinalIgnoreCase)

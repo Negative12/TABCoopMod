@@ -30,6 +30,9 @@ namespace TABCoopMod.Sync
         public static bool IsSessionActive => Transport != null && Transport.IsActive;
         public static bool IsInSyncedLevel { get; private set; }
 
+        /// <summary>Auto-resync is opt-in until in-level reloads stop crashing the engine scene update.</summary>
+        public static bool EnableAutoResync = false;
+
         private static readonly List<NetCommand> _localOutgoingQueue = new List<NetCommand>();
         private static readonly List<NetCommand> _hostTurnBuffer = new List<NetCommand>();
 
@@ -47,11 +50,24 @@ namespace TABCoopMod.Sync
 
         private static bool _awaitingSnapshotLoad;
 
-        // Snapshot receive buffer on Client
-        private static MemoryStream _incomingSaveStream;
+        // Deferred work: never export/load from inside a deep engine callback (LevelLoadComplete
+        // postfix / network PollEvents). Doing the ZIP save from that stack exhausted the 1 MB main
+        // thread stack (0xc00000fd) and re-entered the session callbacks.
+        private static bool _pendingHostSnapshotExport;
+        private static string _pendingClientSnapshotLoadPath;
+        private static bool _kickingLoadFade;
+        private static int _loadFadeKickFrames;
+        private static double _loadFadeKickStartTicks = -1.0;
+        private const double LoadFadeTimeoutMs = 30000.0;
+
+        // Snapshot receive buffer on Client. Chaos/jitter can deliver chunks out of order (even
+        // before SnapshotBegin), so buffer by index and assemble in order once all are present.
+        private static readonly Dictionary<int, byte[]> _incomingChunks = new Dictionary<int, byte[]>();
+        private static int _expectedChunks;
         private static int _expectedSaveBytes;
         private static string _incomingCheckContent = string.Empty;
         private static int _incomingRandomSeed = 1337;
+        private static long _incomingEntityIdCounter;
 
         // Ally Cursor & Camera State
         public sealed class AllyVisualState
@@ -108,6 +124,12 @@ namespace TABCoopMod.Sync
             _hostLastBroadcastSimTick = -1;
             _gateWaitStartTicks = -1.0;
             _awaitingSnapshotLoad = false;
+            _pendingHostSnapshotExport = false;
+            _pendingClientSnapshotLoadPath = null;
+            _kickingLoadFade = false;
+            _loadFadeKickStartTicks = -1.0;
+            _incomingChunks.Clear();
+            _expectedChunks = 0;
             _networkGate = new TurnInputTickGate();
 
             if (Transport != null)
@@ -142,7 +164,7 @@ namespace TABCoopMod.Sync
                 // If Host is already inside a level when a peer connects, push snapshot immediately!
                 if (Transport.IsHost && GameBridge.CurrentLevelState != null)
                 {
-                    BroadcastCurrentLevelSnapshot();
+                    RequestSnapshotBroadcast();
                 }
             };
 
@@ -159,6 +181,18 @@ namespace TABCoopMod.Sync
             };
 
             Transport.OnPacketReceived += OnPacketReceived;
+        }
+
+        /// <summary>
+        /// Defers a Host snapshot export to the next OnFrameTick top-level. Callers may sit on a deep
+        /// engine/network stack (LevelLoadComplete postfix, packet delivery), where the recursive ZIP
+        /// serializer would blow the main-thread stack.
+        /// </summary>
+        public static void RequestSnapshotBroadcast()
+        {
+            if (Transport == null || !Transport.IsHost || GameBridge.CurrentLevelState == null)
+                return;
+            _pendingHostSnapshotExport = true;
         }
 
         /// <summary>
@@ -199,6 +233,7 @@ namespace TABCoopMod.Sync
                     w.Write(totalChunks);
                     w.Write(chkText);
                     w.Write(syncSeed);
+                    w.Write(LockstepClock.CurrentSyncedEntityIdCounter);
                 });
 
                 for (int i = 0; i < totalChunks; i++)
@@ -222,7 +257,9 @@ namespace TABCoopMod.Sync
             }
             finally
             {
-                try { DXGame.Current.GameSpeed = wasGameSpeed; } catch { }
+                // Never restore a zero speed: that would look like an engine pause and stall the
+                // host heartbeat. Session pauses are restarted explicitly via SetPaused commands.
+                try { DXGame.Current.GameSpeed = wasGameSpeed > 0.0 ? wasGameSpeed : 1.0; } catch { }
             }
         }
 
@@ -269,6 +306,11 @@ namespace TABCoopMod.Sync
             _networkGate.MarkReady(cur + InputDelayTicks);
             IsInSyncedLevel = true;
             CommandInterceptor.IsInterceptionEnabled = true;
+
+            // The save loader leaves DXGame.Paused/GameSpeed at 0; clear it so engine animations and
+            // the fixed-step clock start running. Session pauses are tracked separately.
+            LockstepClock.SetSessionPause(false);
+            if (DXGame.Current != null && DXGame.Current.Paused) DXGame.Current.Paused = false;
 
             ModLogger.Info($"[CoopSessionManager] Entered synced level at tick {cur} (inputDelay={InputDelayTicks}, role={(Transport.IsHost ? "Host" : "Client")}).");
         }
@@ -328,7 +370,19 @@ namespace TABCoopMod.Sync
         public static void OnLevelLoadComplete()
         {
             if (!IsSessionActive) return;
-            if (Transport.IsHost) return;
+
+            if (Transport.IsHost)
+            {
+                // Only now is the level fully restored: exporting earlier (from InitLevel) captured a
+                // half-deserialized save and entered the synced level before the host was ready.
+                if (!IsInSyncedLevel)
+                {
+                    EnterSyncedLevel();
+                    RequestSnapshotBroadcast();
+                }
+                return;
+            }
+
             if (!_awaitingSnapshotLoad) return;
 
             _awaitingSnapshotLoad = false;
@@ -336,18 +390,35 @@ namespace TABCoopMod.Sync
         }
 
         /// <summary>Records the snapshot seed so the post-load calibration uses the Host's seed.</summary>
-        public static void RequestSnapshotCalibration(int seed)
+        public static void RequestSnapshotCalibration(int seed, long entityIdCounter = 0)
         {
             _awaitingSnapshotLoad = true;
             LockstepClock.EnableDeterministicSandbox(seed);
-            LockstepClock.RequestPostLoadCalibration(seed);
+            LockstepClock.RequestPostLoadCalibration(seed, entityIdCounter);
         }
 
         public static void OnFrameTick()
         {
             if (!IsSessionActive) return;
 
+            // Deferred, top-of-frame (shallow stack) work: export never runs inside the loader
+            // postfix; client load never runs inside packet delivery.
+            if (_pendingHostSnapshotExport)
+            {
+                _pendingHostSnapshotExport = false;
+                BroadcastCurrentLevelSnapshot();
+            }
+            if (_pendingClientSnapshotLoadPath != null)
+            {
+                string path = _pendingClientSnapshotLoadPath;
+                _pendingClientSnapshotLoadPath = null;
+                BeginClientSnapshotLoad(path);
+            }
+
             Transport.PollEvents();
+
+            // Keep the engine's loader fades advancing while the Client waits to enter the level.
+            TickLoadingFade();
 
             if (!IsInSyncedLevel || GameBridge.CurrentLevelState == null)
                 return;
@@ -377,14 +448,24 @@ namespace TABCoopMod.Sync
 
             // 2. Host broadcasts TurnInputBroadcast for EVERY advanced sim tick (even empty heartbeat)
             //    and enqueues the commands for local execution on TargetSimTick. Nothing is executed
-            //    on receipt, so both peers apply the same turn on the same tick.
+            //    on receipt, so both peers apply the same turn on the same tick. While paused the
+            //    tick does not advance, so a new turn (pause-time build orders / SetPaused(false))
+            //    is broadcast stamped on the frozen tick instead.
             if (Transport.IsHost)
             {
                 int cur = DXGame.Current?.IAIterationInt ?? 0;
-                if (cur > _hostLastBroadcastSimTick)
+                // Use the synchronized pause flag, not DXGame.Paused: the engine's save loader leaves
+                // DXGame.Paused set, which would stop the host from emitting heartbeat turns and
+                // deadlock the client's gate at the very first tick.
+                bool paused = LockstepClock.PausedBySession;
+                bool hasTurn = false;
+                lock (_hostTurnBuffer) hasTurn = _hostTurnBuffer.Count > 0;
+                bool shouldBroadcast = paused ? hasTurn : cur > _hostLastBroadcastSimTick;
+
+                if (shouldBroadcast)
                 {
-                    _hostLastBroadcastSimTick = cur;
-                    int targetTick = cur + InputDelayTicks;
+                    if (cur > _hostLastBroadcastSimTick) _hostLastBroadcastSimTick = cur;
+                    int targetTick = paused ? cur : cur + InputDelayTicks;
 
                     List<NetCommand> turnCmds = null;
                     lock (_hostTurnBuffer)
@@ -490,12 +571,13 @@ namespace TABCoopMod.Sync
                 case PacketType.SnapshotBegin:
                 {
                     _expectedSaveBytes = r.ReadInt32();
-                    int totalChunks = r.ReadInt32();
+                    _expectedChunks = r.ReadInt32();
                     _incomingCheckContent = r.ReadString();
                     _incomingRandomSeed = r.ReadInt32();
-                    _incomingSaveStream = new MemoryStream(_expectedSaveBytes);
-                    ModLogger.Info($"[CoopSessionManager] Receiving Snapshot from Host ({_expectedSaveBytes:N0} bytes, {totalChunks} chunks)...");
+                    _incomingEntityIdCounter = r.ReadInt64();
+                    ModLogger.Info($"[CoopSessionManager] Receiving Snapshot from Host ({_expectedSaveBytes:N0} bytes, {_expectedChunks} chunks, seed={_incomingRandomSeed}, idCounter={_incomingEntityIdCounter}); buffered={_incomingChunks.Count}.");
                     GameBridge.ShowTopBanner("Receiving Map Snapshot from Host...", Color.Cyan, 3000);
+                    TryAssembleSnapshot();
                     break;
                 }
 
@@ -504,14 +586,11 @@ namespace TABCoopMod.Sync
                     int chunkIdx = r.ReadInt32();
                     int len = r.ReadInt32();
                     byte[] data = r.ReadBytes(len);
-                    _incomingSaveStream?.Write(data, 0, data.Length);
-
-                    if (_incomingSaveStream != null && _incomingSaveStream.Length >= _expectedSaveBytes)
-                    {
-                        ApplyReceivedSnapshotOnClient(_incomingSaveStream.ToArray(), _incomingCheckContent, _incomingRandomSeed);
-                        _incomingSaveStream.Dispose();
-                        _incomingSaveStream = null;
-                    }
+                    // Chunks may arrive before SnapshotBegin and out of order (ChaosTransport jitter
+                    // reorders even ReliableOrdered). Buffer by index; assemble once complete.
+                    if (chunkIdx >= 0) _incomingChunks[chunkIdx] = data;
+                    ModLogger.Info($"[CoopSessionManager] Snapshot chunk {chunkIdx} received ({len:N0} bytes, buffered={_incomingChunks.Count}/{_expectedChunks}).");
+                    TryAssembleSnapshot();
                     break;
                 }
 
@@ -566,9 +645,12 @@ namespace TABCoopMod.Sync
                     ulong clientHash = r.ReadUInt64();
                     if (_hostTickHashes.TryGetValue(clientTick, out ulong hostHash) && hostHash != clientHash)
                     {
-                        ModLogger.Warn($"[CoopSessionManager] DESYNC DETECTED at Tick {clientTick}! Host=0x{hostHash:X16}, Client({senderId})=0x{clientHash:X16}. Triggering Auto-Resync...");
-                        GameBridge.ShowTopBanner("State Drift Detected — Auto-Syncing World...", Color.Orange, 2500);
-                        BroadcastCurrentLevelSnapshot();
+                        ModLogger.Warn($"[CoopSessionManager] DESYNC DETECTED at Tick {clientTick}! Host=0x{hostHash:X16}, Client({senderId})=0x{clientHash:X16}.");
+                        GameBridge.ShowTopBanner("State Drift Detected (see log)", Color.Orange, 2500);
+                        // Auto-resync is disabled: re-loading a save while a level is already running
+                        // crashes the engine's scene update (CShadow NRE) and, with the known `pos`
+                        // residual, would loop forever. Re-enable once position determinism is fixed.
+                        if (EnableAutoResync) RequestSnapshotBroadcast();
                     }
                     break;
                 }
@@ -616,42 +698,119 @@ namespace TABCoopMod.Sync
             }
         }
 
-        private static void ApplyReceivedSnapshotOnClient(byte[] savBytes, string chkContent, int randomSeed)
+        private static void TryAssembleSnapshot()
+        {
+            if (_expectedChunks <= 0 || _incomingChunks.Count < _expectedChunks) return;
+
+            for (int i = 0; i < _expectedChunks; i++)
+                if (!_incomingChunks.ContainsKey(i)) return;
+
+            int total = 0;
+            for (int i = 0; i < _expectedChunks; i++) total += _incomingChunks[i].Length;
+            byte[] savBytes = new byte[total];
+            int offset = 0;
+            for (int i = 0; i < _expectedChunks; i++)
+            {
+                byte[] part = _incomingChunks[i];
+                Buffer.BlockCopy(part, 0, savBytes, offset, part.Length);
+                offset += part.Length;
+            }
+            _incomingChunks.Clear();
+            _expectedChunks = 0;
+
+            ApplyReceivedSnapshotOnClient(savBytes, _incomingCheckContent, _incomingRandomSeed, _incomingEntityIdCounter);
+        }
+
+        private static void ApplyReceivedSnapshotOnClient(byte[] savBytes, string chkContent, int randomSeed,
+            long hostEntityIdCounter)
         {
             try
             {
                 string savesDir = GameBridge.GetSavesDirectory();
-                string clientSaveName = "coop_client_sync";
+                // Reuse the Host's exact file stem: the engine's .zxcheck sidecar appears to be bound
+                // to the save name (renaming it made ReadSaveFile fail with "error while loading").
+                string clientSaveName = "coop_host_snapshot";
                 string savPath = Path.Combine(savesDir, clientSaveName + ".zxsav");
                 string chkPath = Path.Combine(savesDir, clientSaveName + ".zxcheck");
 
                 File.WriteAllBytes(savPath, savBytes);
+                // ZXGame validates saves via Path.ChangeExtension(path, ".zxcheck") and the sidecar
+                // is bound to the save name, hence we reuse the Host's file stem above.
                 File.WriteAllText(chkPath, chkContent);
 
-                ModLogger.Info($"[CoopSessionManager] Saved received snapshot to {savPath} ({savBytes.Length:N0} bytes). Loading level...");
+                ModLogger.Info($"[CoopSessionManager] Saved received snapshot to {savPath} ({savBytes.Length:N0} bytes, check={chkContent.Length} chars). Deferring load to next frame...");
 
-                DXGame.Current.InvokeOnStartFrame(() =>
-                {
-                    try
-                    {
-                        // Enable the deterministic sandbox and defer ID calibration to the loader
-                        // completion postfix — the level is not restored when LoadSaveFileAndEnter returns.
-                        RequestSnapshotCalibration(randomSeed);
-                        GameBridge.PrepareForProgrammaticLoad();
-                        ModLogger.Info($"[CoopSessionManager] Client calling LoadSaveFileAndEnter('{savPath}')...");
-                        GameBridge.LoadSaveFileAndEnter(savPath);
-                        ModLogger.Info("[CoopSessionManager] Client LoadSaveFileAndEnter returned.");
-                    }
-                    catch (Exception ex)
-                    {
-                        ModLogger.Error("[CoopSessionManager] Client snapshot load threw", ex);
-                    }
-                });
+                // Defer: this runs inside network packet delivery. Loading here re-enters the engine
+                // and previously blew the main-thread stack under Chaos.
+                _incomingRandomSeed = randomSeed;
+                _incomingEntityIdCounter = hostEntityIdCounter;
+                _pendingClientSnapshotLoadPath = savPath;
             }
             catch (Exception ex)
             {
                 ModLogger.Error("[CoopSessionManager] Failed to apply received snapshot on Client", ex);
             }
+        }
+
+        /// <summary>Client-side snapshot load, executed from OnFrameTick before packet polling.</summary>
+        private static void BeginClientSnapshotLoad(string savPath)
+        {
+            try
+            {
+                if (!GameBridge.IsSaveLoadable(savPath))
+                {
+                    ModLogger.Error($"[CoopSessionManager] ZXGame rejected the received snapshot as unloadable: {savPath}");
+                    GameBridge.ShowTopBanner("Received snapshot failed the save-file validity check", Color.OrangeRed, 4000);
+                    return;
+                }
+
+                // Enable the deterministic sandbox and defer ID calibration to the loader completion
+                // postfix — the level is not restored when LoadSaveFileAndEnter returns.
+                RequestSnapshotCalibration(_incomingRandomSeed, _incomingEntityIdCounter);
+                GameBridge.PrepareForProgrammaticLoad();
+
+                ModLogger.Info($"[CoopSessionManager] Client calling LoadSaveFileAndEnter('{savPath}')...");
+                GameBridge.LoadSaveFileAndEnter(savPath);
+                ModLogger.Info("[CoopSessionManager] Client LoadSaveFileAndEnter returned; driving loader fades.");
+
+                _kickingLoadFade = true;
+                _loadFadeKickFrames = 0;
+                _loadFadeKickStartTicks = -1.0;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error("[CoopSessionManager] Client snapshot load threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// Advances the engine's black loading-fade animation while the Client waits to enter the
+        /// level. LoadGameAndEnter gates the real load behind a DXAnimation chain that never runs if
+        /// the background window's scene does not advance it.
+        /// </summary>
+        private static void TickLoadingFade()
+        {
+            if (!_kickingLoadFade) return;
+
+            if (!_awaitingSnapshotLoad && !LockstepClock.LoadingLevel)
+            {
+                _kickingLoadFade = false;
+                return;
+            }
+
+            double now = DXHelper_Environment.Ticks;
+            if (_loadFadeKickStartTicks < 0.0) _loadFadeKickStartTicks = now;
+            else if (now - _loadFadeKickStartTicks >= LoadFadeTimeoutMs)
+            {
+                _kickingLoadFade = false;
+                ModLogger.Error("[CoopSessionManager] Client snapshot load did not complete within 30s of driving the loader fades.");
+                return;
+            }
+
+            GameBridge.KickLoadingFade(700.0);
+
+            if ((++_loadFadeKickFrames % 60) == 0)
+                ModLogger.Info($"[LoadFade] frames={_loadFadeKickFrames} awaited={_awaitingSnapshotLoad} loading={LockstepClock.LoadingLevel} zxLoading={GameBridge.IsGameLoading()} tick={DXGame.Current?.IAIterationInt ?? -1}");
         }
     }
 
@@ -684,11 +843,9 @@ namespace TABCoopMod.Sync
 
                 if (CoopSessionManager.Transport.IsHost)
                 {
-                    ModLogger.Info("[SessionLifecyclePatches] Host level initialized! Scheduling initial snapshot broadcast...");
-                    DXGame.Current.InvokeOnFinishFrame(() =>
-                    {
-                        CoopSessionManager.BroadcastCurrentLevelSnapshot();
-                    });
+                    // Snapshot export is triggered from CoopSessionManager.OnLevelLoadComplete, not
+                    // here: InitLevel fires while the save is still deserializing.
+                    ModLogger.Info("[SessionLifecyclePatches] Host level initialized; snapshot will be sent after load completes.");
                 }
                 else
                 {
