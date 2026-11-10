@@ -32,6 +32,18 @@ namespace TABCoopMod.Patches
         public static Action<NetCommand> OnLocalCommandCaptured;
 
         /// <summary>
+        /// Routes a command through the session (or executes it directly when no session is active).
+        /// Use this for commands generated outside the Harmony capture points (pause/speed keys).
+        /// </summary>
+        public static void Dispatch(NetCommand cmd)
+        {
+            if (cmd == null) return;
+            var callback = OnLocalCommandCaptured;
+            if (callback != null) callback(cmd);
+            else CommandExecutor.Execute(cmd);
+        }
+
+        /// <summary>
         /// Internal flag set while CCommandable.#=zrz2EI1A= (production queue auto-advance) is running,
         /// so auto-popped queued orders are NOT mistaken for new player clicks!
         /// </summary>
@@ -81,7 +93,9 @@ namespace TABCoopMod.Patches
 
             ulong[] unitIds = selectedList
                 .Select(s => ((DXComponent)s).Entity)
-                .Where(e => e != null && !e.Disposed && e.HasComponent<CMovable>() && e.HasComponent<CCommandable>())
+                .Where(e => e != null && !e.Disposed
+                    && GameBridge.HasComponent(e, GameBridge.TypeCMovable)
+                    && GameBridge.HasComponent(e, GameBridge.TypeCCommandable))
                 .Select(e => e.ID)
                 .ToArray();
 
@@ -139,24 +153,35 @@ namespace TABCoopMod.Patches
 
             bool isShift = DXInputState.Current?.IsKeyPressed(DXKeys.Shift, false) ?? false;
 
-            if (__instance is Build buildCmd)
+            // Build and the free mayor-reward buildings (EntityBonusCreation) are both entity-creation
+            // commands; they must be replayed as PlaceBuilding so the peer builds the same structure.
+            // Checked by runtime type NAME, never `is Build` (both types are internal / obfuscated).
+            string cmdTypeName = __instance.GetType().Name;
+            bool isBuildingCmd = string.Equals(cmdTypeName, "Build", StringComparison.Ordinal)
+                              || string.Equals(cmdTypeName, "EntityBonusCreation", StringComparison.Ordinal);
+            if (isBuildingCmd)
             {
-                var netBuild = new NetCommand
+                Type buildingType = GameBridge.GetBuildingTypeFromCommand(__instance);
+                if (buildingType != null)
                 {
-                    Type = NetCommandType.PlaceBuilding,
-                    PlayerId = CommandInterceptor.LocalPlayerId,
-                    TargetSimTick = DXGame.Current?.IAIterationInt ?? 0,
-                    IsShiftQueued = isShift,
-                    CommandId = buildCmd.ID,
-                    BuildingTypeName = buildCmd.EntityType?.FullName ?? string.Empty,
-                    ExecutorEntityIds = new[] { __0.ID },
-                    TargetEntityId = __1.SerEntityRef.IDEntity,
-                    TargetPosition = __1.SerPosition,
-                    TargetSize = __1.SerSize,
-                    TargetOrigin = __1.SerOrigin
-                };
-                CommandInterceptor.OnLocalCommandCaptured?.Invoke(netBuild);
-                return false;
+                    var netBuild = new NetCommand
+                    {
+                        Type = NetCommandType.PlaceBuilding,
+                        PlayerId = CommandInterceptor.LocalPlayerId,
+                        TargetSimTick = DXGame.Current?.IAIterationInt ?? 0,
+                        IsShiftQueued = isShift,
+                        CommandId = __instance.ID,
+                        BuildingTypeName = buildingType.FullName,
+                        IsBonusBuilding = string.Equals(cmdTypeName, "EntityBonusCreation", StringComparison.Ordinal),
+                        ExecutorEntityIds = new[] { __0.ID },
+                        TargetEntityId = __1.SerEntityRef.IDEntity,
+                        TargetPosition = __1.SerPosition,
+                        TargetSize = __1.SerSize,
+                        TargetOrigin = __1.SerOrigin
+                    };
+                    CommandInterceptor.OnLocalCommandCaptured?.Invoke(netBuild);
+                    return false;
+                }
             }
 
             var netCmd = new NetCommand

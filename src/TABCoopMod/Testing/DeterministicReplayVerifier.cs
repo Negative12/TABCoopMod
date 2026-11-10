@@ -80,7 +80,9 @@ namespace TABCoopMod.Testing
             {
                 LockstepClock.TickGate = new AlwaysReadyTickGate();
                 LockstepClock.EnableDeterministicSandbox(ReplaySeed);
-                LockstepClock.LoadingLevel = true;
+                // Defer ID calibration until the async loader reports completion: at this point the
+                // old level's entities are still live and the save's GameTime is not restored yet.
+                LockstepClock.RequestPostLoadCalibration(ReplaySeed);
                 LockstepClock.ResetBehaviourRandom(ReplaySeed);
                 ModLogger.Info("[ReplayVerifier] Deterministic sandbox enabled BEFORE load.");
             }
@@ -103,10 +105,10 @@ namespace TABCoopMod.Testing
             {
                 _currentRun = run;
                 ResetStaticsForRun();
-                LockstepClock.LoadingLevel = false; // load finished; InitLevel postfix has fired
 
                 // Baseline tick is captured lazily on the first real logic tick, because the save's
-                // IAIterationInt is restored only after InitLevel returns.
+                // IAIterationInt is restored only after InitLevel returns. LoadingLevel stays true
+                // until LevelLoadCompletePatch fires.
                 _baselineTick = -1;
                 _driver = null;
                 _armTick = -1;
@@ -115,11 +117,12 @@ namespace TABCoopMod.Testing
                 _reloadPending = false;
                 _shotDueCount = -1;
 
-                LockstepClock.EnableDeterministicSandbox(ReplaySeed);
-                LockstepClock.CalibrateEntityIdCounterFromLoadedLevel(ReplaySeed);
+                // NOTE: do NOT re-enable the sandbox or reseed RNG here. InitLevel runs on the
+                // loader's background thread while the save is still being deserialized; resetting
+                // the DXRandom counter at this nondeterministic moment makes entities constructed
+                // afterwards draw different seeds in each process. PrepareForLoad() already enabled
+                // the sandbox and LevelLoadCompletePatch re-seeds at a deterministic point.
                 LockstepClock.TickGate = new AlwaysReadyTickGate();
-                GameBridge.SortEntitiesById();
-                LockstepClock.ResetBehaviourRandom(ReplaySeed);
 
                 _records.Clear();
                 _phase = Phase.Running;
@@ -136,6 +139,8 @@ namespace TABCoopMod.Testing
         public static void OnBeforeLogicTick(int nextSimTick)
         {
             if (_phase != Phase.Running) return;
+            // Never capture a baseline (or record) against a level that is still being loaded.
+            if (LockstepClock.LoadingLevel) return;
 
             if (_baselineTick < 0)
             {
@@ -153,19 +158,38 @@ namespace TABCoopMod.Testing
                 bool giveUp = sinceArm >= SettleGiveUpTicks;
                 if (!aligned && !giveUp) return;
 
-                _baselineTick = nextSimTick;
-                LockstepClock.ResetBehaviourRandom(ReplaySeed);
-                GameBridge.SortEntitiesById();
-                _driver = string.IsNullOrEmpty(_scenarioPath)
-                    ? ScriptedCommandDriver.CreateDefault(_baselineTick)
-                    : ScriptedCommandDriver.FromFile(_scenarioPath);
-
-                int players = GameBridge.GetPlayerEntities().Count;
-                var cc = GameBridge.GetCommandCenterEntity();
-                ModLogger.Info($"[ReplayVerifier] RUN {_currentRun} baseline tick {_baselineTick}: entities={total}, players={players}, cc={(cc != null ? cc.ID.ToString() : "none")}, ops={_driver.Count}, aligned={aligned}");
+                EstablishBaseline(nextSimTick, aligned);
             }
 
             _driver?.OnBeforeLogicTick(nextSimTick);
+        }
+
+        /// <summary>
+        /// Locks in the run's start tick. Prefer calling this from the level-load-completion postfix:
+        /// right then the entity set/positions are byte-identical on both processes (loadPosHash
+        /// matched in testing). Waiting for a "settled" absolute tick instead lets a different number
+        /// of physics frames run during the scene-initialization window, which moved zombies apart.
+        /// </summary>
+        private static void EstablishBaseline(int tick, bool aligned)
+        {
+            _baselineTick = tick;
+            // Everything (entities, GameTime, IAIterationInt) is restored by now: recalibrate the
+            // synced ID counter above the save's max ID, fix update order and zero-phase both
+            // clocks so both runs start from an identical state.
+            LockstepClock.CalibrateEntityIdCounterFromLoadedLevel(ReplaySeed);
+            GameBridge.SortEntitiesById();
+            GameBridge.SeedLevelRandom(ReplaySeed);
+            LockstepClock.ResetBehaviourRandom(ReplaySeed);
+            GameBridge.AlignSimulationClocks();
+            _driver = string.IsNullOrEmpty(_scenarioPath)
+                ? ScriptedCommandDriver.CreateDefault(_baselineTick)
+                : ScriptedCommandDriver.FromFile(_scenarioPath);
+
+            int players = GameBridge.GetPlayerEntities().Count;
+            var cc = GameBridge.GetCommandCenterEntity();
+            ulong baseHash = ComputePositionHash();
+            try { File.WriteAllText(Path.Combine(TestHarnessConfig.OutputDirectory, $"coop_baselinepos_run{_currentRun}.txt"), $"0x{baseHash:X16}"); } catch { }
+            ModLogger.Info($"[ReplayVerifier] RUN {_currentRun} baseline tick {_baselineTick}: entities={CountEntities()}, players={players}, cc={(cc != null ? cc.ID.ToString() : "none")}, ops={_driver.Count}, aligned={aligned}, basePosHash=0x{baseHash:X16}");
         }
 
         private static int CountEntities()
@@ -176,7 +200,7 @@ namespace TABCoopMod.Testing
             return total;
         }
 
-        private static void DumpPositions()
+        private static void DumpPositions(string suffix = null)
         {
             try
             {
@@ -195,7 +219,8 @@ namespace TABCoopMod.Testing
                         n++;
                     }
                 }
-                string path = Path.Combine(TestHarnessConfig.OutputDirectory, $"coop_pos_run{_currentRun}.txt");
+                string name = suffix == null ? $"coop_pos_run{_currentRun}.txt" : $"coop_pos_run{_currentRun}_{suffix}.txt";
+                string path = Path.Combine(TestHarnessConfig.OutputDirectory, name);
                 File.WriteAllText(path, sb.ToString());
                 ModLogger.Info($"[ReplayVerifier] Dumped {n} entity positions -> {path}");
             }
@@ -204,7 +229,6 @@ namespace TABCoopMod.Testing
                 ModLogger.Error("[ReplayVerifier] DumpPositions failed", ex);
             }
         }
-
         /// <summary>
         /// At the first recorded tick, dump positions plus a screenshot and the camera transform so a
         /// report can box divergent entities directly on the image (see scripts/build_divergence_report.py).
@@ -215,9 +239,8 @@ namespace TABCoopMod.Testing
 
             if (TestHarnessConfig.RevealMap)
             {
-                bool a = GameBridge.SetShowFullMap(true);
-                bool b = GameBridge.SetFogEnabled(false);
-                ModLogger.Info($"[ReplayVerifier] reveal map: ShowFullMap={a}, FogDisabled={b}");
+                bool ok = GameBridge.RevealAll(true);
+                ModLogger.Info($"[ReplayVerifier] reveal map (instant): {ok}");
             }
 
             // Optional camera override (TABCOOP_SHOT_CAM) lets the report look at the interaction
@@ -306,6 +329,7 @@ namespace TABCoopMod.Testing
         public static void OnAfterLogicTick(int tick)
         {
             if (_phase != Phase.Running || _baselineTick < 0) return;
+            if (LockstepClock.LoadingLevel) return;
 
             // Guarantee the logic Task has finished regardless of patch ordering vs the clock patch.
             try { AccessTools.Method(typeof(DXGame), "WaitForGameLogic")?.Invoke(DXGame.Current, null); } catch { }
@@ -365,7 +389,11 @@ namespace TABCoopMod.Testing
                     ModLogger.Info("[ReplayVerifier] Reloading save for RUN 2...");
                     DXGame.Current.InvokeOnStartFrame(() =>
                     {
-                        try { GameBridge.LoadSaveFileAndEnter(_savePath); }
+                        try
+                        {
+                            PrepareForLoad(); // re-arm deterministic sandbox + defer ID calibration
+                            GameBridge.LoadSaveFileAndEnter(_savePath);
+                        }
                         catch (Exception ex) { ModLogger.Error("[ReplayVerifier] Reload for RUN 2 failed", ex); FallbackRequired(); }
                     });
                 }
@@ -422,9 +450,48 @@ namespace TABCoopMod.Testing
             LockstepClock.LogicTickActive = false;
             LockstepClock.InDeterministicContext = false;
 
-            try { DXGame.LastGameTimeIAUpdate = 0.0; } catch { }
-            try { DXPhysicWorld.LastGameTimeUpdatePhysics = 0.0; } catch { }
+            // NEVER reset LastGameTimeIAUpdate / LastGameTimeUpdatePhysics to 0.0: on a late-game
+            // save this makes UpdatePhysics run tens of thousands of steps in a single frame.
+            // LevelLoadCompletePatch and the baseline capture align them to GameTime instead.
             try { if (DXGame.Current != null) DXGame.Current.Paused = false; } catch { }
+        }
+
+        /// <summary>Called from LevelLoadCompletePatch after the async loader restored the level.</summary>
+        public static void OnLevelLoadComplete()
+        {
+            if (!TestHarnessConfig.Enabled) return;
+            if (_phase != Phase.Running && _phase != Phase.AwaitRun2) return;
+            ulong loadHash = ComputePositionHash();
+            try
+            {
+                File.WriteAllText(Path.Combine(TestHarnessConfig.OutputDirectory, $"coop_loadpos_run{_currentRun}.txt"),
+                    $"0x{loadHash:X16} gt={DXGame.Current?.GameTime:F3}");
+            }
+            catch { }
+            ModLogger.Info($"[ReplayVerifier] Level load complete notified (run={_currentRun}, phase={_phase}); loadPosHash=0x{loadHash:X16}.");
+
+            // Capture the baseline NOW: positions are identical across processes at this instant.
+            if (_phase == Phase.Running && _baselineTick < 0)
+                EstablishBaseline(LockstepClock.CurrentSimTick, aligned: true);
+        }
+
+        private static ulong ComputePositionHash()
+        {
+            ulong h = 1469598103934665603UL;
+            var game = DXGame.Current;
+            if (game?.Entities == null) return h;
+            foreach (var e in game.Entities)
+            {
+                if (e == null || e.Disposed) continue;
+                if ((e.ID & 0x8000000000000000UL) != 0) continue;
+                ulong id = e.ID;
+                ulong x = unchecked((ulong)BitConverter.DoubleToInt64Bits(e.Position.X));
+                ulong y = unchecked((ulong)BitConverter.DoubleToInt64Bits(e.Position.Y));
+                h = (h ^ id) * 1099511628211UL;
+                h = (h ^ x) * 1099511628211UL;
+                h = (h ^ y) * 1099511628211UL;
+            }
+            return h;
         }
     }
 }

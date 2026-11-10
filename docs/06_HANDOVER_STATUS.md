@@ -38,6 +38,8 @@
 
 ## 2. 下一步待 Claude Code 推进的任务清单 (Next Steps for Claude Code)
 
+> **2026-11-10 更新**：`docs/09_AUDIT_AND_WORKPLAN.md` §4 记录的 7 处审计 Bug 与 P0/P1/P2/P3.1/P3.2 已完成代码落地并通过 Release 编译（0 错误），且已实机验证（结果见 §4.2）：补丁加载 0 失败、P1 相机/开图与控制台工具通过、Host 会话快照链路通过；**P0 回放仍有偶发二值 `pos` 分叉、Client 快照加载被引擎淡入淡出卡住**，详见 §4.3。
+
 请按照以下优先级依次推进（详细设计见 `docs/02_ARCHITECTURE_DESIGN.md` 与 `docs/05_DEVELOPMENT_ROADMAP.md`）：
 
 ### Step 1：实机测试联机大厅 UI 与单机指令拦截回放闭环（Phase 1 收尾）

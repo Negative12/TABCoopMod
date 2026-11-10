@@ -326,3 +326,66 @@ if (DXWorldGrid.PendingPathfindingCount > 10 && !(Entity is Human)) return;
    - 支持 `Alt + 左键` 发送 `PacketType.TacticalPing` 并在全员小地图播放雷达波纹 `OMiniMap.#=zvr$ku1Q=`。
 - **【P3 验收门禁】**:
   - 编译 0 错误，`Harmony Classes OK` 全部通过且 `failed-tolerant=0`，加载存档无崩溃，单机开启 `TABCOOP_INTERCEPT=1` 测试空格暂停、`+/-` 调速、右键移动、建造、造兵全部正常回放。
+
+---
+
+## 4. 本轮修复落地记录（2026-11-10）
+
+> 本轮已完成 §1 的 7 处 Bug 与 P0/P1/P3.1/P3.2/P2 的代码落地，`dotnet build` 0 错误 0 警告。
+> **尚未实机复跑** `run_replay_verify.ps1` / `run_chaos_two_instance.ps1`，下一步须按各阶段验收门禁实机验证。
+
+| 项 | 状态 | 关键实现 |
+|---|---|---|
+| §1.1 ID 校准时序 | 已修复 | 新增 `ZXSystemGameLevel.#=zwK_pUIeRBpbp` Postfix（`LevelLoadCompletePatch`），读档完成后才 `CalibrateEntityIdCounterFromLoadedLevel`；读档期间 `DXGuid.New()` 一律走高位本地 UI ID，避免低位 ID 污染/冲突 |
+| §1.2 物理时间戳清零 | 已修复 | 删除 verifier 中的 `LastGameTimeIAUpdate=0` / `LastGameTimeUpdatePhysics=0`；新增 `GameBridge.AlignSimulationClocks()` 在加载完成与基线帧把双时钟对齐到 `GameTime` |
+| §1.3 泛型内部类型调用 | 已修复 | `CommandInterceptorPatch.cs` 的 `HasComponent<CMovable>()` 改为 `GameBridge.HasComponent(e, TypeCMovable/TypeCCommandable)` |
+| §1.4 暂停/恢复路由与倒计时 | 已修复 | `PauseSyncController` 全部改走 `CommandInterceptor.Dispatch`（会话内进 Turn 缓冲，单机直接执行）；Host 独占倒计时并发出 `SetPaused(false)` |
+| §1.5 DXRandom 种子计数器 | 已修复 | `DXRandomCtorPatch.ResetCounter()`，在 `EnableDeterministicSandbox` 中重置 |
+| §1.6 市长奖励建筑 | 已修复 | 捕获侧按类型名识别 `Build` / `EntityBonusCreation`，统一 `GameBridge.GetBuildingTypeFromCommand`；回放侧 `IsBonusBuilding` 直接走 `Build.PlaceBuilding(isBonus:true)`，不扣资源 |
+| §2.1-A 引擎多人寻路 | 已修复 | `ZXGameMultiplayerModePatch` 强制 `IsMultiplayer()==true`；`SetEngineMultiplayerMode(true)` 设置 `ZXPlayerModeType.Multiplayer` |
+| §2.1-B 物理单线程 | 已修复（改实现） | 直接 Patch `UpdateDefaultTime` 会被 MonoMod 拒绝（HarmonyException），改为 `DeterministicTaskPatch` 劫持 `DXHelper_Task.For` 的 3 个重载：确定性模式下全部顺序执行（含物理两段）。`SortEntitiesById` 同时按实体 ID 排序 `DXPhysicWorld.Bodies` |
+| §2.1-C 关卡随机数 | 已修复 | 加载完成/基线帧 `DXLevel.Current.Random = new DXRandom(seed)` + `DXBehaviour.GlobalRandom` 重种 |
+| §2.2-R1/R2/R4 相机坐标 | 已修复 | 新增 `GameBridge.SetCameraWorld`（`ScenePointFromWorldPoint` + `DXScene.SetCameraCenter` + 关闭开局缩放动画）；`CameraProbe.ApplySpec` / MCP `set_camera` 按世界坐标传参；报告脚本 `sceneOf()` 按等轴测映射标注 |
+| §2.2-R3 开全图显形 | 已修复 | 新增 `GameBridge.RevealAll`：清空 `#=z69ntQguW1qCr` / `#=z7sWPJNagVkip` / `#=zwJQaMvq$T3G4` 三数组，并将所有 `SceneObject.Opacity=1、Visible=true`，第 1 帧即可见僵尸 |
+| §2.3-P3.1 输入层暂停/倍速 | 已修复 | 新增 `Patches/PauseAndSpeedInputPatch.cs`，Hook `OnKeyDown/OnKeyUp`，不碰 `DXGame.set_Paused` |
+| §2.3-P3.2 市长同步 | 已修复 | 新增 `Patches/MayorSyncPatch.cs`，带 `!LoadingLevel && IAIterationInt>0 && !IsReplayingCommand` 四重守卫 |
+| §3-P2 帧同步门控 | 已实现（待实机） | `CoopSessionManager` 接入 `TurnInputTickGate` + `SortedDictionary<int,List<NetCommand>>`；Host 每 tick 广播心跳（空包也发），命令带 `TargetSimTick=cur+2`；`UpdateGameLogic` Prefix 仅在 gate 放行时 `FlushDueTurnCommands`；3s 超时告警 + 断线解锁 |
+
+### 4.1 本轮额外修复的既有隐患
+- `BroadcastCurrentLevelSnapshot` 原先把 `DXGame.Paused` 置 true 后**从不恢复**（Host 拍完快照永久卡暂停）；现改为保存/恢复 `GameSpeed`。
+- 新增 `CommandInterceptor.Dispatch`，统一“会话内入队、单机直执行”的派发路径，供暂停/倍速/市长等非 Harmony 捕获点使用。
+
+### 4.2 实测结果（2026-11-10，实机）
+
+**补丁与基础链路：全部通过**
+- `Harmony Classes OK=25, failed-tolerant=0`（含新增 `DeterministicTaskPatch`×3、`ZXGameMultiplayerModePatch`、`LevelLoadCompletePatch`、`MayorSyncPatch`、暂停/倍速输入补丁等），`GameBridge` 绑定 0 missing。
+- 读档完成回调、ID 校准、双时钟对齐、`DXLevel.Random`/`DXBehaviour.GlobalRandom` 重种均在日志中确认执行。
+- `ZXPlayerModeType=Multiplayer`、`DXWorldGrid.PendingPathfindingCount=0`、同一 tick 的 `NUpdates/GameTime` 双进程完全一致。
+- `coop_loadpos_run1/2.txt` 与 `coop_baselinepos_run1/2.txt` 在多次实验中**逐位相同**，证明载入完成时实体/位置/时钟完全一致。
+
+**P1 相机与开图：通过（截图验证）**
+- `reveal_map` 后全图僵尸立即显形（无需等待 45 tick 淡入）。
+- `set_camera {entityId}` / `{x,y,zoom}` 按世界坐标正确转换到等轴测场景（例：实体 `(115.98,114.23)` → 场景中心 `(129.24,115.11)`，与 `ScenePointFromWorldPoint` 公式一致），`get_camera` 回读保持不变，不再被夹到 72×45 角落。
+
+**控制台工具：通过**
+- `request_pause(false)` 触发 3 秒倒计时后自动恢复（tick 31904→32329）；`set_game_speed 3` 生效；`move_units`、`place_building`（TentHouse 生成）、`train_unit`（SoldierRegular 生成）、`cancel_current_order`、`list_mayors`/`mayor_select`（MayorStates 0→1）均成功。
+
+**P0 确定性回放：大幅改善，但未完全归零（未通过验收门禁）**
+- 修复前：393 个僵尸位置分叉（最大 0.46 格）。
+- 修复后（1_Backup，120 tick，连续 3 次）：`life/proj/prod/resv/经济/实体数` 全部一致；`compare_pos` 恒为 `PASS (moved=0)`；但 `compare_hashes` 仍偶发 `pos` 分叉（首个分叉约 tick 31970~31988，涉及少量僵尸、偏差约 0.02 格）。
+- 关键现象：轨迹只有 **A/B 两条吸引子**，两个进程各自独立选 A 或 B（连续复跑时两者角色会互换）→ 每进程存在一个**二值随机源**，而非顺序/线程问题。已排除：路径请求（分叉时 `PendingPathfindingCount=0` 且无 FindPath 调用）、物理步数/GameTime（逐 tick 完全一致）、读档位置哈希（一致）。
+- 已做的确定性加固：单线程 `DXHelper_Task.For`、读档期冻结逻辑/物理时钟、`DXRandom.Global` 在全上下文改投固定种子流并把物理段与渲染段分流、参数化 `DXRandom` 计数器重置、行为树/关卡 RNG 重种。
+
+**P2 双实例会话：Host 链路通过，Client 快照加载被引擎卡住（未通过验收门禁）**
+- 修复了 Harness Bug：`TryAutoLoad` 原先在“会话已激活”时一律不读档，导致 Host 永远不会自动载入；现仅阻止 Client。
+- 实测：Host 自动读档 → `EnterSyncedLevel(tick 31904)` → 快照导出并广播（38.8KB / 2 chunks）→ 正常持续 tick；Client 握手成功、收到快照并落盘。
+- **卡点**：Client 调 `LoadGameAndEnter` 后 5ms 即返回，游戏仍停在主菜单。反编译显示加载动作被串在三段全屏淡入淡出动画的 `OnFinished` 回调里，程序化调用时动画不推进，加载被静默吞掉。尝试跳过淡入淡出会在引擎加载流程内部静默抛异常，已回退，未采用。
+
+### 4.3 已知仍未解决的边界（按优先级）
+> 详细问题陈述、已排除项、候选方案与“请回答”清单见 **`docs/10_OPEN_QUESTIONS.md`**（供其他模型审阅指导）。
+1. **Client 快照加载（P2 阻塞项）**：需要不依赖 `#=zXAMaTPI=` 淡入淡出的接入口。可能方向：Hook 淡入淡出动画的推进（强制其 `_ElapsedTime`/`Advance`），或直接调用 `#=z9DPDdq9qP9lZ` 内部真正的加载 Action（需进一步反编译 `#=z$myF5ADMxD6Y` / 三个回调链），或改用“先回到主菜单 UI 的 Continue 流程”驱动加载。
+2. **回放偶发二值 `pos` 分叉**：二值来源仍指向载入期某个“每进程不同”的随机种子（被缓存的 `DXRandom` 实例或非 `DXHelper_Task` 路径的一次性随机）。下一步可在载入完成后扫描实体组件字段中的 `DXRandom` 实例并按实体 ID 统一重种，验证是否能消除 A/B。
+3. **Chaos 双实例曾触发一次 Host CLR 栈溢出（`0xc00000fd`）**：无托管异常日志；host 单开 75s、双开无 Chaos 100s 均未复现。需在 Client 加载修好后再复测，定位是否与快照/锁步回调栈有关。
+4. **6666.zxsav 验收未完成**：为文本确定，载入期也启用了单线程 `For`，大存档载入超过脚本 180s 超时（1_Backup 正常，约 5s）。需要单独提高超时或只对模拟阶段单线程化。
+5. **暂停不会真正冻结逻辑 tick**（同前）：命令在双端同 `TargetSimTick` 应用，但确定性时钟仍推进世界。
+6. **中途加入/Resync 的实体 ID 分配**（同前）。

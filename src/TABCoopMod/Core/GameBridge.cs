@@ -313,6 +313,30 @@ namespace TABCoopMod.Core
             _methodLoadGameAndEnter.Invoke(game, new object[] { fileNameOrPath });
         }
 
+        /// <summary>
+        /// ZXGame.#=z9DPDdq9qP9lZ silently returns when its black loading-fade object is already in
+        /// the scene (e.g. a main-menu transition still animating), so a programmatic load during a
+        /// snapshot arrival becomes a no-op. Detach the stale fade first.
+        /// </summary>
+        public static void PrepareForProgrammaticLoad()
+        {
+            try
+            {
+                var game = _mZXGameCurrent?.Invoke(null, null);
+                if (game == null) return;
+                var field = AccessTools.Field(TypeZXGame, ObfuscatedSymbols.Field_ZXGame_LoadingFadeObj);
+                if (field?.GetValue(game) is DXObject fade && fade.Scene != null)
+                {
+                    fade.RemoveFromScene();
+                    ModLogger.Info("[GameBridge] Detached stale loading-fade object before programmatic load.");
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] PrepareForProgrammaticLoad failed: {ex.Message}");
+            }
+        }
+
         public static void ShowTopBanner(string message, Color color, int durationMs = 3000)
         {
             var levelSys = _mLevelSysCurrent.Invoke(null, null);
@@ -400,12 +424,193 @@ namespace TABCoopMod.Core
                     list.Sort((a, b) => a.ID.CompareTo(b.ID));
                     ModLogger.Info($"[GameBridge] Re-ordered {list.Count} entities by ID for deterministic update order.");
                 }
+
+                var bodies = DXPhysicWorld.Bodies;
+                if (bodies != null && bodies.Count > 1)
+                {
+                    bodies.Sort((a, b) => (a?.GameEntity?.ID ?? 0UL).CompareTo(b?.GameEntity?.ID ?? 0UL));
+                    ModLogger.Info($"[GameBridge] Re-ordered {bodies.Count} physics bodies by entity ID.");
+                }
             }
             catch (Exception ex)
             {
                 ModLogger.Warn($"[GameBridge] SortEntitiesById failed: {ex.Message}");
             }
         }
+
+        // ====================================================================
+        // Deterministic clock / RNG / fog / camera helpers (P0 & P1 fixes).
+        // ====================================================================
+
+        /// <summary>
+        /// Re-seats the 30Hz logic clock and the 12Hz physics clock on the current GameTime so both
+        /// peers start a run with an identical zero-phase boundary. NEVER set these to 0.0: on a
+        /// late-game save (GameTime ≈ 5.6e6 ms) that makes UpdatePhysics run tens of thousands of
+        /// steps in one frame and desyncs the two processes.
+        /// </summary>
+        public static void AlignSimulationClocks()
+        {
+            var game = DXGame.Current;
+            if (game == null) return;
+            try
+            {
+                double gt = game.GameTime;
+                DXGame.LastGameTimeIAUpdate = gt;
+                DXPhysicWorld.LastGameTimeUpdatePhysics = gt;
+                DXPhysicWorld.TimeBodyPosition = gt;
+                DXPhysicWorld.TimeLastBodyPosition = gt;
+                ModLogger.Info($"[GameBridge] Simulation clocks aligned at GameTime={gt:F1}ms.");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] AlignSimulationClocks failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>Re-seeds DXLevel.Current.Random (used by mayor selection / random events).</summary>
+        public static void SeedLevelRandom(int seed)
+        {
+            try
+            {
+                var level = DXLevel.Current;
+                if (level == null) return;
+                level.Random = new DXRandom(seed);
+                ModLogger.Info($"[GameBridge] Re-seeded DXLevel.Current.Random (seed={seed}).");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] SeedLevelRandom failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Makes every entity visible immediately. Beyond flipping ShowFullMap/FogEnabled, this clears
+        /// the three ZXSystemMapLayers watch arrays and forces SceneObject.Opacity=1/Visible=true:
+        /// CInvisibleWhenNotWatched uses the Point overload that ignores FogEnabled and only fades in
+        /// by +0.09 every 4 logic ticks, so without this reveal_map shows an empty map for ~45 ticks.
+        /// </summary>
+        public static bool RevealAll(bool reveal)
+        {
+            bool ok = SetShowFullMap(reveal);
+            SetFogEnabled(!reveal);
+
+            try
+            {
+                if (!reveal) return ok;
+
+                object inst = GetMapLayersInstance();
+                if (inst != null)
+                {
+                    ClearIntArray(inst, ObfuscatedSymbols.Field_MapLayers_VisibleCells);
+                    ClearIntArray(inst, ObfuscatedSymbols.Field_MapLayers_VisibleBackBuf);
+                    ClearIntArray(inst, ObfuscatedSymbols.Field_MapLayers_ExploredCells);
+                    SetInstanceBool(inst, "LayerFogUpdated", true);
+                    SetInstanceBool(inst, "LayerShadowUpdated", true);
+                }
+
+                var game = DXGame.Current;
+                if (game?.Entities != null)
+                {
+                    foreach (var e in game.Entities)
+                    {
+                        var so = e?.SceneObject;
+                        if (so == null) continue;
+                        so.Opacity = 1f;
+                        so.Visible = true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] RevealAll failed: {ex.Message}");
+            }
+            return ok;
+        }
+
+        private static object GetMapLayersInstance()
+        {
+            if (_mapLayersType == null)
+                _mapLayersType = GameAssembly?.GetType(ObfuscatedSymbols.Type_ZXSystemMapLayers);
+            if (_mapLayersType == null) return null;
+            if (_mapLayersCurrentField == null)
+                _mapLayersCurrentField = _mapLayersType.GetField(ObfuscatedSymbols.Field_MapLayers_Current,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            return _mapLayersCurrentField?.GetValue(null);
+        }
+
+        private static void ClearIntArray(object instance, string fieldName)
+        {
+            var f = _mapLayersType?.GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (f?.GetValue(instance) is int[] arr) Array.Clear(arr, 0, arr.Length);
+        }
+
+        private static void SetInstanceBool(object instance, string propName, bool value)
+        {
+            var p = _mapLayersType?.GetProperty(propName, BindingFlags.Public | BindingFlags.Instance);
+            if (p != null && p.CanWrite) p.SetValue(instance, value);
+        }
+
+        /// <summary>
+        /// Centers the camera on a WORLD point. entity.Position is world-grid; CameraArea is isometric
+        /// scene space, so the point must go through DXWorldGrid.ScenePointFromWorldPoint. Also clears
+        /// the opening zoom animation flag which otherwise overwrites CameraArea every frame.
+        /// </summary>
+        public static bool SetCameraWorld(PointF worldCenter, float width = 0f, float height = 0f)
+        {
+            var scene = DXScene.Current;
+            if (scene == null) return false;
+
+            DisableCameraIntroAnimation();
+
+            RectangleF cur = scene.CameraArea;
+            if (cur.Width <= 0f || cur.Height <= 0f) return false;
+            float aspect = cur.Width / cur.Height;
+
+            float w = width;
+            if (w <= 0f && height > 0f) w = height * aspect;
+            if (w <= 0f) w = cur.Width;
+            if (w <= 0f) return false;
+
+            float maxW = Math.Max(15f, 45f * aspect);
+            w = Math.Max(15f, Math.Min(w, maxW));
+
+            var scenePt = DXWorldGrid.ScenePointFromWorldPoint(worldCenter);
+            scene.SetCameraCenter(scenePt, w);
+            ModLogger.Info($"[GameBridge] Camera world=({worldCenter.X:F1},{worldCenter.Y:F1}) -> scene=({scenePt.X:F1},{scenePt.Y:F1}) width={w:F1}");
+            return true;
+        }
+
+        public static void DisableCameraIntroAnimation()
+        {
+            try
+            {
+                var f = AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_CameraIntroAnim);
+                f?.SetValue(null, false);
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Returns the entity Type produced by a Build / EntityBonusCreation command (both internal,
+        /// so the caller passes them as object). Used to capture And replay building placements.
+        /// </summary>
+        public static Type GetBuildingTypeFromCommand(object command)
+        {
+            if (command == null) return null;
+            Type t = command.GetType();
+            var entityTypeProp = t.GetProperty("EntityType", BindingFlags.Public | BindingFlags.Instance);
+            if (entityTypeProp != null)
+            {
+                try { if (entityTypeProp.GetValue(command) is Type et) return et; } catch { }
+            }
+            var entityProp = t.GetProperty("Entity", BindingFlags.Public | BindingFlags.Instance);
+            if (entityProp != null)
+            {
+                try { return (entityProp.GetValue(command) as DXEntity)?.GetType(); } catch { }
+            }
+            return null;
+        }
+
 
         public static List<DXEntity> GetPlayerEntities()
         {

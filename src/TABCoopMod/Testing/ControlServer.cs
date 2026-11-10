@@ -477,31 +477,36 @@ namespace TABCoopMod.Testing
             if (scene == null) throw new InvalidOperationException("no active scene");
 
             RectangleF cur = scene.CameraArea;
-            float w = GetFloat(args, "w", cur.Width);
-            float h = GetFloat(args, "h", cur.Height);
+            float w = GetFloat(args, "w", cur.Width > 0f ? cur.Width : 0f);
+            float h = GetFloat(args, "h", 0f);
             float zoom = GetFloat(args, "zoom", 1f);
             if (zoom > 0f && Math.Abs(zoom - 1f) > 1e-4f) { w /= zoom; h /= zoom; }
-            if (w <= 0f || h <= 0f) throw new ArgumentException("invalid camera size");
 
-            float cx, cy;
+            // x/y and entity positions are WORLD-grid coordinates; GameBridge.SetCameraWorld converts
+            // them to isometric scene space before centering the camera.
+            float wx, wy;
             ulong eid = GetULong(args, "entityId", 0);
             if (eid != 0UL)
             {
                 var ent = DXGame.Current?.GetEntityByID(eid);
                 if (ent == null) throw new ArgumentException($"entity {eid} not found");
-                cx = ent.Position.X; cy = ent.Position.Y;
+                wx = ent.Position.X; wy = ent.Position.Y;
             }
             else
             {
-                cx = GetFloat(args, "x", cur.X + cur.Width / 2f);
-                cy = GetFloat(args, "y", cur.Y + cur.Height / 2f);
+                var worldCenter = DXWorldGrid.WorldPointFromScenePoint(
+                    new PointF(cur.X + cur.Width / 2f, cur.Y + cur.Height / 2f));
+                wx = GetFloat(args, "x", worldCenter.X);
+                wy = GetFloat(args, "y", worldCenter.Y);
             }
 
-            scene.CameraArea = new RectangleF(cx - w / 2f, cy - h / 2f, w, h);
-            RectangleF applied = scene.CameraArea; // engine may clamp to map bounds
+            if (!GameBridge.SetCameraWorld(new PointF(wx, wy), w, h))
+                throw new InvalidOperationException("failed to set camera");
 
+            RectangleF applied = scene.CameraArea;
             return new Dictionary<string, object>
             {
+                ["worldX"] = wx, ["worldY"] = wy,
                 ["x"] = applied.X, ["y"] = applied.Y, ["w"] = applied.Width, ["h"] = applied.Height,
                 ["centerX"] = applied.X + applied.Width / 2f,
                 ["centerY"] = applied.Y + applied.Height / 2f
@@ -559,13 +564,11 @@ namespace TABCoopMod.Testing
         private static object RevealMap(Dictionary<string, object> args)
         {
             bool reveal = GetBool(args, "enabled", true);
-            bool showFull = GameBridge.SetShowFullMap(reveal);
-            bool fog = GameBridge.SetFogEnabled(!reveal); // disable global fog while revealing
+            bool ok = GameBridge.RevealAll(reveal);
             return new Dictionary<string, object>
             {
                 ["reveal"] = reveal,
-                ["appliedShowFullMap"] = showFull,
-                ["appliedFogToggle"] = fog
+                ["applied"] = ok
             };
         }
 

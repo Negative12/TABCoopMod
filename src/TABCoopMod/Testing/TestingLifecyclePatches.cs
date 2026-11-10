@@ -163,7 +163,11 @@ namespace TABCoopMod.Testing
             // server (TABCOOP_CONTROL_PORT). In control-only mode the verifier stays disabled.
             if (!TestHarnessConfig.Enabled && !TestHarnessConfig.ControlEnabled) return;
             if (string.IsNullOrEmpty(TestHarnessConfig.AutoLoadSave)) return;
-            if (CoopSessionManager.IsSessionActive) return;
+            // The Host must be able to load the level after the session started: its load triggers
+            // the snapshot broadcast to peers. Clients never auto-load (they receive the snapshot).
+            if (CoopSessionManager.IsSessionActive &&
+                CoopSessionManager.Transport != null && !CoopSessionManager.Transport.IsHost)
+                return;
             if (!_menuReady) return; // wait until the main menu is fully initialized
 
             if (GameBridge.CurrentLevelState != null) return;
@@ -177,6 +181,7 @@ namespace TABCoopMod.Testing
                 try
                 {
                     DeterministicReplayVerifier.PrepareForLoad();
+                    GameBridge.PrepareForProgrammaticLoad();
                     GameBridge.LoadSaveFileAndEnter(save);
                 }
                 catch (Exception ex)

@@ -48,9 +48,11 @@ namespace TABCoopMod.Testing
 
         public static string ToJson(Snapshot c, int imageW, int imageH)
         {
+            int nCells = 0;
+            try { nCells = DXWorldGrid.NCells; } catch { }
             return string.Format(CultureInfo.InvariantCulture,
-                "{{\"valid\":{0},\"x\":{1},\"y\":{2},\"w\":{3},\"h\":{4},\"screenW\":{5},\"screenH\":{6},\"windowW\":{7},\"windowH\":{8},\"imageW\":{9},\"imageH\":{10}}}",
-                c.Valid ? "true" : "false", c.X, c.Y, c.W, c.H, c.ScreenW, c.ScreenH, c.WindowW, c.WindowH, imageW, imageH);
+                "{{\"valid\":{0},\"x\":{1},\"y\":{2},\"w\":{3},\"h\":{4},\"screenW\":{5},\"screenH\":{6},\"windowW\":{7},\"windowH\":{8},\"imageW\":{9},\"imageH\":{10},\"nCells\":{11},\"iso\":true}}",
+                c.Valid ? "true" : "false", c.X, c.Y, c.W, c.H, c.ScreenW, c.ScreenH, c.WindowW, c.WindowH, imageW, imageH, nCells);
         }
 
         public static void WriteJson(string path, int imageW, int imageH)
@@ -66,7 +68,10 @@ namespace TABCoopMod.Testing
         }
 
         /// <summary>
-        /// Applies a camera override from "cx,cy" or "cx,cy,w,h" (world units). Returns false on bad input.
+        /// Applies a camera override from "wx,wy" or "wx,wy,w,h" — WORLD coordinates (the same space
+        /// as entity.Position). Internally converts to isometric scene coordinates via
+        /// DXWorldGrid.ScenePointFromWorldPoint; writing CameraArea directly used to fly the camera
+        /// to the wrong map corner because the two spaces differ by a 45° rotation.
         /// </summary>
         public static bool ApplySpec(string spec)
         {
@@ -74,29 +79,19 @@ namespace TABCoopMod.Testing
             string[] parts = spec.Split(',');
             if (parts.Length < 2) return false;
 
-            if (!float.TryParse(parts[0].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float cx)) return false;
-            if (!float.TryParse(parts[1].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float cy)) return false;
+            if (!float.TryParse(parts[0].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float wx)) return false;
+            if (!float.TryParse(parts[1].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float wy)) return false;
 
-            var cur = Capture();
-            float w = cur.Valid ? cur.W : 64f;
-            float h = cur.Valid ? cur.H : 40f;
+            float w = 0f, h = 0f;
             if (parts.Length >= 4)
             {
                 if (!float.TryParse(parts[2].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out w)) return false;
                 if (!float.TryParse(parts[3].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out h)) return false;
             }
 
-            var scene = DXScene.Current;
-            if (scene == null || w <= 0f || h <= 0f) return false;
-
-            scene.CameraArea = new RectangleF(cx - w / 2f, cy - h / 2f, w, h);
-
-            // In deterministic replay the per-frame camera pass may not run, so the renderer keeps the
-            // initial view even though CameraArea changed. Force one propagation pass.
-            try { HarmonyLib.AccessTools.Method(typeof(DXGame), "SetCamera")?.Invoke(DXGame.Current, null); } catch { }
-
-            Core.ModLogger.Info($"[CameraProbe] applied camera override center=({cx},{cy}) size=({w},{h})");
-            return true;
+            bool ok = Core.GameBridge.SetCameraWorld(new PointF(wx, wy), w, h);
+            Core.ModLogger.Info($"[CameraProbe] camera world override center=({wx},{wy}) size=({w},{h}) -> {ok}");
+            return ok;
         }
     }
 }

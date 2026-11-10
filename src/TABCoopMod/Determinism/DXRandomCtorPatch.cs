@@ -21,6 +21,9 @@ namespace TABCoopMod.Determinism
         private static MethodInfo _initGenrand;
         private static long _seedCounter;
 
+        /// <summary>Restart the deterministic seed sequence (per run / per level).</summary>
+        public static void ResetCounter() => Interlocked.Exchange(ref _seedCounter, 0L);
+
         public static MethodBase TargetMethod()
         {
             return AccessTools.Constructor(typeof(DXRandom), Type.EmptyTypes);

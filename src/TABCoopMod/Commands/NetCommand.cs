@@ -317,6 +317,16 @@ namespace TABCoopMod.Commands
             if (!IsLiveExecutableEntity(builder)) return;
 
             object target = BuildCommandTarget(netCmd);
+
+            // Mayor-reward buildings come from EntityBonusCreation, which internally calls
+            // Build.PlaceBuilding(isBonus:true). Executing the Build command instead would charge
+            // resources and produce a different structure, so replay it through PlaceBuilding.
+            if (netCmd.IsBonusBuilding)
+            {
+                GameBridge.PlaceBuilding(builder, target, buildingType, isBonus: true, instant: netCmd.InstantBuild, template: null);
+                return;
+            }
+
             object buildCmd = GameBridge.GetBuildCommandForType(buildingType);
             if (buildCmd != null)
             {

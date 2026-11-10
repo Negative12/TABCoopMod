@@ -447,9 +447,21 @@ function drawStats(){
 const ovlA=document.getElementById('ovlA'), ovlB=document.getElementById('ovlB');
 const camA=DATA.shots.a&&DATA.shots.a.cam, camB=DATA.shots.b&&DATA.shots.b.cam;
 
+// World-grid -> isometric scene space (mirrors DXWorldGrid.ScenePointFromWorldPoint).
+// The camera transform exported by CameraProbe is in scene space, so entity world positions must
+// be rotated/scaled first, otherwise marker boxes land on the wrong units.
+function sceneOf(cam, wx, wy){
+  if(wx==null||wy==null) return [wx,wy];
+  if(cam && cam.iso && cam.nCells){
+    return [ (wx-wy)*0.70710677 + cam.nCells/2, (wx+wy)*0.5 ];
+  }
+  return [wx, wy];
+}
+
 function addBox(ovl, cam, wx, wy, e, dashed){
   if(!cam||wx==null) return false;
-  const px=(wx-cam.x)/cam.w, py=(wy-cam.y)/cam.h;
+  const sp=sceneOf(cam,wx,wy);
+  const px=(sp[0]-cam.x)/cam.w, py=(sp[1]-cam.y)/cam.h;
   if(px<0||px>1||py<0||py>1) return false;
   const d=document.createElement('div'); d.className='box'+(dashed?' dash':'');
   d.style.left=(px*100)+'%'; d.style.top=(py*100)+'%';
@@ -462,7 +474,8 @@ function addBox(ovl, cam, wx, wy, e, dashed){
 
 function inView(cam,wx,wy){
   if(!cam||wx==null) return false;
-  const px=(wx-cam.x)/cam.w, py=(wy-cam.y)/cam.h;
+  const sp=sceneOf(cam,wx,wy);
+  const px=(sp[0]-cam.x)/cam.w, py=(sp[1]-cam.y)/cam.h;
   return px>=0&&px<=1&&py>=0&&py<=1;
 }
 

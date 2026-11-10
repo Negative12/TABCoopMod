@@ -33,6 +33,20 @@ namespace TABCoopMod.Sync
         private static readonly List<NetCommand> _localOutgoingQueue = new List<NetCommand>();
         private static readonly List<NetCommand> _hostTurnBuffer = new List<NetCommand>();
 
+        // True network lockstep: Host stamps every command with TargetSimTick = simTick + InputDelay
+        // and broadcasts a heartbeat for EVERY tick (even empty), so all peers execute the same
+        // commands on the same tick regardless of network latency.
+        public const int InputDelayTicks = 2;
+        private static readonly SortedDictionary<int, List<NetCommand>> _pendingTurnCommands =
+            new SortedDictionary<int, List<NetCommand>>();
+        private static TurnInputTickGate _networkGate = new TurnInputTickGate();
+        private static int _hostLastBroadcastSimTick = -1;
+        private static double _gateWaitStartTicks = -1.0;
+        private static double _gateLastWarnTicks = -1.0;
+        private const double GateTimeoutMs = 3000.0;
+
+        private static bool _awaitingSnapshotLoad;
+
         // Snapshot receive buffer on Client
         private static MemoryStream _incomingSaveStream;
         private static int _expectedSaveBytes;
@@ -90,6 +104,11 @@ namespace TABCoopMod.Sync
             AllyStates.Clear();
             _localOutgoingQueue.Clear();
             _hostTurnBuffer.Clear();
+            _pendingTurnCommands.Clear();
+            _hostLastBroadcastSimTick = -1;
+            _gateWaitStartTicks = -1.0;
+            _awaitingSnapshotLoad = false;
+            _networkGate = new TurnInputTickGate();
 
             if (Transport != null)
             {
@@ -130,6 +149,12 @@ namespace TABCoopMod.Sync
             Transport.OnPeerDisconnected += playerId =>
             {
                 AllyStates.Remove(playerId);
+                // Never leave the turn gate permanently blocked because a peer vanished.
+                if (Transport != null && !Transport.IsHost)
+                {
+                    _networkGate.MarkReady(int.MaxValue);
+                    IsInSyncedLevel = false;
+                }
                 GameBridge.ShowTopBanner($"Player {playerId} Disconnected", Color.OrangeRed, 3000);
             };
 
@@ -145,9 +170,9 @@ namespace TABCoopMod.Sync
             if (Transport == null || !Transport.IsHost || GameBridge.CurrentLevelState == null)
                 return;
 
+            double wasGameSpeed = DXGame.Current.GameSpeed;
             try
             {
-                bool wasPaused = DXGame.Current.Paused;
                 DXGame.Current.Paused = true;
 
                 string savesDir = GameBridge.GetSavesDirectory();
@@ -163,8 +188,7 @@ namespace TABCoopMod.Sync
                 int syncSeed = 20261109;
 
                 LockstepClock.CalibrateEntityIdCounterFromLoadedLevel(syncSeed);
-                IsInSyncedLevel = true;
-                CommandInterceptor.IsInterceptionEnabled = true;
+                EnterSyncedLevel();
 
                 int totalChunks = (savBytes.Length + ChunkSizeBytes - 1) / ChunkSizeBytes;
                 ModLogger.Info($"[CoopSessionManager] Broadcasting Snapshot ({savBytes.Length:N0} bytes in {totalChunks} chunks)...");
@@ -196,6 +220,10 @@ namespace TABCoopMod.Sync
             {
                 ModLogger.Error("[CoopSessionManager] Failed to broadcast level snapshot", ex);
             }
+            finally
+            {
+                try { DXGame.Current.GameSpeed = wasGameSpeed; } catch { }
+            }
         }
 
         private static void OnLocalCommandCaptured(NetCommand cmd)
@@ -221,6 +249,98 @@ namespace TABCoopMod.Sync
                     _localOutgoingQueue.Add(cmd);
                 }
             }
+        }
+
+        /// <summary>
+        /// Call once both peers are inside the same synced level. Installs the turn-input gate and
+        /// lets the simulation run the first InputDelayTicks immediately while broadcasts catch up.
+        /// </summary>
+        public static void EnterSyncedLevel()
+        {
+            if (!IsSessionActive) return;
+
+            _pendingTurnCommands.Clear();
+            _hostLastBroadcastSimTick = -1;
+            _gateWaitStartTicks = -1.0;
+            _networkGate = new TurnInputTickGate();
+            LockstepClock.TickGate = _networkGate;
+
+            int cur = DXGame.Current?.IAIterationInt ?? 0;
+            _networkGate.MarkReady(cur + InputDelayTicks);
+            IsInSyncedLevel = true;
+            CommandInterceptor.IsInterceptionEnabled = true;
+
+            ModLogger.Info($"[CoopSessionManager] Entered synced level at tick {cur} (inputDelay={InputDelayTicks}, role={(Transport.IsHost ? "Host" : "Client")}).");
+        }
+
+        /// <summary>
+        /// Executes every buffered turn command for ticks &lt;= nextSimTick, in ascending tick order.
+        /// Called from the deterministic clock prefix at the moment a tick is allowed to advance.
+        /// Must not touch local selection state (see CommandExecutor).
+        /// </summary>
+        public static void FlushDueTurnCommands(int nextSimTick)
+        {
+            while (true)
+            {
+                List<NetCommand> due = null;
+                lock (_pendingTurnCommands)
+                {
+                    if (_pendingTurnCommands.Count == 0) return;
+                    var first = _pendingTurnCommands.GetEnumerator();
+                    if (!first.MoveNext() || first.Current.Key > nextSimTick) return;
+                    due = first.Current.Value;
+                    _pendingTurnCommands.Remove(first.Current.Key);
+                }
+
+                foreach (var cmd in due)
+                    CommandExecutor.Execute(cmd);
+            }
+        }
+
+        private static void MonitorGateWait()
+        {
+            int cur = DXGame.Current?.IAIterationInt ?? 0;
+            double now = DXHelper_Environment.Ticks;
+
+            if (_networkGate.IsTickReady(cur + 1))
+            {
+                _gateWaitStartTicks = -1.0;
+                return;
+            }
+
+            if (_gateWaitStartTicks < 0.0)
+            {
+                _gateWaitStartTicks = now;
+                return;
+            }
+
+            if (now - _gateWaitStartTicks >= GateTimeoutMs && now - _gateLastWarnTicks >= 1000.0)
+            {
+                _gateLastWarnTicks = now;
+                double waited = (now - _gateWaitStartTicks) / 1000.0;
+                ModLogger.Warn($"[CoopSessionManager] Tick gate waiting {waited:F1}s at tick {cur} — packets from Host are delayed or lost.");
+                if (waited >= GateTimeoutMs / 1000.0)
+                    GameBridge.ShowTopBanner("Waiting for Host network...", Color.Orange, 1200);
+            }
+        }
+
+        /// <summary>Called from LevelLoadCompletePatch on the main thread after a level fully loads.</summary>
+        public static void OnLevelLoadComplete()
+        {
+            if (!IsSessionActive) return;
+            if (Transport.IsHost) return;
+            if (!_awaitingSnapshotLoad) return;
+
+            _awaitingSnapshotLoad = false;
+            EnterSyncedLevel();
+        }
+
+        /// <summary>Records the snapshot seed so the post-load calibration uses the Host's seed.</summary>
+        public static void RequestSnapshotCalibration(int seed)
+        {
+            _awaitingSnapshotLoad = true;
+            LockstepClock.EnableDeterministicSandbox(seed);
+            LockstepClock.RequestPostLoadCalibration(seed);
         }
 
         public static void OnFrameTick()
@@ -255,34 +375,52 @@ namespace TABCoopMod.Sync
                 }
             }
 
-            // 2. Host broadcasts TurnInputBroadcast (including commands queued while Paused!)
+            // 2. Host broadcasts TurnInputBroadcast for EVERY advanced sim tick (even empty heartbeat)
+            //    and enqueues the commands for local execution on TargetSimTick. Nothing is executed
+            //    on receipt, so both peers apply the same turn on the same tick.
             if (Transport.IsHost)
             {
-                List<NetCommand> turnCmds = null;
-                lock (_hostTurnBuffer)
+                int cur = DXGame.Current?.IAIterationInt ?? 0;
+                if (cur > _hostLastBroadcastSimTick)
                 {
-                    if (_hostTurnBuffer.Count > 0)
-                    {
-                        turnCmds = new List<NetCommand>(_hostTurnBuffer);
-                        _hostTurnBuffer.Clear();
-                    }
-                }
+                    _hostLastBroadcastSimTick = cur;
+                    int targetTick = cur + InputDelayTicks;
 
-                if (turnCmds != null && turnCmds.Count > 0)
-                {
-                    int simTick = DXGame.Current?.IAIterationInt ?? 0;
+                    List<NetCommand> turnCmds = null;
+                    lock (_hostTurnBuffer)
+                    {
+                        if (_hostTurnBuffer.Count > 0)
+                        {
+                            turnCmds = new List<NetCommand>(_hostTurnBuffer);
+                            _hostTurnBuffer.Clear();
+                        }
+                    }
+
+                    if (turnCmds != null)
+                    {
+                        foreach (var c in turnCmds) c.TargetSimTick = targetTick;
+                        lock (_pendingTurnCommands)
+                        {
+                            if (!_pendingTurnCommands.TryGetValue(targetTick, out var slot))
+                                _pendingTurnCommands[targetTick] = slot = new List<NetCommand>();
+                            slot.AddRange(turnCmds);
+                        }
+                    }
+
+                    _networkGate.MarkReady(targetTick);
+
                     Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.TurnInputBroadcast, w =>
                     {
-                        w.Write(simTick);
-                        w.Write((ushort)turnCmds.Count);
-                        foreach (var c in turnCmds) c.WriteTo(w);
+                        w.Write(targetTick);
+                        w.Write((ushort)(turnCmds?.Count ?? 0));
+                        if (turnCmds != null)
+                            foreach (var c in turnCmds) c.WriteTo(w);
                     });
-
-                    foreach (var c in turnCmds)
-                    {
-                        CommandExecutor.Execute(c);
-                    }
                 }
+            }
+            else
+            {
+                MonitorGateWait();
             }
 
             // 3. Broadcast Ally Cursor & Camera Viewport at 20Hz (every 50ms)
@@ -396,13 +534,28 @@ namespace TABCoopMod.Sync
                 case PacketType.TurnInputBroadcast:
                 {
                     if (Transport.IsHost) break;
-                    int simTick = r.ReadInt32();
+                    int targetTick = r.ReadInt32();
                     ushort count = r.ReadUInt16();
+                    List<NetCommand> cmds = null;
                     for (int i = 0; i < count; i++)
                     {
                         var cmd = NetCommand.ReadFrom(r);
-                        CommandExecutor.Execute(cmd);
+                        (cmds ?? (cmds = new List<NetCommand>())).Add(cmd);
                     }
+
+                    if (cmds != null)
+                    {
+                        lock (_pendingTurnCommands)
+                        {
+                            if (!_pendingTurnCommands.TryGetValue(targetTick, out var slot))
+                                _pendingTurnCommands[targetTick] = slot = new List<NetCommand>();
+                            slot.AddRange(cmds);
+                        }
+                    }
+
+                    // The heartbeat arrived: allow the simulation to advance up to this tick. The
+                    // commands themselves are executed by FlushDueTurnCommands at the tick boundary.
+                    _networkGate.MarkReady(targetTick);
                     break;
                 }
 
@@ -479,10 +632,20 @@ namespace TABCoopMod.Sync
 
                 DXGame.Current.InvokeOnStartFrame(() =>
                 {
-                    GameBridge.LoadSaveFileAndEnter(savPath);
-                    LockstepClock.CalibrateEntityIdCounterFromLoadedLevel(randomSeed);
-                    IsInSyncedLevel = true;
-                    CommandInterceptor.IsInterceptionEnabled = true;
+                    try
+                    {
+                        // Enable the deterministic sandbox and defer ID calibration to the loader
+                        // completion postfix — the level is not restored when LoadSaveFileAndEnter returns.
+                        RequestSnapshotCalibration(randomSeed);
+                        GameBridge.PrepareForProgrammaticLoad();
+                        ModLogger.Info($"[CoopSessionManager] Client calling LoadSaveFileAndEnter('{savPath}')...");
+                        GameBridge.LoadSaveFileAndEnter(savPath);
+                        ModLogger.Info("[CoopSessionManager] Client LoadSaveFileAndEnter returned.");
+                    }
+                    catch (Exception ex)
+                    {
+                        ModLogger.Error("[CoopSessionManager] Client snapshot load threw", ex);
+                    }
                 });
             }
             catch (Exception ex)
@@ -529,10 +692,9 @@ namespace TABCoopMod.Sync
                 }
                 else
                 {
-                    LockstepClock.CalibrateEntityIdCounterFromLoadedLevel(20261109);
-                    CoopSessionManager.OnFrameTick();
-                    var digest = StateHasher.ComputeDigest();
-                    ModLogger.Info($"[SessionLifecyclePatches] Client level loaded! Initial {digest}");
+                    // Do NOT calibrate here: InitLevel runs on the loader's background thread and
+                    // the level is not fully restored yet (see LevelLoadCompletePatch).
+                    ModLogger.Info("[SessionLifecyclePatches] Client InitLevel fired; waiting for loader completion.");
                 }
             }
         }

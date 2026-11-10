@@ -18,7 +18,14 @@ namespace TABCoopMod.Core
         public const string Type_ZXSystemCampaign   = "#=zUsJtyOzSfYDnqdeHjCSzszBbekLj";
         public const string Type_ZXSystemMapLayers  = "#=zJme8KFhmikprnkg_2CDeiQE=";
         /// <summary>Static singleton field holding the live ZXSystemMapLayers (fog config) instance.</summary>
-        public const string Field_MapLayers_Current  = "#=zQFWYIvs=";        public const string Type_ZXSystemAudio      = "#=zJYbPa4gP2VI16zEh5y2Zxew=";
+        public const string Field_MapLayers_Current  = "#=zQFWYIvs=";
+        /// <summary>Foreground (current) watch-visibility array used by CInvisibleWhenNotWatched.</summary>
+        public const string Field_MapLayers_VisibleCells   = "#=z69ntQguW1qCr";
+        /// <summary>Back buffer swapped into VisibleCells every 20 logic ticks.</summary>
+        public const string Field_MapLayers_VisibleBackBuf = "#=z7sWPJNagVkip";
+        /// <summary>Explored/fog array used by the explored-area visibility overload.</summary>
+        public const string Field_MapLayers_ExploredCells  = "#=zwJQaMvq$T3G4";
+        public const string Type_ZXSystemAudio      = "#=zJYbPa4gP2VI16zEh5y2Zxew=";
         public const string Type_ZXSystemBuilder    = "#=z5Ns_eH8ENLF7HFU5mg==";
         public const string Type_ZXSteamManager     = "#=z3Zxcp6RwVCZHa9xpeg==";
         public const string Type_ZXMessageBoxHelper = "#=zzi2cl4h1HYA5cX8aaw==";
@@ -45,6 +52,12 @@ namespace TABCoopMod.Core
         public const string Method_ZXGame_ShowMayorSelection   = "#=zcITiOSD6YNmD";
         public const string Method_ZXGame_ShowSelectedMayors   = "#=zx3_1WsJs4Dyck79oqg==";
         public const string Method_ZXGame_ReturnToMainMenu     = "#=zqF2tlklT$8RE";
+        /// <summary>Black full-screen DXObject used as the loader's fade; if already in the scene, LoadGameAndEnter silently no-ops.</summary>
+        public const string Field_ZXGame_LoadingFadeObj        = "#=zbvwh$ickzalV";
+        /// <summary>Returns true when ZXPlayerModeType is Multiplayer; switches pathfinding to synchronous main-thread.</summary>
+        public const string Method_ZXGame_IsMultiplayer        = "#=zB3Vhdin5PerfrubjO4AblAA=";
+        /// <summary>Sets ZXPlayerModeType (Singleplayer=0, Multiplayer=1).</summary>
+        public const string Method_ZXGame_SetPlayerMode        = "#=znDPORUoLfC4p";
 
         // ====================================================================
         // 4. ZXSystemMainMenu (#=zLs$VX1eoAapVflmW_w==) Members
@@ -66,8 +79,12 @@ namespace TABCoopMod.Core
         public const string Field_LevelSys_BuildAreaCursor     = "#=zZ$S0aaS3NQsgmtkOww==";
         public const string Field_LevelSys_CommandsManager     = "#=z4cHfUtNBoiM8";
         public const string Field_LevelSys_SelectionManager    = "#=zCJSdEwbGvSqa";
+        /// <summary>Private static bool: true during the 6s opening camera zoom animation that overwrites CameraArea each frame.</summary>
+        public const string Field_LevelSys_CameraIntroAnim     = "#=zfFXkD0aj1o9gF76ANQ==";
 
         public const string Method_LevelSys_InitLevel          = "#=zmTU4kueQctVr";
+        /// <summary>Main-thread finish action of the async save loader (level fully restored incl. GameTime/entities).</summary>
+        public const string Method_LevelSys_OnLevelLoadComplete = "#=zwK_pUIeRBpbp";
         public const string Method_LevelSys_OnSceneRightClick  = "#=zGxTz6vGn2dxDprCE7A==";
         public const string Method_LevelSys_OnSceneLeftClick   = "#=zX9V39sQYkQxr95dJ7A==";
         public const string Method_LevelSys_ExecutePendingCmd  = "#=zN0jTYBQMVgRf";
