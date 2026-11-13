@@ -41,6 +41,12 @@ namespace TABCoopMod.Testing
         /// <summary>Reveal the whole map before replay screenshots (TABCOOP_REVEAL_MAP=1).</summary>
         public static bool RevealMap { get; private set; }
 
+        /// <summary>Optional resync policy override: "strict" | "tolerant" | "async_align" (default: "async_align").</summary>
+        public static string ResyncMode { get; private set; }
+
+        /// <summary>Optional resync cooldown override in ms (-1 uses policy default).</summary>
+        public static int ResyncCooldownMs { get; private set; }
+
         /// <summary>True when the MCP control server is enabled (TABCOOP_CONTROL_PORT set).</summary>
         public static bool ControlEnabled => ControlPort > 0;
 
@@ -70,6 +76,8 @@ namespace TABCoopMod.Testing
             ShotDir = Env("TABCOOP_SHOT_DIR");
             ShotCamera = Env("TABCOOP_SHOT_CAM");
             RevealMap = Env("TABCOOP_REVEAL_MAP") == "1";
+            ResyncMode = Env("TABCOOP_RESYNC_MODE") ?? "async_align";
+            ResyncCooldownMs = ParseInt(Env("TABCOOP_RESYNC_COOLDOWN_MS"), -1);
 
             string logDir = null;
             try { logDir = Path.GetDirectoryName(ModLogger.LogFilePath); } catch { }

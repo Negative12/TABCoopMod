@@ -18,11 +18,18 @@ namespace TABCoopMod.Determinism
     /// </summary>
     public static class StateHasher
     {
-        public const int HashVersion = 2;
+        public const int HashVersion = 3;
 
         private static PropertyInfo[] _reservationProps;
         private static Type _reservationStateType;
         private static bool _reflectionWarned;
+
+        public struct EntityPosSample
+        {
+            public ulong Id;
+            public float X;
+            public float Y;
+        }
 
         public struct LevelStateSnapshotDigest
         {
@@ -30,18 +37,19 @@ namespace TABCoopMod.Determinism
             public int GameTimeMs;
             public int Gold, Wood, Stone, Iron, Oil;
             public int EntityCount;
-            public long PosChecksum, LifeChecksum, ProjectileChecksum, ProductionChecksum, ReservationChecksum;
-            public int ProjectileCount, QueuedOrderCount;
+            public long PosChecksum, CoarsePosChecksum, LifeChecksum, ZombieAggroChecksum, ProjectileChecksum, ProductionChecksum, ReservationChecksum;
+            public int ProjectileCount, QueuedOrderCount, AggroZombieCount;
+            public ulong HardHash;
             public ulong FullHash;
 
             public override string ToString()
             {
                 return $"Tick={SimTick}, Time={GameTimeMs}ms, Res=({Gold}G/{Wood}W/{Stone}S/{Iron}I/{Oil}O), Entities={EntityCount}, " +
-                       $"Proj={ProjectileCount}, Queued={QueuedOrderCount}, Hash=0x{FullHash:X16}";
+                       $"Aggro={AggroZombieCount}, Proj={ProjectileCount}, Queued={QueuedOrderCount}, Hard=0x{HardHash:X16}, Hash=0x{FullHash:X16}";
             }
         }
 
-        public static LevelStateSnapshotDigest ComputeDigest()
+        public static LevelStateSnapshotDigest ComputeDigest(List<EntityPosSample> outDynamicPositions = null)
         {
             var digest = new LevelStateSnapshotDigest();
             var game = DXGame.Current;
@@ -79,8 +87,11 @@ namespace TABCoopMod.Determinism
             int entityCount = 0;
             int projectileCount = 0;
             int queuedCount = 0;
+            int aggroZombieCount = 0;
             long posChecksum = 0;
+            long coarsePosChecksum = 0;
             long lifeChecksum = 0;
+            long zombieAggroChecksum = 0;
             long projectileChecksum = 0;
             long productionChecksum = 0;
 
@@ -99,8 +110,10 @@ namespace TABCoopMod.Determinism
                         continue;
 
                     entityCount++;
-                    long qx = (long)Math.Round(entity.Position.X * 100f);
-                    long qy = (long)Math.Round(entity.Position.Y * 100f);
+                    float px = entity.Position.X;
+                    float py = entity.Position.Y;
+                    long qx = (long)Math.Round(px * 100f);
+                    long qy = (long)Math.Round(py * 100f);
 
                     bool isProjectile = IsProjectileName(typeName);
                     int lifeValue = GameBridge.GetLifeValue(entity);
@@ -112,8 +125,24 @@ namespace TABCoopMod.Determinism
                         continue;
                     }
 
+                    if (outDynamicPositions != null && entity.PhysicalType == DXBodyType.Dynamic)
+                        outDynamicPositions.Add(new EntityPosSample { Id = entity.ID, X = px, Y = py });
+
                     posChecksum += (long)entity.ID ^ (qx * 73856093L) ^ (qy * 19349663L);
+                    long cx = (long)Math.Floor(px * 0.5f);
+                    long cy = (long)Math.Floor(py * 0.5f);
+                    coarsePosChecksum += (long)entity.ID ^ (cx * 73856093L) ^ (cy * 19349663L);
                     lifeChecksum += (long)entity.ID ^ (lifeValue * 83492791L);
+
+                    if (entity.PhysicalType == DXBodyType.Dynamic)
+                    {
+                        long aggroSig = GameBridge.GetZombieAggroSignature(entity, out bool isAlerted);
+                        if (isAlerted)
+                        {
+                            aggroZombieCount++;
+                            zombieAggroChecksum += aggroSig;
+                        }
+                    }
 
                     queuedCount += MixQueue(entity, ref productionChecksum);
                 }
@@ -122,20 +151,26 @@ namespace TABCoopMod.Determinism
             digest.EntityCount = entityCount;
             digest.ProjectileCount = projectileCount;
             digest.QueuedOrderCount = queuedCount;
+            digest.AggroZombieCount = aggroZombieCount;
             digest.PosChecksum = posChecksum;
+            digest.CoarsePosChecksum = coarsePosChecksum;
             digest.LifeChecksum = lifeChecksum;
+            digest.ZombieAggroChecksum = zombieAggroChecksum;
             digest.ProjectileChecksum = projectileChecksum;
             digest.ProductionChecksum = productionChecksum;
 
             Mix(entityCount);
             Mix(projectileCount);
             Mix(queuedCount);
-            Mix(posChecksum);
+            Mix(aggroZombieCount);
             Mix(lifeChecksum);
+            Mix(zombieAggroChecksum);
             Mix(projectileChecksum);
             Mix(productionChecksum);
             Mix(reservationChecksum);
+            digest.HardHash = hash;
 
+            Mix(posChecksum);
             digest.FullHash = hash;
             return digest;
         }

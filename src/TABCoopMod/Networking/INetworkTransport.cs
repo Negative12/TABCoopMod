@@ -28,6 +28,8 @@ namespace TABCoopMod.Networking
         TurnInputBroadcast = 0x21,
         StateChecksumReport = 0x30,
         DesyncDetectedAlert = 0x31,
+        PosDriftSyncChunk = 0x32,
+        PosDriftStatsReport = 0x33,
         AllyCursorAndCamera = 0x40,
         TacticalPing = 0x41
     }

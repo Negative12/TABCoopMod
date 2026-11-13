@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.IO.Compression;
 using DXVision;
 using HarmonyLib;
 using TABCoopMod.Commands;
@@ -32,8 +33,20 @@ namespace TABCoopMod.Sync
         public static bool IsInSyncedLevel { get; private set; }
 
         public static bool EnableAutoResync = true;
+        public const float MaxAsyncTeleportCells = 3.0f;
+        public const double AsyncPosAlignCooldownMs = 4000.0;
         private static double _lastAutoResyncTicks = -100000.0;
+        private static double _lastPosSyncSentTicks = -100000.0;
         private static bool _desyncDumped;
+
+        private static string EffectiveResyncMode =>
+            string.IsNullOrEmpty(TestHarnessConfig.ResyncMode) ? "async_align" : TestHarnessConfig.ResyncMode.ToLowerInvariant();
+        private static bool IsStrictMode => EffectiveResyncMode == "strict";
+        private static bool EnableAsyncPosAlign => EffectiveResyncMode == "async_align";
+        private static double AutoResyncCooldownMs =>
+            TestHarnessConfig.ResyncCooldownMs > 0
+                ? TestHarnessConfig.ResyncCooldownMs
+                : (IsStrictMode ? 15000.0 : 30000.0);
 
         private static readonly List<NetCommand> _localOutgoingQueue = new List<NetCommand>();
         private static readonly List<NetCommand> _hostTurnBuffer = new List<NetCommand>();
@@ -46,6 +59,7 @@ namespace TABCoopMod.Sync
             new SortedDictionary<int, List<NetCommand>>();
         private static TurnInputTickGate _networkGate = new TurnInputTickGate();
         private static int _hostLastBroadcastSimTick = -1;
+        private static int _gateLastObservedTick = -1;
         private static double _gateWaitStartTicks = -1.0;
         private static double _gateLastWarnTicks = -1.0;
         private const double GateTimeoutMs = 3000.0;
@@ -86,16 +100,35 @@ namespace TABCoopMod.Sync
             public DateTime LastUpdatedUtc;
         }
 
+        public sealed class TickDigestRecord
+        {
+            public StateHasher.LevelStateSnapshotDigest Digest;
+            public string Summary;
+        }
+
+        private sealed class PosSyncReceiveBuffer
+        {
+            public int SimTick;
+            public bool ApplyCorrection;
+            public int TotalChunks;
+            public int CompressedTotalLen;
+            public readonly Dictionary<int, byte[]> Chunks = new Dictionary<int, byte[]>();
+        }
+
         public static readonly Dictionary<byte, AllyVisualState> AllyStates = new Dictionary<byte, AllyVisualState>();
         private static double _lastCursorBroadcastTicks;
         private static int _lastCheckedSimTick = -1;
         private static bool _firstChecksumPosDumped;
-        private static readonly Dictionary<int, ulong> _hostTickHashes = new Dictionary<int, ulong>();
-        private static readonly Dictionary<int, Dictionary<byte, ulong>> _clientTickHashes =
-            new Dictionary<int, Dictionary<byte, ulong>>();
-        private static readonly Dictionary<int, string> _hostTickDigestStrings = new Dictionary<int, string>();
-        private static readonly Dictionary<int, Dictionary<byte, string>> _clientTickDigestStrings =
-            new Dictionary<int, Dictionary<byte, string>>();
+        private static int _consecutiveProjOnlyMismatch;
+        private static int _posSyncSeq;
+        private static readonly Dictionary<int, TickDigestRecord> _hostTickDigests = new Dictionary<int, TickDigestRecord>();
+        private static readonly Dictionary<int, Dictionary<byte, TickDigestRecord>> _clientTickDigests =
+            new Dictionary<int, Dictionary<byte, TickDigestRecord>>();
+        private static readonly Dictionary<int, List<StateHasher.EntityPosSample>> _tickPosCache =
+            new Dictionary<int, List<StateHasher.EntityPosSample>>();
+        private static readonly Queue<int> _tickPosCacheOrder = new Queue<int>();
+        private static readonly Dictionary<int, PosSyncReceiveBuffer> _posSyncIncoming =
+            new Dictionary<int, PosSyncReceiveBuffer>();
 
         public static void StartHostSession(bool useLoopback)
         {
@@ -137,16 +170,19 @@ namespace TABCoopMod.Sync
             CommandExecutor.IsReplayingCommand = false;
             IsInSyncedLevel = false;
             _lastCheckedSimTick = -1;
-            _hostTickHashes.Clear();
-            _clientTickHashes.Clear();
-            _hostTickDigestStrings.Clear();
-            _clientTickDigestStrings.Clear();
+            _consecutiveProjOnlyMismatch = 0;
+            _hostTickDigests.Clear();
+            _clientTickDigests.Clear();
+            _tickPosCache.Clear();
+            _tickPosCacheOrder.Clear();
+            _posSyncIncoming.Clear();
             LockstepClock.DisableDeterministicSandbox();
             AllyStates.Clear();
             _localOutgoingQueue.Clear();
             _hostTurnBuffer.Clear();
             _pendingTurnCommands.Clear();
             _hostLastBroadcastSimTick = -1;
+            _gateLastObservedTick = -1;
             _gateWaitStartTicks = -1.0;
             _awaitingSnapshotLoad = false;
             _awaitingClientSnapshotAck = false;
@@ -155,6 +191,7 @@ namespace TABCoopMod.Sync
             _hostWaitingOwnReload = false;
             _clientSnapshotAckReceived = false;
             _lastAutoResyncTicks = -100000.0;
+            _lastPosSyncSentTicks = -100000.0;
             _pendingHostSnapshotExport = false;
             _pendingClientSnapshotLoadPath = null;
             _kickingLoadFade = false;
@@ -253,10 +290,12 @@ namespace TABCoopMod.Sync
                 int syncSeed = SyncSeed;
                 long idCounter = LockstepClock.CurrentSyncedEntityIdCounter;
 
-                _hostTickHashes.Clear();
-                _clientTickHashes.Clear();
-                _hostTickDigestStrings.Clear();
-                _clientTickDigestStrings.Clear();
+                _hostTickDigests.Clear();
+                _clientTickDigests.Clear();
+                _tickPosCache.Clear();
+                _tickPosCacheOrder.Clear();
+                _posSyncIncoming.Clear();
+                _consecutiveProjOnlyMismatch = 0;
                 _lastCheckedSimTick = -1;
                 _pendingTurnCommands.Clear();
                 _hostTurnBuffer.Clear();
@@ -356,10 +395,12 @@ namespace TABCoopMod.Sync
             _awaitingClientAckStartTicks = -1.0;
             _clientSnapshotAckReceived = false;
 
-            _hostTickHashes.Clear();
-            _clientTickHashes.Clear();
-            _hostTickDigestStrings.Clear();
-            _clientTickDigestStrings.Clear();
+            _hostTickDigests.Clear();
+            _clientTickDigests.Clear();
+            _tickPosCache.Clear();
+            _tickPosCacheOrder.Clear();
+            _posSyncIncoming.Clear();
+            _consecutiveProjOnlyMismatch = 0;
             _lastCheckedSimTick = -1;
 
             EnterSyncedLevel();
@@ -463,6 +504,12 @@ namespace TABCoopMod.Sync
         {
             int cur = DXGame.Current?.IAIterationInt ?? 0;
             double now = DXHelper_Environment.Ticks;
+
+            if (cur != _gateLastObservedTick)
+            {
+                _gateLastObservedTick = cur;
+                _gateWaitStartTicks = -1.0;
+            }
 
             if (_networkGate.IsTickReady(cur + 1))
             {
@@ -691,59 +738,46 @@ namespace TABCoopMod.Sync
             {
                 _lastCheckedSimTick = curTick;
 
-                // Prune stale hashes (keep ~20s of history) so dictionaries cannot grow unbounded.
+                // Prune stale digests (keep ~20s of history) so dictionaries cannot grow unbounded.
                 if (Transport.IsHost)
                 {
-                    if (_hostTickHashes.Count > 0)
+                    if (_hostTickDigests.Count > 0)
                     {
                         var stale = new List<int>();
-                        foreach (var k in _hostTickHashes.Keys)
+                        foreach (var k in _hostTickDigests.Keys)
                             if (k < curTick - 600) stale.Add(k);
-                        foreach (var k in stale) _hostTickHashes.Remove(k);
+                        foreach (var k in stale) _hostTickDigests.Remove(k);
                     }
-                    if (_clientTickHashes.Count > 0)
+                    if (_clientTickDigests.Count > 0)
                     {
                         var stale = new List<int>();
-                        foreach (var k in _clientTickHashes.Keys)
+                        foreach (var k in _clientTickDigests.Keys)
                             if (k < curTick - 600) stale.Add(k);
-                        foreach (var k in stale) _clientTickHashes.Remove(k);
-                    }
-                    if (_hostTickDigestStrings.Count > 0)
-                    {
-                        var stale = new List<int>();
-                        foreach (var k in _hostTickDigestStrings.Keys)
-                            if (k < curTick - 600) stale.Add(k);
-                        foreach (var k in stale) _hostTickDigestStrings.Remove(k);
-                    }
-                    if (_clientTickDigestStrings.Count > 0)
-                    {
-                        var stale = new List<int>();
-                        foreach (var k in _clientTickDigestStrings.Keys)
-                            if (k < curTick - 600) stale.Add(k);
-                        foreach (var k in stale) _clientTickDigestStrings.Remove(k);
+                        foreach (var k in stale) _clientTickDigests.Remove(k);
                     }
                 }
 
-                var digest = StateHasher.ComputeDigest();
+                var dynamicPositions = new List<StateHasher.EntityPosSample>(2048);
+                var digest = StateHasher.ComputeDigest(dynamicPositions);
+                CacheTickPositions(digest.SimTick, dynamicPositions);
+
                 string digestSummary =
-                    $"Pos={digest.PosChecksum:X16} Life={digest.LifeChecksum:X16} Proj={digest.ProjectileChecksum:X16} " +
+                    $"Pos={digest.PosChecksum:X16} Coarse={digest.CoarsePosChecksum:X16} Life={digest.LifeChecksum:X16} " +
+                    $"Aggro={digest.ZombieAggroChecksum:X16}({digest.AggroZombieCount}) Proj={digest.ProjectileChecksum:X16} " +
                     $"Prod={digest.ProductionChecksum:X16} Resv={digest.ReservationChecksum:X16} " +
                     $"(entities={digest.EntityCount} proj={digest.ProjectileCount} queued={digest.QueuedOrderCount} " +
                     $"res={digest.Gold}/{digest.Wood}/{digest.Stone}/{digest.Iron}/{digest.Oil} time={digest.GameTimeMs})";
 
                 if (Transport.IsHost)
                 {
-                    _hostTickHashes[digest.SimTick] = digest.FullHash;
-                    _hostTickDigestStrings[digest.SimTick] = digestSummary;
+                    _hostTickDigests[digest.SimTick] = new TickDigestRecord { Digest = digest, Summary = digestSummary };
                     VerifyTickChecksum(digest.SimTick);
                 }
                 else
                 {
                     Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.StateChecksumReport, w =>
                     {
-                        w.Write(digest.SimTick);
-                        w.Write(digest.FullHash);
-                        w.Write(digestSummary);
+                        WriteDigestReport(w, in digest, digestSummary);
                     });
                 }
             }
@@ -826,13 +860,15 @@ namespace TABCoopMod.Sync
                     int startTick = r.ReadInt32();
                     int seed = r.ReadInt32();
                     long idCounter = r.ReadInt64();
-                    _hostTickHashes.Clear();
-                    _clientTickHashes.Clear();
-                    _hostTickDigestStrings.Clear();
-                    _clientTickDigestStrings.Clear();
+                    _hostTickDigests.Clear();
+                    _clientTickDigests.Clear();
+                    _tickPosCache.Clear();
+                    _tickPosCacheOrder.Clear();
+                    _posSyncIncoming.Clear();
                     _lastCheckedSimTick = -1;
+                    _consecutiveProjOnlyMismatch = 0;
                     EnterSyncedLevel();
-                    ModLogger.Info($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}). Unpausing in lockstep!");
+                    ModLogger.Info($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
                     break;
                 }
 
@@ -883,16 +919,53 @@ namespace TABCoopMod.Sync
                 case PacketType.StateChecksumReport:
                 {
                     if (!Transport.IsHost) break;
-                    int clientTick = r.ReadInt32();
-                    ulong clientHash = r.ReadUInt64();
-                    string clientSummary = r.BaseStream.Position < r.BaseStream.Length ? r.ReadString() : string.Empty;
-                    if (!_clientTickHashes.TryGetValue(clientTick, out var byPeer))
-                        _clientTickHashes[clientTick] = byPeer = new Dictionary<byte, ulong>();
-                    byPeer[senderId] = clientHash;
-                    if (!_clientTickDigestStrings.TryGetValue(clientTick, out var summaryByPeer))
-                        _clientTickDigestStrings[clientTick] = summaryByPeer = new Dictionary<byte, string>();
-                    summaryByPeer[senderId] = clientSummary;
+                    TickDigestRecord rec = ReadDigestReport(r);
+                    int clientTick = rec.Digest.SimTick;
+                    if (!_clientTickDigests.TryGetValue(clientTick, out var byPeer))
+                        _clientTickDigests[clientTick] = byPeer = new Dictionary<byte, TickDigestRecord>();
+                    byPeer[senderId] = rec;
                     VerifyTickChecksum(clientTick);
+                    break;
+                }
+
+                case PacketType.PosDriftSyncChunk:
+                {
+                    if (Transport.IsHost) break;
+                    OnPosDriftSyncChunkReceived(r);
+                    break;
+                }
+
+                case PacketType.PosDriftStatsReport:
+                {
+                    if (!Transport.IsHost) break;
+                    int pTick = r.ReadInt32();
+                    bool wasApplied = r.ReadBoolean();
+                    int appliedCount = r.ReadInt32();
+                    int comparedCount = r.ReadInt32();
+                    int drifted001 = r.ReadInt32();
+                    int drifted01 = r.ReadInt32();
+                    int drifted1 = r.ReadInt32();
+                    int drifted5 = r.ReadInt32();
+                    float maxDelta = r.ReadSingle();
+                    float rmsDelta = r.ReadSingle();
+                    bool exceededThreshold = r.ReadBoolean();
+                    string maxType = r.ReadString();
+
+                    ModLogger.Info(
+                        $"[PosDriftStats] Client({senderId}) Tick={pTick} Applied={wasApplied}({appliedCount}/{comparedCount}) " +
+                        $"Drifted(>0.001={drifted001}, >0.01={drifted01}, >0.1={drifted1}, >0.5={drifted5}) " +
+                        $"MaxDelta={maxDelta:F4} RmsDelta={rmsDelta:F4} Type={maxType} Exceeded={exceededThreshold}");
+
+                    if (exceededThreshold && EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport)
+                    {
+                        double now = DXHelper_Environment.Ticks;
+                        if (now - _lastAutoResyncTicks >= AutoResyncCooldownMs)
+                        {
+                            _lastAutoResyncTicks = now;
+                            ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after PosDrift threshold exceeded at Tick {pTick} (MaxDelta={maxDelta:F4} >= {MaxAsyncTeleportCells:F2}).");
+                            RequestSnapshotBroadcast();
+                        }
+                    }
                     break;
                 }
 
@@ -953,29 +1026,117 @@ namespace TABCoopMod.Sync
             }
         }
 
+        private static void CacheTickPositions(int tick, List<StateHasher.EntityPosSample> samples)
+        {
+            if (samples == null) return;
+            _tickPosCache[tick] = samples;
+            _tickPosCacheOrder.Enqueue(tick);
+            while (_tickPosCacheOrder.Count > 6)
+            {
+                int old = _tickPosCacheOrder.Dequeue();
+                _tickPosCache.Remove(old);
+            }
+        }
+
+        private static void WriteDigestReport(BinaryWriter w, in StateHasher.LevelStateSnapshotDigest d, string summary)
+        {
+            w.Write(d.SimTick);
+            w.Write(d.GameTimeMs);
+            w.Write(d.Gold);
+            w.Write(d.Wood);
+            w.Write(d.Stone);
+            w.Write(d.Iron);
+            w.Write(d.Oil);
+            w.Write(d.EntityCount);
+            w.Write(d.ProjectileCount);
+            w.Write(d.QueuedOrderCount);
+            w.Write(d.AggroZombieCount);
+            w.Write(d.PosChecksum);
+            w.Write(d.CoarsePosChecksum);
+            w.Write(d.LifeChecksum);
+            w.Write(d.ZombieAggroChecksum);
+            w.Write(d.ProjectileChecksum);
+            w.Write(d.ProductionChecksum);
+            w.Write(d.ReservationChecksum);
+            w.Write(d.HardHash);
+            w.Write(d.FullHash);
+            w.Write(summary ?? string.Empty);
+        }
+
+        private static TickDigestRecord ReadDigestReport(BinaryReader r)
+        {
+            var d = new StateHasher.LevelStateSnapshotDigest
+            {
+                SimTick = r.ReadInt32(),
+                GameTimeMs = r.ReadInt32(),
+                Gold = r.ReadInt32(),
+                Wood = r.ReadInt32(),
+                Stone = r.ReadInt32(),
+                Iron = r.ReadInt32(),
+                Oil = r.ReadInt32(),
+                EntityCount = r.ReadInt32(),
+                ProjectileCount = r.ReadInt32(),
+                QueuedOrderCount = r.ReadInt32(),
+                AggroZombieCount = r.ReadInt32(),
+                PosChecksum = r.ReadInt64(),
+                CoarsePosChecksum = r.ReadInt64(),
+                LifeChecksum = r.ReadInt64(),
+                ZombieAggroChecksum = r.ReadInt64(),
+                ProjectileChecksum = r.ReadInt64(),
+                ProductionChecksum = r.ReadInt64(),
+                ReservationChecksum = r.ReadInt64(),
+                HardHash = r.ReadUInt64(),
+                FullHash = r.ReadUInt64(),
+            };
+            string summary = r.BaseStream.Position < r.BaseStream.Length ? r.ReadString() : string.Empty;
+            return new TickDigestRecord { Digest = d, Summary = summary };
+        }
+
         private static void VerifyTickChecksum(int tick)
         {
-            if (!_hostTickHashes.TryGetValue(tick, out ulong hostHash)) return;
-            if (!_clientTickHashes.TryGetValue(tick, out var byPeer) || byPeer.Count == 0) return;
+            if (!_hostTickDigests.TryGetValue(tick, out TickDigestRecord hostRec)) return;
+            if (!_clientTickDigests.TryGetValue(tick, out var byPeer) || byPeer.Count == 0) return;
 
+            var host = hostRec.Digest;
+            string hostSummary = hostRec.Summary;
             var resolvedPeers = new List<byte>();
+
             foreach (var kv in byPeer)
             {
                 byte senderId = kv.Key;
-                ulong clientHash = kv.Value;
-                if (hostHash == clientHash)
-                {
-                    ModLogger.Info($"[StateChecksum] Tick {tick} MATCH (0x{hostHash:X16}) with Client({senderId}).");
-                    resolvedPeers.Add(senderId);
-                }
-                else
-                {
-                    _hostTickDigestStrings.TryGetValue(tick, out string hostSummary);
-                    string clientSummary = null;
-                    if (_clientTickDigestStrings.TryGetValue(tick, out var sByPeer))
-                        sByPeer.TryGetValue(senderId, out clientSummary);
+                var client = kv.Value.Digest;
+                string clientSummary = kv.Value.Summary;
+                resolvedPeers.Add(senderId);
 
-                    ModLogger.Error($"[StateChecksum] DESYNC DETECTED at Tick {tick}! Host=0x{hostHash:X16}, Client({senderId})=0x{clientHash:X16}");
+                if (host.FullHash == client.FullHash)
+                {
+                    _consecutiveProjOnlyMismatch = 0;
+                    ModLogger.Info($"[StateChecksum] Tick {tick} MATCH (0x{host.FullHash:X16}) with Client({senderId}).");
+                    continue;
+                }
+
+                bool lifeDiff = host.LifeChecksum != client.LifeChecksum;
+                bool aggroDiff = host.ZombieAggroChecksum != client.ZombieAggroChecksum || host.AggroZombieCount != client.AggroZombieCount;
+                bool entityDiff = host.EntityCount != client.EntityCount;
+                bool econDiff = host.Gold != client.Gold || host.Wood != client.Wood || host.Stone != client.Stone
+                    || host.Iron != client.Iron || host.Oil != client.Oil
+                    || host.ReservationChecksum != client.ReservationChecksum
+                    || host.ProductionChecksum != client.ProductionChecksum
+                    || host.QueuedOrderCount != client.QueuedOrderCount
+                    || host.GameTimeMs != client.GameTimeMs;
+                bool projDiff = host.ProjectileCount != client.ProjectileCount || host.ProjectileChecksum != client.ProjectileChecksum;
+                bool posDiff = host.PosChecksum != client.PosChecksum;
+                bool coarsePosDiff = host.CoarsePosChecksum != client.CoarsePosChecksum;
+
+                bool hardCoreDiff = lifeDiff || aggroDiff || entityDiff || econDiff;
+                double now = DXHelper_Environment.Ticks;
+
+                if (hardCoreDiff || (projDiff && (IsStrictMode || _consecutiveProjOnlyMismatch >= 1)))
+                {
+                    if (projDiff && !hardCoreDiff) _consecutiveProjOnlyMismatch++;
+                    else _consecutiveProjOnlyMismatch = 0;
+
+                    ModLogger.Error($"[StateChecksum] HARD DESYNC DETECTED at Tick {tick}! Life={lifeDiff} Aggro={aggroDiff} Entity={entityDiff} Econ={econDiff} Proj={projDiff} Pos={posDiff} (Host=0x{host.FullHash:X16}, Client({senderId})=0x{client.FullHash:X16})");
                     ModLogger.Error($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
                     ModLogger.Error($"[StateChecksum]   Client : {clientSummary ?? "(none)"}");
                     if (!_desyncDumped)
@@ -983,27 +1144,276 @@ namespace TABCoopMod.Sync
                         _desyncDumped = true;
                         DumpHostEntitiesOnDesync(tick);
                     }
+                    TrySendPosDriftSync(senderId, tick, applyCorrection: false);
                     GameBridge.ShowTopBanner("State Drift Detected (see log)", Color.Orange, 2500);
-                    resolvedPeers.Add(senderId);
-                    double now = DXHelper_Environment.Ticks;
-                    if (EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport && (now - _lastAutoResyncTicks >= 15000.0))
+
+                    if (EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport && (now - _lastAutoResyncTicks >= AutoResyncCooldownMs))
                     {
                         _lastAutoResyncTicks = now;
-                        ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after DESYNC at Tick {tick}.");
+                        ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after HARD DESYNC at Tick {tick} (Life={lifeDiff}, Aggro={aggroDiff}, Entity={entityDiff}, Econ={econDiff}, Proj={projDiff}).");
+                        RequestSnapshotBroadcast();
+                    }
+                    continue;
+                }
+
+                if (projDiff)
+                {
+                    // Single transient projectile difference with identical HP, Zombie Aggro, EntityCount and Economy:
+                    // tolerate one check unless it persists on the next verification tick.
+                    _consecutiveProjOnlyMismatch++;
+                    ModLogger.Warn($"[StateChecksum] TRANSIENT PROJ DIFF at Tick {tick} (Life/Aggro/Entity/Econ MATCH; PosDiff={posDiff}, streak={_consecutiveProjOnlyMismatch}).");
+                    if (posDiff && (now - _lastPosSyncSentTicks >= AsyncPosAlignCooldownMs))
+                    {
+                        _lastPosSyncSentTicks = now;
+                        TrySendPosDriftSync(senderId, tick, applyCorrection: EnableAsyncPosAlign);
+                    }
+                    continue;
+                }
+
+                // Pure position drift: NO zombie aggro divergence, NO unit damage divergence, NO combat/economy divergence!
+                _consecutiveProjOnlyMismatch = 0;
+                ModLogger.Warn($"[StateChecksum] SOFT POS DRIFT at Tick {tick} (Life/Aggro/Entity/Proj/Econ MATCH! CoarseDiff={coarsePosDiff}, mode={EffectiveResyncMode}).");
+                ModLogger.Info($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
+                ModLogger.Info($"[StateChecksum]   Client : {clientSummary ?? "(none)"}");
+
+                if (IsStrictMode)
+                {
+                    if (now - _lastPosSyncSentTicks >= 2000.0)
+                    {
+                        _lastPosSyncSentTicks = now;
+                        TrySendPosDriftSync(senderId, tick, applyCorrection: false);
+                    }
+                    if (EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport && (now - _lastAutoResyncTicks >= AutoResyncCooldownMs))
+                    {
+                        _lastAutoResyncTicks = now;
+                        ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after DESYNC (strict pos) at Tick {tick}.");
                         RequestSnapshotBroadcast();
                     }
                 }
+                else
+                {
+                    if (now - _lastPosSyncSentTicks >= AsyncPosAlignCooldownMs)
+                    {
+                        _lastPosSyncSentTicks = now;
+                        TrySendPosDriftSync(senderId, tick, applyCorrection: EnableAsyncPosAlign);
+                    }
+                }
             }
+
             foreach (var pid in resolvedPeers)
-            {
                 byPeer.Remove(pid);
-                if (_clientTickDigestStrings.TryGetValue(tick, out var sByPeer)) sByPeer.Remove(pid);
-            }
             if (byPeer.Count == 0)
+                _clientTickDigests.Remove(tick);
+        }
+
+        private static void TrySendPosDriftSync(byte targetPlayerId, int tick, bool applyCorrection)
+        {
+            if (Transport == null || !Transport.IsHost) return;
+            if (!_tickPosCache.TryGetValue(tick, out var samples) || samples == null || samples.Count == 0)
+                return;
+
+            try
             {
-                _clientTickHashes.Remove(tick);
-                _clientTickDigestStrings.Remove(tick);
+                byte[] compressed;
+                using (var rawMs = new MemoryStream(samples.Count * 16 + 8))
+                using (var bw = new BinaryWriter(rawMs))
+                {
+                    bw.Write(samples.Count);
+                    for (int i = 0; i < samples.Count; i++)
+                    {
+                        bw.Write(samples[i].Id);
+                        bw.Write(samples[i].X);
+                        bw.Write(samples[i].Y);
+                    }
+                    bw.Flush();
+                    byte[] rawBytes = rawMs.ToArray();
+                    using (var outMs = new MemoryStream(rawBytes.Length / 2))
+                    {
+                        using (var ds = new DeflateStream(outMs, CompressionLevel.Fastest, leaveOpen: true))
+                            ds.Write(rawBytes, 0, rawBytes.Length);
+                        compressed = outMs.ToArray();
+                    }
+                }
+
+                int seq = ++_posSyncSeq;
+                int totalLen = compressed.Length;
+                int totalChunks = Math.Max(1, (totalLen + ChunkSizeBytes - 1) / ChunkSizeBytes);
+
+                for (int idx = 0; idx < totalChunks; idx++)
+                {
+                    int offset = idx * ChunkSizeBytes;
+                    int len = Math.Min(ChunkSizeBytes, totalLen - offset);
+                    Transport.SendToPeer(targetPlayerId, SendChannel.ReliableOrdered, PacketType.PosDriftSyncChunk, w =>
+                    {
+                        w.Write(seq);
+                        w.Write(tick);
+                        w.Write(applyCorrection);
+                        w.Write(totalChunks);
+                        w.Write(idx);
+                        w.Write(totalLen);
+                        w.Write(len);
+                        w.Write(compressed, offset, len);
+                    });
+                }
             }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[AsyncPosAlign] TrySendPosDriftSync failed: {ex.Message}");
+            }
+        }
+
+        private static void OnPosDriftSyncChunkReceived(BinaryReader r)
+        {
+            int seq = r.ReadInt32();
+            int tick = r.ReadInt32();
+            bool applyCorrection = r.ReadBoolean();
+            int totalChunks = r.ReadInt32();
+            int chunkIdx = r.ReadInt32();
+            int compressedTotalLen = r.ReadInt32();
+            int len = r.ReadInt32();
+            byte[] part = r.ReadBytes(len);
+
+            if (!_posSyncIncoming.TryGetValue(seq, out var buf))
+            {
+                buf = new PosSyncReceiveBuffer
+                {
+                    SimTick = tick,
+                    ApplyCorrection = applyCorrection,
+                    TotalChunks = totalChunks,
+                    CompressedTotalLen = compressedTotalLen
+                };
+                _posSyncIncoming[seq] = buf;
+            }
+            buf.Chunks[chunkIdx] = part;
+            if (buf.Chunks.Count < buf.TotalChunks) return;
+
+            _posSyncIncoming.Remove(seq);
+            // Prune stale incomplete sequences if any
+            if (_posSyncIncoming.Count > 4) _posSyncIncoming.Clear();
+
+            byte[] compressed = new byte[buf.CompressedTotalLen];
+            int offset = 0;
+            for (int i = 0; i < buf.TotalChunks; i++)
+            {
+                if (!buf.Chunks.TryGetValue(i, out byte[] p)) return;
+                Buffer.BlockCopy(p, 0, compressed, offset, p.Length);
+                offset += p.Length;
+            }
+
+            if (!_tickPosCache.TryGetValue(buf.SimTick, out var clientSamples) || clientSamples == null)
+            {
+                ModLogger.Warn($"[AsyncPosAlign] No cached client positions for Tick {buf.SimTick}; cannot measure/apply delta.");
+                return;
+            }
+
+            var clientMap = new Dictionary<ulong, PointF>(clientSamples.Count);
+            for (int i = 0; i < clientSamples.Count; i++)
+                clientMap[clientSamples[i].Id] = new PointF(clientSamples[i].X, clientSamples[i].Y);
+
+            int count;
+            var hostSamples = new List<StateHasher.EntityPosSample>(clientSamples.Count);
+            using (var inMs = new MemoryStream(compressed))
+            using (var ds = new DeflateStream(inMs, CompressionMode.Decompress))
+            using (var br = new BinaryReader(ds))
+            {
+                count = br.ReadInt32();
+                for (int i = 0; i < count; i++)
+                {
+                    hostSamples.Add(new StateHasher.EntityPosSample
+                    {
+                        Id = br.ReadUInt64(),
+                        X = br.ReadSingle(),
+                        Y = br.ReadSingle()
+                    });
+                }
+            }
+
+            int comparedCount = 0;
+            int drifted001 = 0, drifted01 = 0, drifted1 = 0, drifted5 = 0;
+            int appliedCount = 0;
+            float maxDelta = 0f;
+            double sumSq = 0.0;
+            string maxType = "None";
+
+            var game = DXGame.Current;
+            int nCells = DXWorldGrid.NCells;
+            float maxCoord = nCells > 1 ? nCells - 0.5f : 10000f;
+
+            for (int i = 0; i < hostSamples.Count; i++)
+            {
+                var hs = hostSamples[i];
+                if (!clientMap.TryGetValue(hs.Id, out PointF cp)) continue;
+                comparedCount++;
+
+                float dx = hs.X - cp.X;
+                float dy = hs.Y - cp.Y;
+                float dist = (float)Math.Sqrt(dx * dx + dy * dy);
+                if (dist > 0.001f)
+                {
+                    drifted001++;
+                    sumSq += dist * dist;
+                }
+                if (dist > 0.01f) drifted01++;
+                if (dist > 0.1f) drifted1++;
+                if (dist > 0.5f) drifted5++;
+
+                if (dist > maxDelta)
+                {
+                    maxDelta = dist;
+                    DXEntity maxEnt = game?.GetEntityByID(hs.Id);
+                    maxType = maxEnt != null ? maxEnt.GetType().Name : "Unknown";
+                }
+
+                if (buf.ApplyCorrection && dist > 0.0005f && dist <= MaxAsyncTeleportCells && game != null)
+                {
+                    DXEntity e = game.GetEntityByID(hs.Id);
+                    if (e != null && !e.Disposed && e.PhysicalType == DXBodyType.Dynamic)
+                    {
+                        float nx = e.Position.X + dx;
+                        float ny = e.Position.Y + dy;
+                        if (!float.IsNaN(nx) && !float.IsInfinity(nx) && !float.IsNaN(ny) && !float.IsInfinity(ny))
+                        {
+                            nx = Math.Max(0.5f, Math.Min(maxCoord, nx));
+                            ny = Math.Max(0.5f, Math.Min(maxCoord, ny));
+                            var newPos = new PointF(nx, ny);
+                            e.LastPosition = new PointF(e.LastPosition.X + dx, e.LastPosition.Y + dy);
+                            e.Position = newPos;
+                            var body = e.Body;
+                            if (body != null && body.Handle != IntPtr.Zero)
+                            {
+                                body.LastPositionComputed = new PointF(body.LastPositionComputed.X + dx, body.LastPositionComputed.Y + dy);
+                                body.PositionComputed = newPos;
+                                body.PhysicPosition = newPos;
+                            }
+                            appliedCount++;
+                        }
+                    }
+                }
+            }
+
+            float rmsDelta = drifted001 > 0 ? (float)Math.Sqrt(sumSq / drifted001) : 0f;
+            bool exceededThreshold = maxDelta >= MaxAsyncTeleportCells;
+
+            ModLogger.Info(
+                $"[AsyncPosAlign] Tick={buf.SimTick} Apply={buf.ApplyCorrection}({appliedCount}/{comparedCount}) " +
+                $"Drifted(>0.001={drifted001}, >0.01={drifted01}, >0.1={drifted1}, >0.5={drifted5}) " +
+                $"MaxDelta={maxDelta:F4} Rms={rmsDelta:F4} MaxType={maxType} Exceeded={exceededThreshold}");
+
+            Transport?.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.PosDriftStatsReport, w =>
+            {
+                w.Write(buf.SimTick);
+                w.Write(buf.ApplyCorrection);
+                w.Write(appliedCount);
+                w.Write(comparedCount);
+                w.Write(drifted001);
+                w.Write(drifted01);
+                w.Write(drifted1);
+                w.Write(drifted5);
+                w.Write(maxDelta);
+                w.Write(rmsDelta);
+                w.Write(exceededThreshold);
+                w.Write(maxType ?? "Unknown");
+            });
         }
 
         private static void DumpHostEntitiesOnDesync(int tick)

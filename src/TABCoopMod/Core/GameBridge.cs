@@ -54,6 +54,18 @@ namespace TABCoopMod.Core
         private static MethodInfo _mGetEntityCmd;
         private static MethodInfo _mGetEntitySel;
         private static MethodInfo _mGetEntityLife;
+        private static MethodInfo _mGetEntityBehaviour;
+        private static MethodInfo _mGetEntityMovable;
+
+        private static Type _typeZombie;
+        private static PropertyInfo _propZombieAttackCC;
+        private static PropertyInfo _propMovableMode;
+        private static PropertyInfo _propCBehavBehaviour;
+        private static PropertyInfo _propBehavData;
+        private static FieldInfo _fieldBDataTargetRef;
+        private static PropertyInfo _propTargetRefId;
+        private static PropertyInfo _propBDataLastEnemy;
+        private static bool _zombieAggroReflectionInit;
 
         private static MethodInfo _mCurCmd;
         private static MethodInfo _mCancelCur;
@@ -158,10 +170,16 @@ namespace TABCoopMod.Core
                 _mGetEntityCmd = AccessTools.Method(typeof(ZXEntity), ObfuscatedSymbols.Method_ZXEntity_GetCommandable, Type.EmptyTypes);
                 _mGetEntitySel = AccessTools.Method(typeof(ZXEntity), ObfuscatedSymbols.Method_ZXEntity_GetSelectable, Type.EmptyTypes);
                 _mGetEntityLife = AccessTools.Method(typeof(ZXEntity), ObfuscatedSymbols.Method_ZXEntity_GetLife, Type.EmptyTypes);
+                _mGetEntityBehaviour = AccessTools.Method(typeof(ZXEntity), ObfuscatedSymbols.Method_ZXEntity_GetBehaviour, Type.EmptyTypes);
+                _mGetEntityMovable = AccessTools.Method(typeof(ZXEntity), ObfuscatedSymbols.Method_ZXEntity_GetMovable, Type.EmptyTypes);
+                _typeZombie = GameAssembly.GetType(ObfuscatedSymbols.Type_Zombie);
 
                 Check(_mGetEntityCmd, "ZXEntity.GetCommandable");
                 Check(_mGetEntitySel, "ZXEntity.GetSelectable");
                 Check(_mGetEntityLife, "ZXEntity.GetLife");
+                Check(_mGetEntityBehaviour, "ZXEntity.GetBehaviour");
+                Check(_mGetEntityMovable, "ZXEntity.GetMovable");
+                Check(_typeZombie, "Type ZX.Entities.Zombie");
 
                 _mCurCmd = AccessTools.Method(typeof(CCommandable), ObfuscatedSymbols.Method_CCommandable_GetCurrentCmd, Type.EmptyTypes);
                 _mCancelCur = AccessTools.Method(typeof(CCommandable), ObfuscatedSymbols.Method_CCommandable_CancelCurrent, Type.EmptyTypes);
@@ -959,6 +977,102 @@ namespace TABCoopMod.Core
             }
             if (prop == null) return 0;
             try { return Convert.ToInt32(prop.GetValue(life)); } catch { return 0; }
+        }
+
+        /// <summary>
+        /// Computes a deterministic aggro/alert signature for a Zombie entity without touching internal
+        /// types at compile time. Returns 0 when idle/roaming so pure micro-physics nudges never trip aggro alerts.
+        /// </summary>
+        public static long GetZombieAggroSignature(DXEntity entity, out bool isAlerted)
+        {
+            isAlerted = false;
+            if (entity == null || _typeZombie == null || !_typeZombie.IsInstanceOfType(entity))
+                return 0L;
+
+            try
+            {
+                if (!_zombieAggroReflectionInit)
+                {
+                    _zombieAggroReflectionInit = true;
+                    _propZombieAttackCC = _typeZombie.GetProperty("AttackCommandCenter", BindingFlags.Public | BindingFlags.Instance);
+                }
+
+                bool attackCC = _propZombieAttackCC != null && (bool)_propZombieAttackCC.GetValue(entity);
+
+                int moveMode = 0;
+                if (_mGetEntityMovable != null)
+                {
+                    object movable = _mGetEntityMovable.Invoke(entity, null);
+                    if (movable != null)
+                    {
+                        if (_propMovableMode == null)
+                            _propMovableMode = movable.GetType().GetProperty("MovementMode", BindingFlags.Public | BindingFlags.Instance);
+                        if (_propMovableMode != null)
+                            moveMode = Convert.ToInt32(_propMovableMode.GetValue(movable));
+                    }
+                }
+
+                ulong targetId = 0;
+                bool hasLastEnemy = false;
+                if (_mGetEntityBehaviour != null)
+                {
+                    object cbehav = _mGetEntityBehaviour.Invoke(entity, null);
+                    if (cbehav != null)
+                    {
+                        if (_propCBehavBehaviour == null)
+                            _propCBehavBehaviour = cbehav.GetType().GetProperty("Behaviour", BindingFlags.Public | BindingFlags.Instance);
+                        object behav = _propCBehavBehaviour?.GetValue(cbehav);
+                        if (behav != null)
+                        {
+                            if (_propBehavData == null)
+                                _propBehavData = behav.GetType().GetProperty("Data", BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+                            object bdata = _propBehavData?.GetValue(behav);
+                            if (bdata != null)
+                            {
+                                Type bType = bdata.GetType();
+                                if (_fieldBDataTargetRef == null)
+                                    _fieldBDataTargetRef = bType.GetField(ObfuscatedSymbols.Field_BData_TargetRef, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                                if (_fieldBDataTargetRef != null)
+                                {
+                                    object boxedRef = _fieldBDataTargetRef.GetValue(bdata);
+                                    if (boxedRef != null)
+                                    {
+                                        if (_propTargetRefId == null)
+                                            _propTargetRefId = boxedRef.GetType().GetProperty("IDEntity", BindingFlags.Public | BindingFlags.Instance);
+                                        if (_propTargetRefId != null)
+                                            targetId = Convert.ToUInt64(_propTargetRefId.GetValue(boxedRef));
+                                    }
+                                }
+
+                                if (_propBDataLastEnemy == null)
+                                    _propBDataLastEnemy = bType.GetProperty("LastEnemyPosition", BindingFlags.Public | BindingFlags.Instance);
+                                if (_propBDataLastEnemy != null)
+                                {
+                                    object lastEnemyObj = _propBDataLastEnemy.GetValue(bdata);
+                                    hasLastEnemy = lastEnemyObj != null;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // TMovementMode: Walk=0, WalkFast=1, Run=2, Jump=3
+                bool chasingMode = moveMode >= 2;
+                if (targetId == 0 && !hasLastEnemy && !chasingMode && !attackCC)
+                    return 0L;
+
+                isAlerted = true;
+                long sig = (long)entity.ID
+                    ^ ((long)targetId * 73856093L)
+                    ^ ((long)moveMode * 19349663L)
+                    ^ (hasLastEnemy ? 83492791L : 0L)
+                    ^ (attackCC ? 2654435761L : 0L);
+                return sig != 0L ? sig : 1L;
+            }
+            catch
+            {
+                return 0L;
+            }
         }
 
         public static object GetCommandableObject(object entity)

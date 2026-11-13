@@ -207,5 +207,12 @@ namespace TABCoopMod.Core
         public const string Field_ZXBehaviour_PickFarmCell   = "#=zK2CGzIZdW6uI$Q9jPNxMDPs=";
         public const string Method_BData_GetOwner            = "#=zHKPHAW92Cyls";
         public const string Method_ZXEntity_GetParams        = "#=zcODCID3ur9P9";
+
+        // ====================================================================
+        // 13. Zombie Aggro / Alerting State (for Desync Tolerance)
+        // ====================================================================
+        public const string Type_Zombie                      = "ZX.Entities.Zombie";
+        public const string Method_ZXEntity_GetBehaviour     = "#=zrPViR3ZjTZsjVndIuu8$9io=";
+        public const string Field_BData_TargetRef            = "#=zP9AEykk6714q";
     }
 }
