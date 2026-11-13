@@ -15,6 +15,7 @@ using TABCoopMod.Commands;
 using TABCoopMod.Core;
 using TABCoopMod.Patches;
 using TABCoopMod.Sync;
+using TABCoopMod.UI;
 
 namespace TABCoopMod.Testing
 {
@@ -198,6 +199,9 @@ namespace TABCoopMod.Testing
                 case "get_camera": return GetCamera();
                 case "set_camera": return SetCamera(args);
                 case "reveal_map": return RevealMap(args);
+                case "open_lobby":
+                    CoopLobbyWindow.ShowLobbyWindow();
+                    return new Dictionary<string, object> { ["opened"] = true };
                 default: throw new InvalidOperationException($"unknown tool '{tool}'");
             }
         }

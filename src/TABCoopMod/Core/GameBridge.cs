@@ -583,17 +583,17 @@ namespace TABCoopMod.Core
             return (DXTextRenderer)_methodGetPlainTextRenderer.Invoke(null, null);
         }
 
-        public static ZXWindow ShowAlertMessageBox(string title, string message, Action onOk = null)
+        public static object ShowAlertMessageBox(string title, string message, Action onOk = null)
         {
-            return (ZXWindow)_methodShowAlert.Invoke(null, new object[] { title, message, onOk });
+            return _methodShowAlert.Invoke(null, new object[] { title, message, onOk });
         }
 
-        public static ZXWindow ShowYesNoMessageBox(string title, string message, Action onYes, Action onNo = null)
+        public static object ShowYesNoMessageBox(string title, string message, Action onYes, Action onNo = null)
         {
-            return (ZXWindow)_methodShowYesNo.Invoke(null, new object[] { title, message, onYes, onNo });
+            return _methodShowYesNo.Invoke(null, new object[] { title, message, onYes, onNo });
         }
 
-        public static ZXWindow ShowListSelectorMessageBox(
+        public static object ShowListSelectorMessageBox(
             string title,
             string message,
             string[] options,
@@ -606,7 +606,7 @@ namespace TABCoopMod.Core
             object msgObj = Activator.CreateInstance(TypeZXWindowMessage);
             _propWindowMsgTitle?.SetValue(msgObj, title, null);
             _propWindowMsgText?.SetValue(msgObj, message, null);
-            return (ZXWindow)_methodShowListSelector.Invoke(null, new object[] { msgObj, onOk, onCancel, options });
+            return _methodShowListSelector.Invoke(null, new object[] { msgObj, onOk, onCancel, options });
         }
 
         // ====================================================================
