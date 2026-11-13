@@ -241,12 +241,25 @@ namespace TABCoopMod.Testing
             object inCampaign = GameBridge.GetGameStateProperty("InCampaign");
             object difficulty = GameBridge.GetGameStateProperty("Difficulty");
             object survivalParams = GameBridge.GetGameStateProperty("SurvivalModeParams");
+            var curSys = GameBridge.CurrentGameSystem as DXSystem;
 
             return new Dictionary<string, object>
             {
                 ["tick"] = game?.IAIterationInt ?? 0,
                 ["gameTimeMs"] = game?.GameTimeInt ?? 0,
                 ["paused"] = game?.Paused ?? false,
+                ["pausedBySession"] = Determinism.LockstepClock.PausedBySession,
+                ["inputEnabled"] = game?.InputEnabled ?? false,
+                ["focused"] = game?.Focused ?? false,
+                ["visible"] = game?.Visible ?? false,
+                ["systemEnabled"] = curSys?.Enabled ?? false,
+                ["inModal"] = DXVision.GUI.DXModalScreen.IsInModal,
+                ["fadeInScene"] = GameBridge.IsLoadingFadeInScene(),
+                ["avgFrameMs"] = Math.Round(Determinism.DeterministicSandboxPatches.DiagAvgFrameMs, 1),
+                ["avgLogicMs"] = Math.Round(Determinism.DeterministicSandboxPatches.DiagAvgTickLogicMs, 1),
+                ["avgPhysMs"] = Math.Round(Determinism.DeterministicSandboxPatches.DiagAvgPhysicsMs, 1),
+                ["lastWantedTicks"] = Determinism.DeterministicSandboxPatches.DiagLastWantedTicks,
+                ["lastRanTicks"] = Determinism.DeterministicSandboxPatches.DiagLastRanTicks,
                 ["cursorLocked"] = game?.CursorLocked ?? false,
                 ["gameSpeed"] = game?.GameSpeed ?? 0,
                 ["countdownActive"] = PauseSyncController.CountdownActive,

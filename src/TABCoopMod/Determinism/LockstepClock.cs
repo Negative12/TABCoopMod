@@ -117,26 +117,35 @@ namespace TABCoopMod.Determinism
 
         public static void ResetHostTickPacing() => _nextHostRealTickMs = 0.0;
 
-        internal static bool ShouldAdvanceHostRealTimeTick(double gameSpeed)
+        /// <summary>
+        /// Advances the Host monotonic real-time accumulator and returns how many fixed 30Hz ticks
+        /// should execute this frame (clamped to [0, maxTicks]). Multi-tick catchup prevents low
+        /// render FPS (e.g. dual-window GPU sharing or unfocused background window) from slowing
+        /// simulation below 1.0x real time and also supports >1x game speeds cleanly.
+        /// </summary>
+        internal static int ConsumeHostRealTimeTicks(double gameSpeed, int maxTicks = 4)
         {
             if (gameSpeed <= 0.001)
             {
                 _nextHostRealTickMs = 0.0;
-                return false;
+                return 0;
             }
 
             double nowMs = System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-            if (_nextHostRealTickMs <= 0.0 || nowMs - _nextHostRealTickMs > 250.0)
+            if (_nextHostRealTickMs <= 0.0 || nowMs - _nextHostRealTickMs > 500.0)
             {
                 _nextHostRealTickMs = nowMs;
             }
 
-            // 1ms tolerance avoids skipping a 60Hz VSync frame by sub-millisecond timer jitter.
-            if (nowMs + 1.0 < _nextHostRealTickMs)
-                return false;
-
-            _nextHostRealTickMs += MsPerLogicTick / gameSpeed;
-            return true;
+            double stepMs = MsPerLogicTick / gameSpeed;
+            int count = 0;
+            // 1.5ms tolerance prevents ~30-31Hz frame pacing jitter from skipping alternate frames.
+            while (count < maxTicks && nowMs + 1.5 >= _nextHostRealTickMs)
+            {
+                count++;
+                _nextHostRealTickMs += stepMs;
+            }
+            return count;
         }
 
         /// <summary>Executes an action under InDeterministicContext on the calling thread.</summary>
@@ -651,8 +660,17 @@ namespace TABCoopMod.Determinism
                             LoadingLevel = false;
                             PausedBySession = true;
                             var initHostGame = DXGame.Current;
-                            if (initHostGame != null && initHostGame.Paused)
-                                initHostGame.Paused = false;
+                            if (initHostGame != null)
+                            {
+                                if (initHostGame.Paused) initHostGame.Paused = false;
+                                if (!initHostGame.InputEnabled)
+                                {
+                                    initHostGame.InputEnabled = true;
+                                    ModLogger.Info("[LockstepClock] Restored InputEnabled=true after initial Host level load.");
+                                }
+                            }
+                            GameBridge.ClearWaitCursor();
+                            GameBridge.ClearLoadingFadeOverlay();
                             ModLogger.Info($"[LockstepClock] Host initial level load complete: counter={_syncedEntityIdCounter}, holding paused for snapshot export.");
                             return;
                         }
@@ -660,9 +678,17 @@ namespace TABCoopMod.Determinism
                         ApplyDeterministicLevelBaseline(seed, snapshotCounter);
                         PausedBySession = true;
                         var hostGame = DXGame.Current;
-                        if (hostGame != null && hostGame.Paused)
-                            hostGame.Paused = false;
+                        if (hostGame != null)
+                        {
+                            if (hostGame.Paused) hostGame.Paused = false;
+                            if (!hostGame.InputEnabled)
+                            {
+                                hostGame.InputEnabled = true;
+                                ModLogger.Info("[LockstepClock] Restored InputEnabled=true after Host snapshot reload (intro-zoom bypass).");
+                            }
+                        }
                         GameBridge.ClearWaitCursor();
+                        GameBridge.ClearLoadingFadeOverlay();
                         ModLogger.Info($"[LockstepClock] Host snapshot reload complete: baseline applied (seed={seed}, counter={_syncedEntityIdCounter}).");
                         return;
                     }
@@ -671,12 +697,21 @@ namespace TABCoopMod.Determinism
                     ApplyDeterministicLevelBaseline(seed, snapshotCounter);
                     PausedBySession = true;
                     var clientGame = DXGame.Current;
-                    if (clientGame != null && clientGame.Paused)
+                    if (clientGame != null)
                     {
-                        clientGame.Paused = false;
-                        ModLogger.Info("[LockstepClock] Cleared load-time pause on Client (session remains paused until SessionStart).");
+                        if (clientGame.Paused)
+                        {
+                            clientGame.Paused = false;
+                            ModLogger.Info("[LockstepClock] Cleared load-time pause on Client (session remains paused until SessionStart).");
+                        }
+                        if (!clientGame.InputEnabled)
+                        {
+                            clientGame.InputEnabled = true;
+                            ModLogger.Info("[LockstepClock] Restored InputEnabled=true on Client after snapshot load.");
+                        }
                     }
                     GameBridge.ClearWaitCursor();
+                    GameBridge.ClearLoadingFadeOverlay();
                     ModLogger.Info($"[LockstepClock] Client level load complete: ID counter -> {_syncedEntityIdCounter}, seed={seed}, waiting for SessionStart.");
                     return;
                 }
@@ -688,12 +723,17 @@ namespace TABCoopMod.Determinism
                 // would never tick. Restore the running state here.
                 PausedBySession = false;
                 var game = DXGame.Current;
-                if (game != null && game.Paused)
+                if (game != null)
                 {
-                    game.Paused = false;
-                    ModLogger.Info("[LockstepClock] Cleared load-time pause at level completion.");
+                    if (game.Paused)
+                    {
+                        game.Paused = false;
+                        ModLogger.Info("[LockstepClock] Cleared load-time pause at level completion.");
+                    }
+                    if (!game.InputEnabled) game.InputEnabled = true;
                 }
                 GameBridge.ClearWaitCursor();
+                GameBridge.ClearLoadingFadeOverlay();
 
                 ModLogger.Info($"[LockstepClock] Level load complete: ID counter -> {_syncedEntityIdCounter}, seed={seed}, clocks aligned.");
             }
@@ -722,18 +762,29 @@ namespace TABCoopMod.Determinism
 
             // During (async) save loading or pure-visual VFX particle creation, generated IDs belong
             // to local/transient objects and must never consume the shared synced ID counter.
-            if (LockstepClock.LoadingLevel || LockstepClock.InVisualVfxContext)
+            if (LockstepClock.InVisualVfxContext || LockstepClock.LoadingLevel)
             {
                 __result = LockstepClock.NextLocalUiGuid();
                 return false;
             }
 
             if (LockstepClock.InDeterministicContext || LockstepClock.LogicTickActive || LockstepClock.InPhysicsContext)
+            {
                 __result = LockstepClock.NextSyncedGuid();
-            else
-                __result = LockstepClock.NextLocalUiGuid();
+                return false;
+            }
 
-            return false;
+            // Only isolate render-thread transient IDs into the 0x8000... UI range once a synced
+            // level or deterministic replay is actually running. Offline/pre-sync map generation
+            // (e.g., Host starting a New Survival Game after clicking Co-op Host in the menu) must
+            // produce normal non-masked entity IDs so StateHasher, ControlServer, and replays track them.
+            if (Sync.CoopSessionManager.IsInSyncedLevel || Testing.DeterministicReplayVerifier.IsRunning)
+            {
+                __result = LockstepClock.NextLocalUiGuid();
+                return false;
+            }
+
+            return true;
         }
 
         // 2. Patch DXRandom.Global getter to return deterministic PRNG in deterministic context
@@ -764,15 +815,50 @@ namespace TABCoopMod.Determinism
             return false;
         }
 
+        private static readonly MethodInfo _mUpdateGameLogic = AccessTools.Method(typeof(DXGame), "UpdateGameLogic");
+        private static readonly MethodInfo _mUpdatePhysics = AccessTools.Method(typeof(DXGame), "UpdatePhysics");
+        private static readonly MethodInfo _mWaitForGameLogic = AccessTools.Method(typeof(DXGame), "WaitForGameLogic");
+        [ThreadStatic] private static bool _inSingleTickStep;
+
+        internal static double DiagLastFrameDtMs { get; private set; }
+        internal static double DiagAvgFrameMs { get; private set; }
+        internal static double DiagAvgTickLogicMs { get; private set; }
+        internal static double DiagAvgPhysicsMs { get; private set; }
+        internal static int DiagLastWantedTicks { get; private set; }
+        internal static int DiagLastRanTicks { get; private set; }
+        private static double _diagLastEntryMs;
+
         // 3. Fixed-step clock: drive GameTime in exact 33.333..ms increments and only advance a
         //    tick when the active ITickGate allows it. Vanilla's UpdateGameLogic runs a Task and
-        //    loops `while (GameTime >= LastGameTimeIAUpdate + c)`; setting GameTime to exactly
-        //    LastGameTimeIAUpdate + c yields exactly one tick, pinning it just below yields none.
+        //    loops `while (GameTime >= LastGameTimeIAUpdate + c)`. When render FPS drops below 30Hz
+        //    (e.g. two windows side-by-side) or GameSpeed > 1x, outer UpdateGameLogic_Prefix steps
+        //    up to 8 sequential single-tick passes per frame, running physics + turn flush + hashing
+        //    + PostMethods between every tick to preserve bit-identical interleaving.
         [HarmonyPatch(typeof(DXGame), "UpdateGameLogic")]
         [HarmonyPrefix]
         public static bool UpdateGameLogic_Prefix(DXGame __instance)
         {
             if (!LockstepClock.IsDeterministicModeActive) return true;
+
+            if (_inSingleTickStep)
+            {
+                int tickIdx = __instance.IAIterationInt;
+                if (Sync.CoopSessionManager.IsInSyncedLevel)
+                    Sync.CoopSessionManager.FlushDueTurnCommands(tickIdx);
+
+                if (LockstepClock.PausedBySession)
+                {
+                    __instance.GameTime = DXGame.LastGameTimeIAUpdate;
+                    LockstepClock.AllowPhysicsThisFrame = false;
+                    return false;
+                }
+
+                LockstepClock.LogicTickActive = true;
+                LockstepClock.InDeterministicContext = true;
+                LockstepClock.AllowPhysicsThisFrame = true;
+                __instance.GameTime = DXGame.LastGameTimeIAUpdate + LockstepClock.MsPerLogicTick;
+                return true;
+            }
 
             // Never touch GameTime or run logic during MainMenu or async level loading:
             // MainMenu ticks would advance LastGameTimeIAUpdate to wall-clock ~15s and later
@@ -793,62 +879,141 @@ namespace TABCoopMod.Determinism
             if (DXGame.LastGameTimeIAUpdate == 0.0)
                 DXGame.LastGameTimeIAUpdate = __instance.GameTime;
 
-            int nextTick = __instance.IAIterationInt;
-            double boundary = DXGame.LastGameTimeIAUpdate + LockstepClock.MsPerLogicTick;
-            bool ready = LockstepClock.TickGate == null || LockstepClock.TickGate.IsTickReady(nextTick);
-
-            if (!ready)
+            bool inCoop = Sync.CoopSessionManager.IsInSyncedLevel;
+            if (inCoop)
             {
+                if (__instance.CursorLocked && !Core.GameBridge.IsGameLoading())
+                    Core.GameBridge.ClearWaitCursor();
+
+                // Poll transport and flush outgoing Client inputs right before deciding this frame's ticks
+                // so packets arriving during RenderFrame are handled without waiting another full render frame.
+                Sync.CoopSessionManager.PumpNetworkBeforeLogic();
+            }
+
+            if (LockstepClock.PausedBySession)
+            {
+                if (inCoop)
+                {
+                    int pausedTick = __instance.IAIterationInt;
+                    if (LockstepClock.TickGate == null || LockstepClock.TickGate.IsTickReady(pausedTick))
+                        Sync.CoopSessionManager.FlushDueTurnCommands(pausedTick);
+                }
+                LockstepClock.ResetHostTickPacing();
                 __instance.GameTime = DXGame.LastGameTimeIAUpdate;
                 LockstepClock.AllowPhysicsThisFrame = false;
                 return false;
             }
 
-            // Network lockstep: pace live Host simulation ticks to real wall-clock time * GameSpeed
-            // (so 1.0x runs at 30 Hz instead of render FPS), clear any lingering Wait cursor lock,
-            // and apply the turn's buffered commands at its exact tick boundary.
-            if (Sync.CoopSessionManager.IsInSyncedLevel)
+            int maxTicksThisFrame = 1;
+            if (inCoop)
             {
-                if (__instance.CursorLocked && !Core.GameBridge.IsGameLoading())
-                    Core.GameBridge.ClearWaitCursor();
-
                 bool isHost = Sync.CoopSessionManager.Transport != null && Sync.CoopSessionManager.Transport.IsHost;
-                if (!LockstepClock.PausedBySession && isHost)
+                if (isHost)
                 {
-                    if (!LockstepClock.ShouldAdvanceHostRealTimeTick(__instance.GameSpeed))
-                    {
-                        __instance.GameTime = DXGame.LastGameTimeIAUpdate;
-                        LockstepClock.AllowPhysicsThisFrame = false;
-                        return false;
-                    }
+                    maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, 8);
                 }
                 else
                 {
                     LockstepClock.ResetHostTickPacing();
+                    // Allow Client to catch up up to 8 already-authorized ticks per frame so low Client
+                    // render FPS never accumulates input lag behind the Host.
+                    maxTicksThisFrame = 8;
                 }
-
-                Sync.CoopSessionManager.FlushDueTurnCommands(nextTick);
             }
             else
             {
                 LockstepClock.ResetHostTickPacing();
             }
 
-            // Honor a synchronized pause: after flushing this frame's commands, freeze SimTick and
-            // GameTime while LockstepClock.PausedBySession is set. The engine's own DXGame.Paused is
-            // NOT used here — the save loader leaves it set (and re-sets it) for its own purposes.
-            if (LockstepClock.PausedBySession)
+            if (maxTicksThisFrame <= 0)
             {
                 __instance.GameTime = DXGame.LastGameTimeIAUpdate;
                 LockstepClock.AllowPhysicsThisFrame = false;
                 return false;
             }
 
-            LockstepClock.LogicTickActive = true;
-            LockstepClock.InDeterministicContext = true;
-            LockstepClock.AllowPhysicsThisFrame = true;
-            __instance.GameTime = boundary;
-            return true;
+            double swFreqMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            double nowEntryMs = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs;
+            if (_diagLastEntryMs > 0.0)
+            {
+                double dt = nowEntryMs - _diagLastEntryMs;
+                DiagLastFrameDtMs = dt;
+                DiagAvgFrameMs = DiagAvgFrameMs <= 0.0 ? dt : DiagAvgFrameMs * 0.85 + dt * 0.15;
+            }
+            _diagLastEntryMs = nowEntryMs;
+            DiagLastWantedTicks = maxTicksThisFrame;
+
+            int ticksRan = 0;
+            for (int step = 0; step < maxTicksThisFrame; step++)
+            {
+                if (LockstepClock.PausedBySession) break;
+
+                int nextTick = __instance.IAIterationInt;
+                if (LockstepClock.TickGate != null && !LockstepClock.TickGate.IsTickReady(nextTick))
+                    break;
+
+                if (_mUpdateGameLogic == null) break;
+
+                // Mirror vanilla 1-tick-per-frame PostMethods boundaries between consecutive ticks
+                // so deferred AddToScene/RemoveFromScene/spawn callbacks never execute at differing
+                // tick boundaries on Host vs Client when catchup runs multiple ticks per frame.
+                if (ticksRan > 0)
+                {
+                    bool prevRendering = __instance.RenderingFrame;
+                    __instance.RenderingFrame = false;
+                    try
+                    {
+                        __instance.PostMethods_OnFinishFrame?.ExecuteAll();
+                        __instance.PostMethods_OnSafeLogicAndDrawing?.ExecuteAll();
+                        __instance.PostMethods_OnStartFrame?.ExecuteAll();
+                    }
+                    finally
+                    {
+                        __instance.RenderingFrame = prevRendering;
+                    }
+                }
+
+                double tLogicStart = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs;
+                _inSingleTickStep = true;
+                try
+                {
+                    _mUpdateGameLogic.Invoke(__instance, null);
+                }
+                finally
+                {
+                    _inSingleTickStep = false;
+                }
+                double tLogicEnd = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs;
+                double lMs = tLogicEnd - tLogicStart;
+                DiagAvgTickLogicMs = DiagAvgTickLogicMs <= 0.0 ? lMs : DiagAvgTickLogicMs * 0.9 + lMs * 0.1;
+
+                // Honor a SetPaused(true) command flushed right before/during this tick.
+                if (LockstepClock.PausedBySession && ticksRan == 0 && __instance.IAIterationInt == nextTick)
+                    break;
+
+                ticksRan++;
+
+                if (DXGame.IsIADeterministic && _mUpdatePhysics != null)
+                {
+                    double tPhysStart = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs;
+                    LockstepClock.AllowPhysicsThisFrame = true;
+                    _mUpdatePhysics.Invoke(__instance, null);
+                    double pMs = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs - tPhysStart;
+                    DiagAvgPhysicsMs = DiagAvgPhysicsMs <= 0.0 ? pMs : DiagAvgPhysicsMs * 0.9 + pMs * 0.1;
+                }
+
+                if (inCoop)
+                    Sync.CoopSessionManager.OnSimulationTickCompleted(__instance.IAIterationInt);
+            }
+
+            DiagLastRanTicks = ticksRan;
+
+            if (ticksRan == 0)
+                __instance.GameTime = DXGame.LastGameTimeIAUpdate;
+
+            // Physics was already stepped deterministically after each individual tick above.
+            LockstepClock.AllowPhysicsThisFrame = false;
+            return false;
         }
 
         [HarmonyPatch(typeof(DXGame), "UpdateGameLogic")]
@@ -858,7 +1023,7 @@ namespace TABCoopMod.Determinism
             if (!LockstepClock.IsDeterministicModeActive) return;
 
             // Wait synchronously for _TaskLogic so logic never overlaps rendering or network replay.
-            AccessTools.Method(typeof(DXGame), "WaitForGameLogic")?.Invoke(__instance, null);
+            _mWaitForGameLogic?.Invoke(__instance, null);
             LockstepClock.LogicTickActive = false;
             LockstepClock.InDeterministicContext = false;
         }
@@ -879,12 +1044,14 @@ namespace TABCoopMod.Determinism
         // position-affecting For-loops (not scene culling / texture baking / level tables).
         [HarmonyPatch(typeof(DXGame), "UpdatePhysics")]
         [HarmonyPrefix]
-        public static bool UpdatePhysics_Enter()
+        public static bool UpdatePhysics_Enter(out uint __state)
         {
+            __state = 0;
             if (!LockstepClock.IsDeterministicModeActive) return true;
             if (!LockstepClock.AllowPhysicsThisFrame || LockstepClock.LoadingLevel || LockstepClock.PausedBySession)
                 return false;
 
+            __state = DXPhysicWorld.NUpdates;
             LockstepClock.AllowPhysicsThisFrame = false;
             LockstepClock.InPhysicsContext = true;
             LockstepClock.InPhysicsStep = true;
@@ -893,7 +1060,7 @@ namespace TABCoopMod.Determinism
 
         [HarmonyPatch(typeof(DXGame), "UpdatePhysics")]
         [HarmonyPostfix]
-        public static void UpdatePhysics_Exit()
+        public static void UpdatePhysics_Exit(uint __state)
         {
             bool didStep = LockstepClock.InPhysicsStep;
             LockstepClock.InPhysicsContext = false;
@@ -902,7 +1069,7 @@ namespace TABCoopMod.Determinism
             if (LockstepClock.IsDeterministicModeActive)
             {
                 DXPhysicWorld.TimeLastBodyPosition = DXPhysicWorld.TimeBodyPosition;
-                if (didStep && !LockstepClock.LoadingLevel)
+                if (didStep && DXPhysicWorld.NUpdates != __state && !LockstepClock.LoadingLevel)
                     CSpritePullIsolationPatch.RunDeterministicPullUpdates(DXGame.Current);
             }
         }
@@ -1047,13 +1214,19 @@ namespace TABCoopMod.Determinism
     }
 
     /// <summary>
-    /// DXEntity.Update runs on the deterministic logic worker thread (single-threaded branch in
-    /// DXGame.UpdateGameLogic). Use it to re-seed that thread's [ThreadStatic] behaviour RNG once
-    /// per level load before any behaviour node executes.
+    /// ZXSystemGameLevel.OnStartUpdate runs inside DXGame._TaskLogic right before the deterministic
+    /// entity update loop. Rebind that worker thread's [ThreadStatic] behaviour RNG once per tick
+    /// instead of patching DXEntity.Update (which would destroy AggressiveInlining across 50k+ entities).
     /// </summary>
-    [HarmonyPatch(typeof(DXEntity), "Update")]
+    [HarmonyPatch]
     public static class EntityUpdateBehaviourRandomPatch
     {
+        public static MethodBase TargetMethod()
+        {
+            var t = Core.GameBridge.TypeZXSystemGameLevel ?? AccessTools.TypeByName(Core.ObfuscatedSymbols.Type_ZXSystemGameLevel);
+            return t != null ? AccessTools.Method(t, "OnStartUpdate", Type.EmptyTypes) : null;
+        }
+
         [HarmonyPrefix]
         public static void Prefix()
         {
@@ -1603,16 +1776,19 @@ namespace TABCoopMod.Determinism
 
         public static void RunDeterministicPullUpdates(DXGame game)
         {
-            if (game?.Entities == null || _pullMethod == null || _cspriteType == null)
+            var bodies = DXPhysicWorld.Bodies;
+            if (bodies == null || _pullMethod == null || _cspriteType == null)
                 return;
 
-            var entities = game.Entities;
             LockstepClock.AllowCSpritePullUpdate = true;
             try
             {
-                foreach (var e in entities)
+                int bodyCount = bodies.Count;
+                for (int i = 0; i < bodyCount; i++)
                 {
-                    if (e == null || e.Disposed || e.Body == null || e.PhysicalType == DXBodyType.Static)
+                    var body = bodies[i];
+                    var e = body?.GameEntity;
+                    if (e == null || e.Disposed || e.PhysicalType == DXBodyType.Static)
                         continue;
 
                     Type entType = e.GetType();

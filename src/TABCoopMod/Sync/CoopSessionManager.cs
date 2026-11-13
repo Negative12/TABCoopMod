@@ -517,8 +517,19 @@ namespace TABCoopMod.Sync
             {
                 if (DXGame.Current.Paused) DXGame.Current.Paused = false;
                 if (DXGame.Current.GameSpeed <= 0.0) DXGame.Current.GameSpeed = 1.0;
+                if (!DXGame.Current.InputEnabled)
+                {
+                    DXGame.Current.InputEnabled = true;
+                    ModLogger.Info("[CoopSessionManager] Restored DXGame.InputEnabled=true on synced level entry.");
+                }
+            }
+            if (GameBridge.CurrentGameSystem is DXSystem activeSys && !activeSys.Enabled)
+            {
+                activeSys.Enabled = true;
+                ModLogger.Info("[CoopSessionManager] Re-enabled CurrentGameSystem on synced level entry.");
             }
             GameBridge.ClearWaitCursor();
+            GameBridge.ClearLoadingFadeOverlay();
 
             ModLogger.Info($"[CoopSessionManager] Entered synced level at tick {cur} (inputDelay={InputDelayTicks}, role={(Transport.IsHost ? "Host" : "Client")}).");
         }
@@ -635,7 +646,10 @@ namespace TABCoopMod.Sync
                 _pendingHostSnapshotExport = false;
                 BroadcastCurrentLevelSnapshot();
             }
-            if (_pendingClientSnapshotLoadPath != null)
+            if (_pendingClientSnapshotLoadPath != null
+                && GameBridge.CurrentGameSystem != null
+                && !GameBridge.IsGameLoading()
+                && (GameBridge.CurrentLevelState != null || !GameBridge.IsStartupFadeActive()))
             {
                 string path = _pendingClientSnapshotLoadPath;
                 _pendingClientSnapshotLoadPath = null;
@@ -673,79 +687,13 @@ namespace TABCoopMod.Sync
 
             // 1. Flush Client outgoing commands to Host
             if (!Transport.IsHost)
-            {
-                List<NetCommand> toSend = null;
-                lock (_localOutgoingQueue)
-                {
-                    if (_localOutgoingQueue.Count > 0)
-                    {
-                        toSend = new List<NetCommand>(_localOutgoingQueue);
-                        _localOutgoingQueue.Clear();
-                    }
-                }
+                FlushOutgoingClientCommands();
 
-                if (toSend != null)
-                {
-                    Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.ClientInputReport, w =>
-                    {
-                        w.Write((ushort)toSend.Count);
-                        foreach (var c in toSend) c.WriteTo(w);
-                    });
-                }
-            }
-
-            // 2. Host broadcasts TurnInputBroadcast for EVERY advanced sim tick (even empty heartbeat)
-            //    and enqueues the commands for local execution on TargetSimTick. Nothing is executed
-            //    on receipt, so both peers apply the same turn on the same tick. While paused the
-            //    tick does not advance, so a new turn (pause-time build orders / SetPaused(false))
-            //    is broadcast stamped on the frozen tick instead.
+            // 2. Host broadcasts TurnInputBroadcast (also driven per-tick inside OnSimulationTickCompleted)
             if (Transport.IsHost)
             {
                 int cur = DXGame.Current?.IAIterationInt ?? 0;
-                // Use the synchronized pause flag, not DXGame.Paused: the engine's save loader leaves
-                // DXGame.Paused set, which would stop the host from emitting heartbeat turns and
-                // deadlock the client's gate at the very first tick.
-                bool paused = LockstepClock.PausedBySession;
-                bool hasTurn = false;
-                lock (_hostTurnBuffer) hasTurn = _hostTurnBuffer.Count > 0;
-                bool shouldBroadcast = paused ? hasTurn : cur > _hostLastBroadcastSimTick;
-
-                if (shouldBroadcast)
-                {
-                    if (cur > _hostLastBroadcastSimTick) _hostLastBroadcastSimTick = cur;
-                    int targetTick = paused ? cur : cur + InputDelayTicks;
-
-                    List<NetCommand> turnCmds = null;
-                    lock (_hostTurnBuffer)
-                    {
-                        if (_hostTurnBuffer.Count > 0)
-                        {
-                            turnCmds = new List<NetCommand>(_hostTurnBuffer);
-                            _hostTurnBuffer.Clear();
-                        }
-                    }
-
-                    if (turnCmds != null)
-                    {
-                        foreach (var c in turnCmds) c.TargetSimTick = targetTick;
-                        lock (_pendingTurnCommands)
-                        {
-                            if (!_pendingTurnCommands.TryGetValue(targetTick, out var slot))
-                                _pendingTurnCommands[targetTick] = slot = new List<NetCommand>();
-                            slot.AddRange(turnCmds);
-                        }
-                    }
-
-                    _networkGate.MarkReady(targetTick);
-
-                    Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.TurnInputBroadcast, w =>
-                    {
-                        w.Write(targetTick);
-                        w.Write((ushort)(turnCmds?.Count ?? 0));
-                        if (turnCmds != null)
-                            foreach (var c in turnCmds) c.WriteTo(w);
-                    });
-                }
+                EmitHostTurns(cur);
             }
             else
             {
@@ -781,72 +729,172 @@ namespace TABCoopMod.Sync
                 });
             }
 
-            // 4. Verify StateHash: 1-time initial baseline on session entry, then amortized 1/60th of
-            //    entities per SimTick (zero 60-tick spike, zero work while paused).
-            int curTick = DXGame.Current?.IAIterationInt ?? 0;
-            if (curTick > 0)
+            // 4. Initial StateHash baseline on session entry (per-tick epoch steps are driven
+            //    sequentially by OnSimulationTickCompleted so multi-tick catchup never skips a tick).
+            int entryTick = DXGame.Current?.IAIterationInt ?? 0;
+            if (entryTick > 0 && _lastCheckedSimTick < 0)
+                RunEpochHashAndChecksum(entryTick);
+        }
+
+        /// <summary>
+        /// Polls transport and flushes pending Client commands right before UpdateGameLogic chooses
+        /// how many ticks to advance this frame, reducing Client->Host->Client input roundtrip lag.
+        /// </summary>
+        public static void PumpNetworkBeforeLogic()
+        {
+            if (!IsSessionActive || !IsInSyncedLevel || Transport == null) return;
+            if (!Transport.IsHost)
+                FlushOutgoingClientCommands();
+            Transport.PollEvents();
+        }
+
+        /// <summary>
+        /// Called synchronously after each single simulation tick finishes during UpdateGameLogic.
+        /// Keeps incremental epoch hashing and Host TurnInputBroadcast lockstep-aligned even when
+        /// a slow render frame runs 2..8 ticks to maintain 30Hz game speed.
+        /// </summary>
+        public static void OnSimulationTickCompleted(int completedTick)
+        {
+            if (!IsSessionActive || !IsInSyncedLevel || Transport == null) return;
+
+            if (Transport.IsHost)
+                EmitHostTurns(completedTick);
+
+            if (completedTick > 0)
+                RunEpochHashAndChecksum(completedTick);
+        }
+
+        private static void FlushOutgoingClientCommands()
+        {
+            List<NetCommand> toSend = null;
+            lock (_localOutgoingQueue)
             {
-                bool hasDigest = false;
-                StateHasher.LevelStateSnapshotDigest digest = default;
-                List<StateHasher.EntityPosSample> dynamicPositions = null;
-
-                if (_lastCheckedSimTick < 0)
+                if (_localOutgoingQueue.Count > 0)
                 {
-                    dynamicPositions = new List<StateHasher.EntityPosSample>(2048);
-                    digest = StateHasher.ComputeDigest(dynamicPositions);
-                    _epochHasher.Reset();
-                    hasDigest = true;
+                    toSend = new List<NetCommand>(_localOutgoingQueue);
+                    _localOutgoingQueue.Clear();
                 }
-                else if (_epochHasher.Step(curTick, out digest, out dynamicPositions))
+            }
+
+            if (toSend != null)
+            {
+                Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.ClientInputReport, w =>
                 {
-                    hasDigest = true;
-                }
+                    w.Write((ushort)toSend.Count);
+                    foreach (var c in toSend) c.WriteTo(w);
+                });
+            }
+        }
 
-                if (hasDigest)
+        private static void EmitHostTurns(int cur)
+        {
+            if (!Transport.IsHost) return;
+
+            // Use the synchronized pause flag, not DXGame.Paused: the engine's save loader leaves
+            // DXGame.Paused set, which would stop the host from emitting heartbeat turns and
+            // deadlock the client's gate at the very first tick.
+            bool paused = LockstepClock.PausedBySession;
+            bool hasTurn = false;
+            lock (_hostTurnBuffer) hasTurn = _hostTurnBuffer.Count > 0;
+            bool shouldBroadcast = paused ? hasTurn : cur > _hostLastBroadcastSimTick;
+            if (!shouldBroadcast) return;
+
+            if (cur > _hostLastBroadcastSimTick) _hostLastBroadcastSimTick = cur;
+            int targetTick = paused ? cur : cur + InputDelayTicks;
+
+            List<NetCommand> turnCmds = null;
+            lock (_hostTurnBuffer)
+            {
+                if (_hostTurnBuffer.Count > 0)
                 {
-                    _lastCheckedSimTick = digest.SimTick;
-
-                    // Prune stale digests (keep ~20s of history) so dictionaries cannot grow unbounded.
-                    if (Transport.IsHost)
-                    {
-                        if (_hostTickDigests.Count > 0)
-                        {
-                            var stale = new List<int>();
-                            foreach (var k in _hostTickDigests.Keys)
-                                if (k < curTick - 600) stale.Add(k);
-                            foreach (var k in stale) _hostTickDigests.Remove(k);
-                        }
-                        if (_clientTickDigests.Count > 0)
-                        {
-                            var stale = new List<int>();
-                            foreach (var k in _clientTickDigests.Keys)
-                                if (k < curTick - 600) stale.Add(k);
-                            foreach (var k in stale) _clientTickDigests.Remove(k);
-                        }
-                    }
-
-                    CacheTickPositions(digest.SimTick, dynamicPositions);
-
-                    string digestSummary =
-                        $"Pos={digest.PosChecksum:X16} Coarse={digest.CoarsePosChecksum:X16} Life={digest.LifeChecksum:X16} " +
-                        $"Aggro={digest.ZombieAggroChecksum:X16}({digest.AggroZombieCount}) Proj={digest.ProjectileChecksum:X16} " +
-                        $"Prod={digest.ProductionChecksum:X16} Resv={digest.ReservationChecksum:X16} " +
-                        $"(entities={digest.EntityCount} proj={digest.ProjectileCount} queued={digest.QueuedOrderCount} " +
-                        $"res={digest.Gold}/{digest.Wood}/{digest.Stone}/{digest.Iron}/{digest.Oil} time={digest.GameTimeMs})";
-
-                    if (Transport.IsHost)
-                    {
-                        _hostTickDigests[digest.SimTick] = new TickDigestRecord { Digest = digest, Summary = digestSummary };
-                        VerifyTickChecksum(digest.SimTick);
-                    }
-                    else
-                    {
-                        Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.StateChecksumReport, w =>
-                        {
-                            WriteDigestReport(w, in digest, digestSummary);
-                        });
-                    }
+                    turnCmds = new List<NetCommand>(_hostTurnBuffer);
+                    _hostTurnBuffer.Clear();
                 }
+            }
+
+            if (turnCmds != null)
+            {
+                foreach (var c in turnCmds) c.TargetSimTick = targetTick;
+                lock (_pendingTurnCommands)
+                {
+                    if (!_pendingTurnCommands.TryGetValue(targetTick, out var slot))
+                        _pendingTurnCommands[targetTick] = slot = new List<NetCommand>();
+                    slot.AddRange(turnCmds);
+                }
+            }
+
+            _networkGate.MarkReady(targetTick);
+
+            Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.TurnInputBroadcast, w =>
+            {
+                w.Write(targetTick);
+                w.Write((ushort)(turnCmds?.Count ?? 0));
+                if (turnCmds != null)
+                    foreach (var c in turnCmds) c.WriteTo(w);
+            });
+        }
+
+        private static void RunEpochHashAndChecksum(int curTick)
+        {
+            bool hasDigest = false;
+            StateHasher.LevelStateSnapshotDigest digest = default;
+            List<StateHasher.EntityPosSample> dynamicPositions = null;
+
+            if (_lastCheckedSimTick < 0)
+            {
+                dynamicPositions = new List<StateHasher.EntityPosSample>(2048);
+                digest = StateHasher.ComputeDigest(dynamicPositions);
+                _epochHasher.Reset();
+                hasDigest = true;
+            }
+            else if (_epochHasher.Step(curTick, out digest, out dynamicPositions))
+            {
+                hasDigest = true;
+            }
+
+            if (!hasDigest) return;
+
+            _lastCheckedSimTick = digest.SimTick;
+
+            // Prune stale digests (keep ~20s of history) so dictionaries cannot grow unbounded.
+            if (Transport.IsHost)
+            {
+                if (_hostTickDigests.Count > 0)
+                {
+                    var stale = new List<int>();
+                    foreach (var k in _hostTickDigests.Keys)
+                        if (k < curTick - 600) stale.Add(k);
+                    foreach (var k in stale) _hostTickDigests.Remove(k);
+                }
+                if (_clientTickDigests.Count > 0)
+                {
+                    var stale = new List<int>();
+                    foreach (var k in _clientTickDigests.Keys)
+                        if (k < curTick - 600) stale.Add(k);
+                    foreach (var k in stale) _clientTickDigests.Remove(k);
+                }
+            }
+
+            CacheTickPositions(digest.SimTick, dynamicPositions);
+
+            string digestSummary =
+                $"Pos={digest.PosChecksum:X16} Coarse={digest.CoarsePosChecksum:X16} Life={digest.LifeChecksum:X16} " +
+                $"Aggro={digest.ZombieAggroChecksum:X16}({digest.AggroZombieCount}) Proj={digest.ProjectileChecksum:X16} " +
+                $"Prod={digest.ProductionChecksum:X16} Resv={digest.ReservationChecksum:X16} " +
+                $"(entities={digest.EntityCount} proj={digest.ProjectileCount} queued={digest.QueuedOrderCount} " +
+                $"res={digest.Gold}/{digest.Wood}/{digest.Stone}/{digest.Iron}/{digest.Oil} time={digest.GameTimeMs})";
+
+            if (Transport.IsHost)
+            {
+                _hostTickDigests[digest.SimTick] = new TickDigestRecord { Digest = digest, Summary = digestSummary };
+                VerifyTickChecksum(digest.SimTick);
+            }
+            else
+            {
+                Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.StateChecksumReport, w =>
+                {
+                    WriteDigestReport(w, in digest, digestSummary);
+                });
             }
         }
 

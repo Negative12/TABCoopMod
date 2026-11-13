@@ -422,6 +422,65 @@ namespace TABCoopMod.Core
             }
         }
 
+        /// <summary>
+        /// Ensures ZXGame's fullscreen loading-fade object (#=zbvwh$ickzalV, MouseClickInteractionEnabled=true,
+        /// Z=2147483642) is removed from the active scene once loading completes so it cannot swallow mouse
+        /// clicks or leave a translucent overlay over the level.
+        /// </summary>
+        public static void ClearLoadingFadeOverlay()
+        {
+            try
+            {
+                if (IsGameLoading()) return;
+                var game = _mZXGameCurrent?.Invoke(null, null);
+                if (game == null) return;
+                var field = AccessTools.Field(TypeZXGame, ObfuscatedSymbols.Field_ZXGame_LoadingFadeObj);
+                if (field?.GetValue(game) is DXObject fade && fade.Scene != null)
+                {
+                    fade.Animation = null;
+                    fade.Opacity = 0f;
+                    fade.Visible = false;
+                    fade.RemoveFromScene();
+                    ModLogger.Info("[GameBridge] Cleared lingering loading-fade overlay after level load.");
+                }
+                // Removing the fade object aborts its fade-out animation callback that would otherwise clear
+                // StartupFadeActive (#=zTkvm$fc5hNvM); reset it explicitly so future resync loads are not gated.
+                var startupFadeField = AccessTools.Field(TypeZXGame, ObfuscatedSymbols.Field_ZXGame_StartupFadeActive);
+                if (startupFadeField?.GetValue(game) is bool sfa && sfa)
+                    startupFadeField.SetValue(game, false);
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] ClearLoadingFadeOverlay failed: {ex.Message}");
+            }
+        }
+
+        public static bool IsLoadingFadeInScene()
+        {
+            try
+            {
+                var game = _mZXGameCurrent?.Invoke(null, null);
+                if (game == null) return false;
+                var field = AccessTools.Field(TypeZXGame, ObfuscatedSymbols.Field_ZXGame_LoadingFadeObj);
+                return field?.GetValue(game) is DXObject fade && fade.Scene != null;
+            }
+            catch { return false; }
+        }
+
+        public static DXSystem CurrentGameSystem
+        {
+            get
+            {
+                try
+                {
+                    var game = _mZXGameCurrent?.Invoke(null, null);
+                    if (game == null || TypeZXGame == null) return null;
+                    return AccessTools.Property(TypeZXGame, "CurrentGameSystem")?.GetValue(game) as DXSystem;
+                }
+                catch { return null; }
+            }
+        }
+
         public static bool IsMainMenuReadyForInput()
         {
             try
