@@ -3,8 +3,8 @@
 # auto-loads a save on the host (which streams the .zxsav snapshot to the client), then reports the
 # key milestone markers from each process log. Each process gets its own log file.
 #
-# NOTE: True lockstep tick-gating is deferred (see docs/07). This script validates the transport
-# plumbing + snapshot transfer + chaos statistics, not frame-perfect determinism under latency.
+# NOTE: TurnInputTickGate lockstep gating is wired in CoopSessionManager (see docs/02_ARCHITECTURE_DESIGN.md
+# and docs/07_TESTING_AND_MCP.md). This script validates transport, snapshot transfer, lockstep sync, and chaos statistics.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts/run_chaos_two_instance.ps1 `

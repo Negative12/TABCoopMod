@@ -61,6 +61,8 @@ namespace TABCoopMod.Core
         public const string Method_ZXGame_IsMultiplayer        = "#=zB3Vhdin5PerfrubjO4AblAA=";
         /// <summary>Sets ZXPlayerModeType (Singleplayer=0, Multiplayer=1).</summary>
         public const string Method_ZXGame_SetPlayerMode        = "#=znDPORUoLfC4p";
+        /// <summary>Public bool true while ZXGame's black loading/transition fade is active.</summary>
+        public const string Field_ZXGame_StartupFadeActive     = "#=zTkvm$fc5hNvM";
 
         // ====================================================================
         // 4. ZXSystemMainMenu (#=zLs$VX1eoAapVflmW_w==) Members
@@ -69,6 +71,8 @@ namespace TABCoopMod.Core
         public const string Field_MainMenu_CategoryButtonsDict = "#=zyDj$brKr7icb";
         public const string Field_MainMenu_ReadyForInput       = "#=zBObIu5ds9WvT";
         public const string Method_MainMenu_SwitchCategory     = "#=zp8c19tQ=";
+        /// <summary>Main-thread completion callback of ZXSystemMainMenu (calls Scene.Clear/Scene.Init and sets ReadyForInput).</summary>
+        public const string Method_MainMenu_OnLoadComplete     = "#=zwK_pUIeRBpbp";
         public const string NestedEnum_MainMenu_TMenuCategory  = "TMenuCategory";
 
         // ====================================================================
@@ -136,6 +140,8 @@ namespace TABCoopMod.Core
         public const string Method_CSelectable_GetPrimary      = "#=zM3nhRXPdWdhx";
         public const string Method_CSelectable_UnselectAll     = "#=zClknEUY73pQc";
 
+        public const string Field_CMovable_PendingPathRequest  = "#=ziMavkfK9ZJji";
+
         // ====================================================================
         // 8. ZX.ZXLevelState Members
         // ====================================================================
@@ -161,5 +167,39 @@ namespace TABCoopMod.Core
         public const string Method_ZXWindow_CloseWindow        = "#=zePbLN$s=";
         public const string Method_OMiniMap_PingCell           = "#=zvr$ku1Q=";
         public const string Method_SteamMgr_RunCallbacks       = "#=zVnIv8xS3EOZr";
+
+        // ====================================================================
+        // 10. ZXSystemAudio (#=zJYbPa4gP2VI16zEh5y2Zxew=) Synchronous Sound Playback
+        // ====================================================================
+        public const string Method_Audio_PickFromList        = "#=zas_QVHmVp4jw4ljVfQ==";
+        public const string Method_Audio_PickWeightedVoice   = "#=zGKbBBAxDUE94EUjCrw==";
+        public const string Method_Audio_StartAmbient        = "#=zbJZeOtklBmAP9GRRRA==";
+        public const string Method_Audio_PlayUnique          = "#=zEdvWTpVsmit5o27Ihg==";
+        public const string Method_Audio_PlayEntitySound     = "#=zSH8FzcZvhKUrpnRPVw==";
+        public const string Method_Audio_PlayPosSound        = "#=zOgrlHVlq5fSBuzdvAQ==";
+        public const string Method_Audio_PlayPosSound3D      = "#=zax3sPZAXipzMtWW$kMS6B58=";
+        public const string Method_Audio_Play2DSound         = "#=zoEMwpnZ2M_6d";
+        public const string Method_Audio_PlayNamed2DSound    = "#=z_mJawUihZGwsBo$jFQ==";
+        public const string Method_Audio_PlayNotification    = "#=z1J0LzK2PeziK";
+
+        // ====================================================================
+        // 11. ZX.Systems.SysColonists Deterministic Reset
+        // ====================================================================
+        public const string Type_SysColonists                = "ZX.Systems.SysColonists";
+        public const string Field_SysColonists_Cursor        = "#=zUJ8sfNZq6x5U";
+        public const string Field_SysColonists_List          = "#=zTsexjauQRm5IZtGeraXJooM=";
+        public const string Method_SysColonists_GetCurrent   = "#=zuartwoo=";
+        public const string Method_SysColonists_RebuildList  = "#=zt0FcM$Mg6$EPDdIcLavKxd4=";
+
+        // ====================================================================
+        // 12. BHFarmer Deterministic Wheat Cell Selection
+        // ====================================================================
+        public const string Type_TerrainSystem               = "#=zDB$fZzE4fVJzNeDCt$4XVmDIV3Ul";
+        public const string Method_TerrainSystem_GetCurrent  = "#=zuartwoo=";
+        public const string Prop_TerrainSystem_Cells         = "TerrainResourceCells";
+        public const string Type_ZXBehaviour                 = "ZX.Behaviours.ZXBehaviour";
+        public const string Field_ZXBehaviour_PickFarmCell   = "#=zK2CGzIZdW6uI$Q9jPNxMDPs=";
+        public const string Method_BData_GetOwner            = "#=zHKPHAW92Cyls";
+        public const string Method_ZXEntity_GetParams        = "#=zcODCID3ur9P9";
     }
 }

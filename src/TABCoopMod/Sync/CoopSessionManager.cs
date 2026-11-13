@@ -25,13 +25,15 @@ namespace TABCoopMod.Sync
     public static class CoopSessionManager
     {
         public const int ChunkSizeBytes = 32768; // 32 KB per reliable packet
+        public const int SyncSeed = 20261109;
 
         public static INetworkTransport Transport { get; private set; }
         public static bool IsSessionActive => Transport != null && Transport.IsActive;
         public static bool IsInSyncedLevel { get; private set; }
 
-        /// <summary>Auto-resync is opt-in until in-level reloads stop crashing the engine scene update.</summary>
-        public static bool EnableAutoResync = false;
+        public static bool EnableAutoResync = true;
+        private static double _lastAutoResyncTicks = -100000.0;
+        private static bool _desyncDumped;
 
         private static readonly List<NetCommand> _localOutgoingQueue = new List<NetCommand>();
         private static readonly List<NetCommand> _hostTurnBuffer = new List<NetCommand>();
@@ -49,6 +51,12 @@ namespace TABCoopMod.Sync
         private const double GateTimeoutMs = 3000.0;
 
         private static bool _awaitingSnapshotLoad;
+        private static bool _awaitingClientSnapshotAck;
+        private static double _awaitingClientAckStartTicks = -1.0;
+        private static bool _hostSnapshotReloadPending;
+        private static bool _hostWaitingOwnReload;
+        private static bool _clientSnapshotAckReceived;
+        public static bool IsHostSnapshotReloadPending => _hostSnapshotReloadPending;
 
         // Deferred work: never export/load from inside a deep engine callback (LevelLoadComplete
         // postfix / network PollEvents). Doing the ZIP save from that stack exhausted the 1 MB main
@@ -81,11 +89,21 @@ namespace TABCoopMod.Sync
         public static readonly Dictionary<byte, AllyVisualState> AllyStates = new Dictionary<byte, AllyVisualState>();
         private static double _lastCursorBroadcastTicks;
         private static int _lastCheckedSimTick = -1;
+        private static bool _firstChecksumPosDumped;
         private static readonly Dictionary<int, ulong> _hostTickHashes = new Dictionary<int, ulong>();
+        private static readonly Dictionary<int, Dictionary<byte, ulong>> _clientTickHashes =
+            new Dictionary<int, Dictionary<byte, ulong>>();
+        private static readonly Dictionary<int, string> _hostTickDigestStrings = new Dictionary<int, string>();
+        private static readonly Dictionary<int, Dictionary<byte, string>> _clientTickDigestStrings =
+            new Dictionary<int, Dictionary<byte, string>>();
 
         public static void StartHostSession(bool useLoopback)
         {
             StopSession();
+            LockstepClock.EnableDeterministicSandbox(SyncSeed);
+            LockstepClock.RequestPostLoadCalibration(SyncSeed);
+            LockstepClock.ResetBehaviourRandom(SyncSeed);
+
             Transport = CreateTransport(useLoopback);
             BindTransportEvents();
             Transport.StartHost(3);
@@ -98,6 +116,10 @@ namespace TABCoopMod.Sync
         public static void JoinSession(bool useLoopback, string targetAddressOrSteamId)
         {
             StopSession();
+            LockstepClock.EnableDeterministicSandbox(SyncSeed);
+            LockstepClock.RequestPostLoadCalibration(SyncSeed);
+            LockstepClock.ResetBehaviourRandom(SyncSeed);
+
             Transport = CreateTransport(useLoopback);
             BindTransportEvents();
             Transport.ConnectToHost(targetAddressOrSteamId);
@@ -116,6 +138,9 @@ namespace TABCoopMod.Sync
             IsInSyncedLevel = false;
             _lastCheckedSimTick = -1;
             _hostTickHashes.Clear();
+            _clientTickHashes.Clear();
+            _hostTickDigestStrings.Clear();
+            _clientTickDigestStrings.Clear();
             LockstepClock.DisableDeterministicSandbox();
             AllyStates.Clear();
             _localOutgoingQueue.Clear();
@@ -124,6 +149,12 @@ namespace TABCoopMod.Sync
             _hostLastBroadcastSimTick = -1;
             _gateWaitStartTicks = -1.0;
             _awaitingSnapshotLoad = false;
+            _awaitingClientSnapshotAck = false;
+            _awaitingClientAckStartTicks = -1.0;
+            _hostSnapshotReloadPending = false;
+            _hostWaitingOwnReload = false;
+            _clientSnapshotAckReceived = false;
+            _lastAutoResyncTicks = -100000.0;
             _pendingHostSnapshotExport = false;
             _pendingClientSnapshotLoadPath = null;
             _kickingLoadFade = false;
@@ -162,7 +193,7 @@ namespace TABCoopMod.Sync
                 GameBridge.ShowTopBanner($"Co-op Peer Connected: {peer?.PlayerName}", Color.SpringGreen, 3000);
 
                 // If Host is already inside a level when a peer connects, push snapshot immediately!
-                if (Transport.IsHost && GameBridge.CurrentLevelState != null)
+                if (Transport.IsHost && GameBridge.CurrentLevelState != null && !_hostSnapshotReloadPending)
                 {
                     RequestSnapshotBroadcast();
                 }
@@ -219,13 +250,44 @@ namespace TABCoopMod.Sync
 
                 byte[] savBytes = File.ReadAllBytes(savPath);
                 string chkText = File.Exists(chkPath) ? File.ReadAllText(chkPath) : string.Empty;
-                int syncSeed = 20261109;
+                int syncSeed = SyncSeed;
+                long idCounter = LockstepClock.CurrentSyncedEntityIdCounter;
 
-                LockstepClock.CalibrateEntityIdCounterFromLoadedLevel(syncSeed);
-                EnterSyncedLevel();
+                _hostTickHashes.Clear();
+                _clientTickHashes.Clear();
+                _hostTickDigestStrings.Clear();
+                _clientTickDigestStrings.Clear();
+                _lastCheckedSimTick = -1;
+                _pendingTurnCommands.Clear();
+                _hostTurnBuffer.Clear();
+                _localOutgoingQueue.Clear();
+
+                bool hasRemotePeers = Transport.ConnectedPeers != null && Transport.ConnectedPeers.Count > 1;
+                if (!hasRemotePeers)
+                {
+                    LockstepClock.ApplyDeterministicLevelBaseline(syncSeed, idCounter);
+                    EnterSyncedLevel();
+                    _awaitingClientSnapshotAck = false;
+                    _awaitingClientAckStartTicks = -1.0;
+                    _hostSnapshotReloadPending = false;
+                    _hostWaitingOwnReload = false;
+                    _clientSnapshotAckReceived = false;
+                    return;
+                }
+
+                // Exit synced-level state during symmetric reload so neither peer runs ticks/inputs early.
+                IsInSyncedLevel = false;
+                CommandInterceptor.IsInterceptionEnabled = false;
+                LockstepClock.SetSessionPause(true);
+
+                _hostSnapshotReloadPending = true;
+                _hostWaitingOwnReload = true;
+                _clientSnapshotAckReceived = false;
+                _awaitingClientSnapshotAck = true;
+                _awaitingClientAckStartTicks = DXHelper_Environment.Ticks;
 
                 int totalChunks = (savBytes.Length + ChunkSizeBytes - 1) / ChunkSizeBytes;
-                ModLogger.Info($"[CoopSessionManager] Broadcasting Snapshot ({savBytes.Length:N0} bytes in {totalChunks} chunks)...");
+                ModLogger.Info($"[CoopSessionManager] Broadcasting Snapshot ({savBytes.Length:N0} bytes in {totalChunks} chunks, seed={syncSeed}, idCounter={idCounter})...");
 
                 Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.SnapshotBegin, w =>
                 {
@@ -233,7 +295,7 @@ namespace TABCoopMod.Sync
                     w.Write(totalChunks);
                     w.Write(chkText);
                     w.Write(syncSeed);
-                    w.Write(LockstepClock.CurrentSyncedEntityIdCounter);
+                    w.Write(idCounter);
                 });
 
                 for (int i = 0; i < totalChunks; i++)
@@ -249,6 +311,18 @@ namespace TABCoopMod.Sync
                     });
                 }
 
+                // Reload the exact exported snapshot on Host too so MapDrawer, Colonist.OnSceneAdded,
+                // and Zombie.UseFastSerializing run the identical load pipeline on both peers.
+                ModLogger.Info($"[CoopSessionManager] Host starting symmetric reload of {savPath}...");
+                LockstepClock.EnableDeterministicSandbox(syncSeed);
+                LockstepClock.RequestPostLoadCalibration(syncSeed, idCounter);
+                if (DXGame.Current != null && DXGame.Current.Paused) DXGame.Current.Paused = false;
+                GameBridge.PrepareForProgrammaticLoad();
+                GameBridge.LoadSaveFileAndEnter(savPath);
+                _kickingLoadFade = true;
+                _loadFadeKickFrames = 0;
+                _loadFadeKickStartTicks = -1.0;
+
                 GameBridge.ShowTopBanner($"Synced Map Snapshot to Peers ({savBytes.Length / 1024} KB)", Color.Cyan, 2500);
             }
             catch (Exception ex)
@@ -258,9 +332,43 @@ namespace TABCoopMod.Sync
             finally
             {
                 // Never restore a zero speed: that would look like an engine pause and stall the
-                // host heartbeat. Session pauses are restarted explicitly via SetPaused commands.
+                // host heartbeat. Session pauses are handled separately via LockstepClock.PausedBySession.
                 try { DXGame.Current.GameSpeed = wasGameSpeed > 0.0 ? wasGameSpeed : 1.0; } catch { }
+                try { if (DXGame.Current != null && DXGame.Current.Paused) DXGame.Current.Paused = false; } catch { }
+                if (_awaitingClientSnapshotAck)
+                {
+                    LockstepClock.SetSessionPause(true);
+                }
             }
+        }
+
+        private static void TryCompleteHostSyncBarrier()
+        {
+            if (Transport == null || !Transport.IsHost) return;
+            if (_hostWaitingOwnReload || !_clientSnapshotAckReceived) return;
+
+            _hostSnapshotReloadPending = false;
+            _awaitingClientSnapshotAck = false;
+            _awaitingClientAckStartTicks = -1.0;
+            _clientSnapshotAckReceived = false;
+
+            _hostTickHashes.Clear();
+            _clientTickHashes.Clear();
+            _hostTickDigestStrings.Clear();
+            _clientTickDigestStrings.Clear();
+            _lastCheckedSimTick = -1;
+
+            EnterSyncedLevel();
+
+            int startTick = DXGame.Current?.IAIterationInt ?? 0;
+            long idCounter = LockstepClock.CurrentSyncedEntityIdCounter;
+            Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.SessionStart, w =>
+            {
+                w.Write(startTick);
+                w.Write(SyncSeed);
+                w.Write(idCounter);
+            });
+            ModLogger.Info($"[CoopSessionManager] Host+Client barrier satisfied; entered synced level and sent SessionStart at tick={startTick}!");
         }
 
         private static void OnLocalCommandCaptured(NetCommand cmd)
@@ -299,6 +407,8 @@ namespace TABCoopMod.Sync
             _pendingTurnCommands.Clear();
             _hostLastBroadcastSimTick = -1;
             _gateWaitStartTicks = -1.0;
+            _desyncDumped = false;
+            _firstChecksumPosDumped = false;
             _networkGate = new TurnInputTickGate();
             LockstepClock.TickGate = _networkGate;
 
@@ -373,11 +483,17 @@ namespace TABCoopMod.Sync
 
             if (Transport.IsHost)
             {
-                // Only now is the level fully restored: exporting earlier (from InitLevel) captured a
-                // half-deserialized save and entered the synced level before the host was ready.
-                if (!IsInSyncedLevel)
+                // Freeze immediately at 0 elapsed ticks until snapshot export and client handshake complete.
+                LockstepClock.SetSessionPause(true);
+                if (_hostSnapshotReloadPending && _hostWaitingOwnReload)
                 {
-                    EnterSyncedLevel();
+                    _hostWaitingOwnReload = false;
+                    ModLogger.Info($"[CoopSessionManager] Host symmetric snapshot reload finished at tick={DXGame.Current?.IAIterationInt ?? 0} (clientAck={_clientSnapshotAckReceived}).");
+                    TryCompleteHostSyncBarrier();
+                    return;
+                }
+                if (!IsInSyncedLevel && !_hostSnapshotReloadPending)
+                {
                     RequestSnapshotBroadcast();
                 }
                 return;
@@ -386,7 +502,14 @@ namespace TABCoopMod.Sync
             if (!_awaitingSnapshotLoad) return;
 
             _awaitingSnapshotLoad = false;
-            EnterSyncedLevel();
+            IsInSyncedLevel = false;
+            LockstepClock.SetSessionPause(true);
+            int clientTick = DXGame.Current?.IAIterationInt ?? 0;
+            Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.SnapshotLoadedAck, w =>
+            {
+                w.Write(clientTick);
+            });
+            ModLogger.Info($"[CoopSessionManager] Client finished loading snapshot at tick={clientTick}; sent SnapshotLoadedAck and waiting for SessionStart.");
         }
 
         /// <summary>Records the snapshot seed so the post-load calibration uses the Host's seed.</summary>
@@ -419,6 +542,25 @@ namespace TABCoopMod.Sync
 
             // Keep the engine's loader fades advancing while the Client waits to enter the level.
             TickLoadingFade();
+
+            // Keep Host paused and hold turn broadcasts while waiting for Host reload + Client ack.
+            if (Transport.IsHost && (_hostWaitingOwnReload || _awaitingClientSnapshotAck))
+            {
+                LockstepClock.SetSessionPause(true);
+                if (!_hostWaitingOwnReload && _awaitingClientAckStartTicks > 0.0 && DXHelper_Environment.Ticks - _awaitingClientAckStartTicks > 60000.0)
+                {
+                    ModLogger.Warn("[CoopSessionManager] Timed out (60s) waiting for Client SnapshotLoadedAck; resuming Host.");
+                    _hostSnapshotReloadPending = false;
+                    _awaitingClientSnapshotAck = false;
+                    _awaitingClientAckStartTicks = -1.0;
+                    _clientSnapshotAckReceived = false;
+                    EnterSyncedLevel();
+                }
+                else
+                {
+                    return;
+                }
+            }
 
             if (!IsInSyncedLevel || GameBridge.CurrentLevelState == null)
                 return;
@@ -504,6 +646,15 @@ namespace TABCoopMod.Sync
                 MonitorGateWait();
             }
 
+            // While paused by session, UpdateGameLogic may not fire every tick, so flush any
+            // authorized turn commands stamped for the frozen tick directly on the main thread.
+            if (LockstepClock.PausedBySession)
+            {
+                int pausedTick = DXGame.Current?.IAIterationInt ?? 0;
+                if (_networkGate == null || _networkGate.IsTickReady(pausedTick))
+                    LockstepClock.RunInDeterministicContext(() => FlushDueTurnCommands(pausedTick));
+            }
+
             // 3. Broadcast Ally Cursor & Camera Viewport at 20Hz (every 50ms)
             double nowTicks = DXHelper_Environment.Ticks;
             if (nowTicks - _lastCursorBroadcastTicks >= 50.0 && DXScene.Current != null)
@@ -524,26 +675,57 @@ namespace TABCoopMod.Sync
                 });
             }
 
-            // 4. Every 60 SimTicks (2 seconds), compute and verify deterministic StateHash
+            // 4. At initial SessionStart frame and every 60 SimTicks (2 seconds), compute and verify StateHash
             int curTick = DXGame.Current?.IAIterationInt ?? 0;
-            if (curTick > 0 && curTick % 60 == 0 && curTick != _lastCheckedSimTick)
+            if (curTick > 0 && (curTick % 60 == 0 || _lastCheckedSimTick < 0) && curTick != _lastCheckedSimTick)
             {
                 _lastCheckedSimTick = curTick;
 
-                // Prune stale host hashes (keep ~20s of history) so the dictionary cannot grow unbounded.
-                if (Transport.IsHost && _hostTickHashes.Count > 0)
+                // Prune stale hashes (keep ~20s of history) so dictionaries cannot grow unbounded.
+                if (Transport.IsHost)
                 {
-                    var stale = new List<int>();
-                    foreach (var k in _hostTickHashes.Keys)
-                        if (k < curTick - 600) stale.Add(k);
-                    foreach (var k in stale) _hostTickHashes.Remove(k);
+                    if (_hostTickHashes.Count > 0)
+                    {
+                        var stale = new List<int>();
+                        foreach (var k in _hostTickHashes.Keys)
+                            if (k < curTick - 600) stale.Add(k);
+                        foreach (var k in stale) _hostTickHashes.Remove(k);
+                    }
+                    if (_clientTickHashes.Count > 0)
+                    {
+                        var stale = new List<int>();
+                        foreach (var k in _clientTickHashes.Keys)
+                            if (k < curTick - 600) stale.Add(k);
+                        foreach (var k in stale) _clientTickHashes.Remove(k);
+                    }
+                    if (_hostTickDigestStrings.Count > 0)
+                    {
+                        var stale = new List<int>();
+                        foreach (var k in _hostTickDigestStrings.Keys)
+                            if (k < curTick - 600) stale.Add(k);
+                        foreach (var k in stale) _hostTickDigestStrings.Remove(k);
+                    }
+                    if (_clientTickDigestStrings.Count > 0)
+                    {
+                        var stale = new List<int>();
+                        foreach (var k in _clientTickDigestStrings.Keys)
+                            if (k < curTick - 600) stale.Add(k);
+                        foreach (var k in stale) _clientTickDigestStrings.Remove(k);
+                    }
                 }
 
                 var digest = StateHasher.ComputeDigest();
+                string digestSummary =
+                    $"Pos={digest.PosChecksum:X16} Life={digest.LifeChecksum:X16} Proj={digest.ProjectileChecksum:X16} " +
+                    $"Prod={digest.ProductionChecksum:X16} Resv={digest.ReservationChecksum:X16} " +
+                    $"(entities={digest.EntityCount} proj={digest.ProjectileCount} queued={digest.QueuedOrderCount} " +
+                    $"res={digest.Gold}/{digest.Wood}/{digest.Stone}/{digest.Iron}/{digest.Oil} time={digest.GameTimeMs})";
 
                 if (Transport.IsHost)
                 {
-                    _hostTickHashes[curTick] = digest.FullHash;
+                    _hostTickHashes[digest.SimTick] = digest.FullHash;
+                    _hostTickDigestStrings[digest.SimTick] = digestSummary;
+                    VerifyTickChecksum(digest.SimTick);
                 }
                 else
                 {
@@ -551,6 +733,7 @@ namespace TABCoopMod.Sync
                     {
                         w.Write(digest.SimTick);
                         w.Write(digest.FullHash);
+                        w.Write(digestSummary);
                     });
                 }
             }
@@ -591,6 +774,32 @@ namespace TABCoopMod.Sync
                     if (chunkIdx >= 0) _incomingChunks[chunkIdx] = data;
                     ModLogger.Info($"[CoopSessionManager] Snapshot chunk {chunkIdx} received ({len:N0} bytes, buffered={_incomingChunks.Count}/{_expectedChunks}).");
                     TryAssembleSnapshot();
+                    break;
+                }
+
+                case PacketType.SnapshotLoadedAck:
+                {
+                    if (!Transport.IsHost) break;
+                    int clientTick = r.ReadInt32();
+                    _clientSnapshotAckReceived = true;
+                    ModLogger.Info($"[CoopSessionManager] Received SnapshotLoadedAck from Client({senderId}) at tick={clientTick} (hostWaitingOwnReload={_hostWaitingOwnReload}).");
+                    TryCompleteHostSyncBarrier();
+                    break;
+                }
+
+                case PacketType.SessionStart:
+                {
+                    if (Transport.IsHost) break;
+                    int startTick = r.ReadInt32();
+                    int seed = r.ReadInt32();
+                    long idCounter = r.ReadInt64();
+                    _hostTickHashes.Clear();
+                    _clientTickHashes.Clear();
+                    _hostTickDigestStrings.Clear();
+                    _clientTickDigestStrings.Clear();
+                    _lastCheckedSimTick = -1;
+                    EnterSyncedLevel();
+                    ModLogger.Info($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}). Unpausing in lockstep!");
                     break;
                 }
 
@@ -643,15 +852,14 @@ namespace TABCoopMod.Sync
                     if (!Transport.IsHost) break;
                     int clientTick = r.ReadInt32();
                     ulong clientHash = r.ReadUInt64();
-                    if (_hostTickHashes.TryGetValue(clientTick, out ulong hostHash) && hostHash != clientHash)
-                    {
-                        ModLogger.Warn($"[CoopSessionManager] DESYNC DETECTED at Tick {clientTick}! Host=0x{hostHash:X16}, Client({senderId})=0x{clientHash:X16}.");
-                        GameBridge.ShowTopBanner("State Drift Detected (see log)", Color.Orange, 2500);
-                        // Auto-resync is disabled: re-loading a save while a level is already running
-                        // crashes the engine's scene update (CShadow NRE) and, with the known `pos`
-                        // residual, would loop forever. Re-enable once position determinism is fixed.
-                        if (EnableAutoResync) RequestSnapshotBroadcast();
-                    }
+                    string clientSummary = r.BaseStream.Position < r.BaseStream.Length ? r.ReadString() : string.Empty;
+                    if (!_clientTickHashes.TryGetValue(clientTick, out var byPeer))
+                        _clientTickHashes[clientTick] = byPeer = new Dictionary<byte, ulong>();
+                    byPeer[senderId] = clientHash;
+                    if (!_clientTickDigestStrings.TryGetValue(clientTick, out var summaryByPeer))
+                        _clientTickDigestStrings[clientTick] = summaryByPeer = new Dictionary<byte, string>();
+                    summaryByPeer[senderId] = clientSummary;
+                    VerifyTickChecksum(clientTick);
                     break;
                 }
 
@@ -695,6 +903,103 @@ namespace TABCoopMod.Sync
                     AllyOverlayRenderer.TriggerMinimapAndGroundPing(pid, new Point(cellX, cellY), label);
                     break;
                 }
+            }
+        }
+
+        private static void VerifyTickChecksum(int tick)
+        {
+            if (!_hostTickHashes.TryGetValue(tick, out ulong hostHash)) return;
+            if (!_clientTickHashes.TryGetValue(tick, out var byPeer) || byPeer.Count == 0) return;
+
+            var resolvedPeers = new List<byte>();
+            foreach (var kv in byPeer)
+            {
+                byte senderId = kv.Key;
+                ulong clientHash = kv.Value;
+                if (hostHash == clientHash)
+                {
+                    ModLogger.Info($"[StateChecksum] Tick {tick} MATCH (0x{hostHash:X16}) with Client({senderId}).");
+                    resolvedPeers.Add(senderId);
+                }
+                else
+                {
+                    _hostTickDigestStrings.TryGetValue(tick, out string hostSummary);
+                    string clientSummary = null;
+                    if (_clientTickDigestStrings.TryGetValue(tick, out var sByPeer))
+                        sByPeer.TryGetValue(senderId, out clientSummary);
+
+                    ModLogger.Error($"[StateChecksum] DESYNC DETECTED at Tick {tick}! Host=0x{hostHash:X16}, Client({senderId})=0x{clientHash:X16}");
+                    ModLogger.Error($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
+                    ModLogger.Error($"[StateChecksum]   Client : {clientSummary ?? "(none)"}");
+                    if (!_desyncDumped)
+                    {
+                        _desyncDumped = true;
+                        DumpHostEntitiesOnDesync(tick);
+                    }
+                    GameBridge.ShowTopBanner("State Drift Detected (see log)", Color.Orange, 2500);
+                    resolvedPeers.Add(senderId);
+                    double now = DXHelper_Environment.Ticks;
+                    if (EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport && (now - _lastAutoResyncTicks >= 15000.0))
+                    {
+                        _lastAutoResyncTicks = now;
+                        ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after DESYNC at Tick {tick}.");
+                        RequestSnapshotBroadcast();
+                    }
+                }
+            }
+            foreach (var pid in resolvedPeers)
+            {
+                byPeer.Remove(pid);
+                if (_clientTickDigestStrings.TryGetValue(tick, out var sByPeer)) sByPeer.Remove(pid);
+            }
+            if (byPeer.Count == 0)
+            {
+                _clientTickHashes.Remove(tick);
+                _clientTickDigestStrings.Remove(tick);
+            }
+        }
+
+        private static void DumpHostEntitiesOnDesync(int tick)
+        {
+            if (_firstChecksumPosDumped) return;
+            _firstChecksumPosDumped = true;
+            DumpPeerEntities(tick, "coop_desync_pos_host.txt");
+        }
+
+        private static void DumpPeerEntities(int tick, string fileName)
+        {
+            try
+            {
+                var game = DXGame.Current;
+                if (game?.Entities == null) return;
+                string savesDir = GameBridge.GetSavesDirectory();
+                if (string.IsNullOrEmpty(savesDir)) return;
+                string path = Path.Combine(savesDir, fileName);
+                var sb = new System.Text.StringBuilder(1 << 18);
+                sb.Append("# tick=").Append(tick).Append('\n');
+                int count = 0;
+                foreach (var e in game.Entities)
+                {
+                    if (e == null || e.Disposed) continue;
+                    if ((e.ID & 0x8000000000000000UL) != 0) continue;
+                    if (e.GetType() == typeof(DXEntity) || string.Equals(e.GetType().Name, "Raven", StringComparison.Ordinal)) continue;
+                    var b = e.Body;
+                    float bx = b != null ? b.PositionComputed.X : float.NaN;
+                    float by = b != null ? b.PositionComputed.Y : float.NaN;
+                    sb.Append(e.ID).Append('|')
+                      .Append(e.Position.X.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)).Append('|')
+                      .Append(e.Position.Y.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)).Append('|')
+                      .Append(bx.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)).Append('|')
+                      .Append(by.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)).Append('|')
+                      .Append(e.GetType().Name).Append('\n');
+                    count++;
+                }
+                File.WriteAllText(path, sb.ToString());
+                ModLogger.Info($"[StateChecksum] Dumped {count} entity positions (tick {tick}) -> {path}");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[StateChecksum] DumpPeerEntities failed: {ex.Message}");
             }
         }
 
@@ -757,6 +1062,9 @@ namespace TABCoopMod.Sync
         {
             try
             {
+                IsInSyncedLevel = false;
+                LockstepClock.SetSessionPause(true);
+
                 if (!GameBridge.IsSaveLoadable(savPath))
                 {
                     ModLogger.Error($"[CoopSessionManager] ZXGame rejected the received snapshot as unloadable: {savPath}");
@@ -792,7 +1100,7 @@ namespace TABCoopMod.Sync
         {
             if (!_kickingLoadFade) return;
 
-            if (!_awaitingSnapshotLoad && !LockstepClock.LoadingLevel)
+            if (!_awaitingSnapshotLoad && !_hostWaitingOwnReload && !LockstepClock.LoadingLevel)
             {
                 _kickingLoadFade = false;
                 return;
@@ -834,6 +1142,13 @@ namespace TABCoopMod.Sync
             public static System.Reflection.MethodBase TargetMethod()
             {
                 return AccessTools.Method(GameBridge.TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_InitLevel);
+            }
+
+            [HarmonyPrefix]
+            public static void Prefix()
+            {
+                if (Determinism.LockstepClock.IsDeterministicModeActive)
+                    Determinism.LockstepClock.ResetSyncedRandomStreamsForInitLevel();
             }
 
             [HarmonyPostfix]

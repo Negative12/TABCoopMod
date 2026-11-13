@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using DXVision;
 using TABCoopMod.Commands;
 using TABCoopMod.Core;
 using TABCoopMod.Determinism;
@@ -28,6 +29,7 @@ namespace TABCoopMod.Sync
 
         private static DateTime _resumeAtUtc;
         private static int _lastShown = -1;
+        private static DXTextObject _countdownBanner;
 
         private static bool InNetworkSession =>
             CoopSessionManager.IsSessionActive && CoopSessionManager.IsInSyncedLevel;
@@ -65,8 +67,9 @@ namespace TABCoopMod.Sync
             SecondsRemaining = Math.Max(1, CountdownSeconds);
             _resumeAtUtc = DateTime.UtcNow.AddSeconds(SecondsRemaining);
             _lastShown = -1;
+            if (!LockstepClock.PausedBySession)
+                Apply(true); // ensure game stays paused during the countdown
             Show(SecondsRemaining);
-            Apply(true); // keep paused during the countdown
         }
 
         /// <summary>Called every render frame.</summary>
@@ -79,6 +82,7 @@ namespace TABCoopMod.Sync
             {
                 CountdownActive = false;
                 SecondsRemaining = 0;
+                HideCountdownBanner();
                 Apply(false);
                 GameBridge.ShowTopBanner("Resumed", Color.Gold, 900);
                 return;
@@ -94,12 +98,66 @@ namespace TABCoopMod.Sync
             CountdownActive = false;
             SecondsRemaining = 0;
             _lastShown = -1;
+            HideCountdownBanner();
         }
 
         private static void Show(int n)
         {
             _lastShown = n;
-            GameBridge.ShowTopBanner($"Resume in {n}...", Color.Yellow, 1100);
+            try
+            {
+                var grid = DXIsometricGridObject.Current;
+                if (grid != null)
+                {
+                    if (_countdownBanner == null || !object.ReferenceEquals(_countdownBanner.Parent, grid))
+                    {
+                        HideCountdownBanner();
+                        _countdownBanner = new DXTextObject
+                        {
+                            Z = 2147483600
+                        };
+                        _countdownBanner.State.AreaStyle = DXObjectState.TAreaStyle.AreaInPixels;
+                        _countdownBanner.TextRenderer.TextAlign = ContentAlignment.MiddleCenter;
+                        _countdownBanner.TextRenderer.Font = new Font("Segoe UI", 20f, FontStyle.Bold);
+                        _countdownBanner.TextRenderer.ColorText = Color.Gold;
+                        _countdownBanner.TextRenderer.ColorBackground = Color.FromArgb(210, 14, 22, 16);
+                        _countdownBanner.TextRenderer.ColorAreaBorder = Color.Goldenrod;
+                        _countdownBanner.TextRenderer.AreaBorderWidth = 2f;
+                        _countdownBanner.TextRenderer.MakeTransparent = false;
+                        grid.AddObject(_countdownBanner);
+                    }
+
+                    float sw = DXScene.ScreenArea.Width > 0 ? DXScene.ScreenArea.Width : 1920f;
+                    _countdownBanner.State.Area = new RectangleF((sw - 340f) * 0.5f, 84f, 340f, 52f);
+                    _countdownBanner.Visible = true;
+                    _countdownBanner.Text = $"Resume in {n}...";
+                    _countdownBanner.Create();
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[PauseSync] Failed to render countdown overlay: {ex.Message}");
+            }
+
+            GameBridge.ShowTopBanner($"Resume in {n}...", Color.Yellow, 0);
+        }
+
+        private static void HideCountdownBanner()
+        {
+            try
+            {
+                if (_countdownBanner != null)
+                {
+                    _countdownBanner.Visible = false;
+                    _countdownBanner.RemoveFromParent();
+                    _countdownBanner = null;
+                }
+            }
+            catch
+            {
+                _countdownBanner = null;
+            }
         }
 
         private static void Apply(bool paused)

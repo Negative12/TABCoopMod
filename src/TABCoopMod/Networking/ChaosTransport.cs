@@ -88,6 +88,7 @@ namespace TABCoopMod.Networking
         private readonly double _startTicks;
         private readonly List<PendingPacket> _queue = new List<PendingPacket>();
         private uint _rngState;
+        private double _lastReliableDeliverAt;
 
         public long Delivered { get; private set; }
         public long Dropped { get; private set; }
@@ -137,26 +138,38 @@ namespace TABCoopMod.Networking
 
         private void OnInnerPacketReceived(byte senderId, PacketType type, BinaryReader reader)
         {
-            byte[] payload;
-            try
-            {
-                int remaining = (int)Math.Max(0, reader.BaseStream.Length - reader.BaseStream.Position);
-                payload = reader.ReadBytes(remaining);
-            }
-            catch { return; }
-
-            Schedule(false, true, 0, senderId, SendChannel.ReliableOrdered, type, payload);
+            // Outbound chaos (latency/jitter/retransmit/disconnect) is already applied by the
+            // sender's ChaosTransport, so forwarding directly avoids doubling delay and loss.
+            OnPacketReceived?.Invoke(senderId, type, reader);
         }
 
         private void Schedule(bool broadcast, bool incoming, byte target, byte sender, SendChannel channel, PacketType type, byte[] payload)
         {
-            if (IsDisconnectedNow()) { Dropped++; return; }
-            if (_cfg.LossRate > 0.0 && NextFloat() < _cfg.LossRate) { Dropped++; return; }
-
             double delay = _cfg.LatencyMs + (_cfg.JitterMs > 0 ? NextFloat() * _cfg.JitterMs : 0);
+
+            if (channel == SendChannel.UnreliableSequenced)
+            {
+                if (IsDisconnectedNow()) { Dropped++; return; }
+                if (_cfg.LossRate > 0.0 && NextFloat() < _cfg.LossRate) { Dropped++; return; }
+            }
+            else
+            {
+                // ReliableOrdered simulates retransmission delay rather than permanent packet loss.
+                if (_cfg.LossRate > 0.0 && NextFloat() < _cfg.LossRate)
+                    delay += Math.Max(50.0, _cfg.LatencyMs * 2.0);
+            }
+
+            double deliverAt = DXHelper_Environment.Ticks + delay;
+            if (channel == SendChannel.ReliableOrdered)
+            {
+                if (deliverAt < _lastReliableDeliverAt)
+                    deliverAt = _lastReliableDeliverAt;
+                _lastReliableDeliverAt = deliverAt;
+            }
+
             _queue.Add(new PendingPacket
             {
-                DeliverAt = DXHelper_Environment.Ticks + delay,
+                DeliverAt = deliverAt,
                 Broadcast = broadcast,
                 Incoming = incoming,
                 Target = target,
@@ -171,13 +184,31 @@ namespace TABCoopMod.Networking
         private void DeliverDue()
         {
             double now = DXHelper_Environment.Ticks;
-            for (int i = _queue.Count - 1; i >= 0; i--)
+            for (int i = 0; i < _queue.Count; )
             {
                 var p = _queue[i];
-                if (p.DeliverAt > now) continue;
-                _queue.RemoveAt(i);
+                if (p.DeliverAt > now)
+                {
+                    i++;
+                    continue;
+                }
 
-                if (IsDisconnectedNow()) { Dropped++; continue; }
+                if (IsDisconnectedNow())
+                {
+                    if (p.Channel == SendChannel.UnreliableSequenced)
+                    {
+                        _queue.RemoveAt(i);
+                        Dropped++;
+                    }
+                    else
+                    {
+                        // Hold ReliableOrdered packets until the disconnect window ends.
+                        i++;
+                    }
+                    continue;
+                }
+
+                _queue.RemoveAt(i);
 
                 if (p.Incoming)
                 {

@@ -200,9 +200,13 @@ namespace TABCoopMod.Commands
                             // engine's DXGame.Paused (which the save loader leaves set).
                             TABCoopMod.Determinism.LockstepClock.SetSessionPause(netCmd.TargetPausedState);
                             DXGame.Current.Paused = netCmd.TargetPausedState;
-                            GameBridge.ShowTopBanner(
-                                netCmd.TargetPausedState ? $"Player {netCmd.PlayerId} Paused Game" : $"Player {netCmd.PlayerId} Resumed Game",
-                                Color.Gold, 1500);
+                            if (!TABCoopMod.Sync.PauseSyncController.CountdownActive)
+                            {
+                                // durationMs=0 avoids stalled fade-in clips while Paused is true.
+                                GameBridge.ShowTopBanner(
+                                    netCmd.TargetPausedState ? $"Player {netCmd.PlayerId} Paused Game" : $"Player {netCmd.PlayerId} Resumed Game",
+                                    Color.Gold, netCmd.TargetPausedState ? 0 : 1500);
+                            }
                         }
                         break;
 

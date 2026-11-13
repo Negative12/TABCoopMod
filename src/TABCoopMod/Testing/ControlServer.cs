@@ -13,6 +13,7 @@ using System.Web.Script.Serialization;
 using DXVision;
 using TABCoopMod.Commands;
 using TABCoopMod.Core;
+using TABCoopMod.Patches;
 using TABCoopMod.Sync;
 
 namespace TABCoopMod.Testing
@@ -327,13 +328,13 @@ namespace TABCoopMod.Testing
             var cmd = new NetCommand
             {
                 Type = NetCommandType.GroupMoveOrPatrol,
-                PlayerId = 1,
+                PlayerId = CommandInterceptor.LocalPlayerId,
                 CommandId = GameBridge.GetCommandId(travel),
                 ExecutorEntityIds = ids,
                 TargetPosition = new PointF(x, y),
                 IsShiftQueued = GetBool(args, "shift", false)
             };
-            CommandExecutor.Execute(cmd);
+            CommandInterceptor.Dispatch(cmd);
             return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
         }
 
@@ -351,7 +352,7 @@ namespace TABCoopMod.Testing
             var cmd = new NetCommand
             {
                 Type = NetCommandType.PlaceBuilding,
-                PlayerId = 1,
+                PlayerId = CommandInterceptor.LocalPlayerId,
                 BuildingTypeName = typeName,
                 ExecutorEntityIds = ids,
                 TargetPosition = new PointF(x, y),
@@ -361,7 +362,7 @@ namespace TABCoopMod.Testing
                 InstantBuild = GetBool(args, "instant", false),
                 IsShiftQueued = GetBool(args, "shift", false)
             };
-            CommandExecutor.Execute(cmd);
+            CommandInterceptor.Dispatch(cmd);
             return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
         }
 
@@ -380,11 +381,11 @@ namespace TABCoopMod.Testing
             var cmd = new NetCommand
             {
                 Type = NetCommandType.ExecuteCommand,
-                PlayerId = 1,
+                PlayerId = CommandInterceptor.LocalPlayerId,
                 CommandId = GameBridge.GetCommandId(trainCmd),
                 ExecutorEntityIds = new[] { barracksId }
             };
-            CommandExecutor.Execute(cmd);
+            CommandInterceptor.Dispatch(cmd);
             return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
         }
 
@@ -393,8 +394,8 @@ namespace TABCoopMod.Testing
             ulong[] ids = GetULongArray(args, "ids");
             if (ids.Length == 0) throw new ArgumentException("ids is required");
 
-            var cmd = new NetCommand { Type = NetCommandType.CancelCurrentOrder, PlayerId = 1, ExecutorEntityIds = ids };
-            CommandExecutor.Execute(cmd);
+            var cmd = new NetCommand { Type = NetCommandType.CancelCurrentOrder, PlayerId = CommandInterceptor.LocalPlayerId, ExecutorEntityIds = ids };
+            CommandInterceptor.Dispatch(cmd);
             return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
         }
 
@@ -406,19 +407,19 @@ namespace TABCoopMod.Testing
             var cmd = new NetCommand
             {
                 Type = NetCommandType.CancelQueuedOrder,
-                PlayerId = 1,
+                PlayerId = CommandInterceptor.LocalPlayerId,
                 ExecutorEntityIds = ids,
                 QueueSlotIndex = (byte)GetInt(args, "slot", 0)
             };
-            CommandExecutor.Execute(cmd);
+            CommandInterceptor.Dispatch(cmd);
             return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
         }
 
         private static object SetPaused(Dictionary<string, object> args)
         {
             bool paused = GetBool(args, "paused", true);
-            var cmd = new NetCommand { Type = NetCommandType.SetPaused, PlayerId = 1, TargetPausedState = paused };
-            CommandExecutor.Execute(cmd);
+            var cmd = new NetCommand { Type = NetCommandType.SetPaused, PlayerId = CommandInterceptor.LocalPlayerId, TargetPausedState = paused };
+            CommandInterceptor.Dispatch(cmd);
             return new Dictionary<string, object> { ["dispatched"] = true, ["paused"] = DXGame.Current?.Paused ?? false };
         }
 
@@ -427,7 +428,7 @@ namespace TABCoopMod.Testing
             var cmd = new NetCommand
             {
                 Type = (NetCommandType)GetInt(args, "type", 1),
-                PlayerId = (byte)GetInt(args, "playerId", 1),
+                PlayerId = (byte)GetInt(args, "playerId", CommandInterceptor.LocalPlayerId),
                 CommandId = GetInt(args, "commandId", 0),
                 BuildingTypeName = GetStr(args, "buildingType") ?? string.Empty,
                 ExecutorEntityIds = GetULongArray(args, "ids"),
@@ -439,7 +440,7 @@ namespace TABCoopMod.Testing
                 QueueSlotIndex = (byte)GetInt(args, "slot", 0),
                 TargetPausedState = GetBool(args, "paused", false)
             };
-            CommandExecutor.Execute(cmd);
+            CommandInterceptor.Dispatch(cmd);
             return new Dictionary<string, object> { ["dispatched"] = true, ["command"] = cmd.ToString() };
         }
 
@@ -538,8 +539,8 @@ namespace TABCoopMod.Testing
             string id = GetStr(args, "mayorId");
             if (string.IsNullOrEmpty(id)) throw new ArgumentException("mayorId is required");
 
-            var cmd = new NetCommand { Type = NetCommandType.MayorVoteOrSelect, PlayerId = 1, MayorId = id };
-            CommandExecutor.Execute(cmd);
+            var cmd = new NetCommand { Type = NetCommandType.MayorVoteOrSelect, PlayerId = CommandInterceptor.LocalPlayerId, MayorId = id };
+            CommandInterceptor.Dispatch(cmd);
             return new Dictionary<string, object>
             {
                 ["dispatched"] = true,
@@ -552,8 +553,8 @@ namespace TABCoopMod.Testing
         {
             float speed = GetFloat(args, "speed", 1f);
             speed = Math.Max(0f, Math.Min(20f, speed));
-            var cmd = new NetCommand { Type = NetCommandType.SetGameSpeed, PlayerId = 1, GameSpeed = speed };
-            CommandExecutor.Execute(cmd);
+            var cmd = new NetCommand { Type = NetCommandType.SetGameSpeed, PlayerId = CommandInterceptor.LocalPlayerId, GameSpeed = speed };
+            CommandInterceptor.Dispatch(cmd);
             return new Dictionary<string, object>
             {
                 ["dispatched"] = true,

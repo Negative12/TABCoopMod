@@ -37,6 +37,8 @@ namespace TABCoopMod.Determinism
         /// </summary>
         private static bool IsSimConstruction()
         {
+            if (LockstepClock.InAudioContext || LockstepClock.InVisualVfxContext)
+                return false;
             if (LockstepClock.InDeterministicContext || LockstepClock.LogicTickActive || LockstepClock.InPhysicsStep)
                 return true;
 

@@ -29,9 +29,8 @@ namespace TABCoopMod.Determinism
     }
 
     /// <summary>
-    /// Skeleton for true network lockstep: a tick is ready once the host's turn input for it
-    /// has been received. Full wiring (host heartbeat, TargetSimTick buffering) is tracked in
-    /// docs/07_TECHNICAL_HARD_PROBLEMS.md and intentionally not wired this round.
+    /// Network lockstep tick gate: a tick is ready once the host's turn input for it
+    /// has been received (wired in CoopSessionManager; see docs/02_ARCHITECTURE_DESIGN.md).
     /// </summary>
     public sealed class TurnInputTickGate : ITickGate
     {

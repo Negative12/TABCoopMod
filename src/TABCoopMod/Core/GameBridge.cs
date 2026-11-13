@@ -43,6 +43,7 @@ namespace TABCoopMod.Core
         private static MethodInfo _methodWriteSaveFile;
         private static MethodInfo _methodLoadGameAndEnter;
         private static MethodInfo _methodShowTopBanner;
+        private static MethodInfo _methodShowGroundIndicator;
         private static MethodInfo _methodAssignGroupMove;
         private static MethodInfo _methodPlaceBuilding;
 
@@ -131,6 +132,9 @@ namespace TABCoopMod.Core
                 // 4. Level System Methods
                 _methodShowTopBanner = AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_ShowTopBanner,
                     new[] { typeof(string), typeof(Color), typeof(int) });
+                _methodShowGroundIndicator = TypeZXSystemGameLevel?.GetMethod(
+                    ObfuscatedSymbols.Method_LevelSys_ShowGroundIndicator,
+                    BindingFlags.Public | BindingFlags.Instance);
                 _methodAssignGroupMove = AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_AssignGroupMove,
                     new[] { typeof(List<DXEntity>), typeof(ZXCommand), typeof(PointF) });
 
@@ -385,22 +389,65 @@ namespace TABCoopMod.Core
             }
         }
 
+        public static bool IsMainMenuReadyForInput()
+        {
+            try
+            {
+                var menu = MainMenuInstance;
+                if (menu == null) return false;
+                var field = AccessTools.Field(TypeZXSystemMainMenu, ObfuscatedSymbols.Field_MainMenu_ReadyForInput);
+                return field != null && (bool)field.GetValue(menu);
+            }
+            catch { return false; }
+        }
+
+        public static bool IsStartupFadeActive()
+        {
+            try
+            {
+                var game = _mZXGameCurrent?.Invoke(null, null);
+                if (game == null) return false;
+                var field = AccessTools.Field(TypeZXGame, ObfuscatedSymbols.Field_ZXGame_StartupFadeActive);
+                return field != null && (bool)field.GetValue(game);
+            }
+            catch { return false; }
+        }
+
         /// <summary>
         /// ZXGame.#=z9DPDdq9qP9lZ silently returns when its black loading-fade object is already in
         /// the scene (e.g. a main-menu transition still animating), so a programmatic load during a
-        /// snapshot arrival becomes a no-op. Detach the stale fade first.
+        /// snapshot arrival becomes a no-op. Also works around vanilla LoadGameAndEnter line 229's
+        /// inverted null check (`if (CurrentGameSystem == null) CurrentGameSystem.Enabled = false;`),
+        /// which otherwise leaves an active ZXSystemGameLevel updating disposed CShadow scene objects
+        /// after Scene.Init(Black) and throws NullReferenceException on in-level reloads.
         /// </summary>
         public static void PrepareForProgrammaticLoad()
         {
             try
             {
-                var game = _mZXGameCurrent?.Invoke(null, null);
+                var game = _mZXGameCurrent?.Invoke(null, null) as DXGame;
                 if (game == null) return;
                 var field = AccessTools.Field(TypeZXGame, ObfuscatedSymbols.Field_ZXGame_LoadingFadeObj);
                 if (field?.GetValue(game) is DXObject fade && fade.Scene != null)
                 {
                     fade.RemoveFromScene();
                     ModLogger.Info("[GameBridge] Detached stale loading-fade object before programmatic load.");
+                }
+
+                var sys = AccessTools.Property(TypeZXGame, "CurrentGameSystem")?.GetValue(game) as DXSystem;
+                if (sys != null)
+                {
+                    bool wasInLevel = TypeZXSystemGameLevel != null && TypeZXSystemGameLevel.IsInstanceOfType(sys);
+                    sys.Enabled = false;
+                    game.Paused = true;
+                    game.PostMethods_OnStartFrame?.Clear();
+                    game.PostMethods_OnFinishFrame?.Clear();
+                    game.PostMethods_OnSafeLogicAndDrawing?.Clear();
+                    if (wasInLevel)
+                    {
+                        game.ClearEntities();
+                        ModLogger.Info("[GameBridge] Disabled active level system and cleared entities before in-level reload.");
+                    }
                 }
             }
             catch (Exception ex)
@@ -484,29 +531,141 @@ namespace TABCoopMod.Core
         private static readonly Dictionary<Type, PropertyInfo> _ordersPropCache = new Dictionary<Type, PropertyInfo>();
         private static PropertyInfo _ccProp;
 
+        private static int CompareEntitiesDeterministically(DXEntity a, DXEntity b)
+        {
+            if (ReferenceEquals(a, b)) return 0;
+            if (a == null) return -1;
+            if (b == null) return 1;
+
+            bool aHigh = (a.ID & 0x8000000000000000UL) != 0UL;
+            bool bHigh = (b.ID & 0x8000000000000000UL) != 0UL;
+            if (aHigh != bHigh) return aHigh ? 1 : -1;
+
+            if (!aHigh)
+                return a.ID.CompareTo(b.ID);
+
+            int cmp = a.Cell.X.CompareTo(b.Cell.X);
+            if (cmp != 0) return cmp;
+            cmp = a.Cell.Y.CompareTo(b.Cell.Y);
+            if (cmp != 0) return cmp;
+            cmp = a.Position.X.CompareTo(b.Position.X);
+            if (cmp != 0) return cmp;
+            cmp = a.Position.Y.CompareTo(b.Position.Y);
+            if (cmp != 0) return cmp;
+            cmp = (a.Template?.ID ?? 0UL).CompareTo(b.Template?.ID ?? 0UL);
+            if (cmp != 0) return cmp;
+            cmp = string.CompareOrdinal(a.GetType().FullName, b.GetType().FullName);
+            if (cmp != 0) return cmp;
+            return a.ID.CompareTo(b.ID);
+        }
+
+        private static int CompareBodiesDeterministically(DXPhysicBody a, DXPhysicBody b)
+        {
+            if (ReferenceEquals(a, b)) return 0;
+            if (a == null) return -1;
+            if (b == null) return 1;
+
+            int cmp = CompareEntitiesDeterministically(a.GameEntity, b.GameEntity);
+            if (cmp != 0) return cmp;
+
+            cmp = a.PositionComputed.X.CompareTo(b.PositionComputed.X);
+            if (cmp != 0) return cmp;
+            cmp = a.PositionComputed.Y.CompareTo(b.PositionComputed.Y);
+            if (cmp != 0) return cmp;
+            return ((int)a.Shape).CompareTo((int)b.Shape);
+        }
+
         public static void SortEntitiesById()
         {
             try
             {
                 var game = DXGame.Current;
                 if (game == null) return;
-                var field = AccessTools.Field(typeof(DXGame), "_Entities");
-                if (field?.GetValue(game) is List<DXEntity> list && list.Count > 1)
+
+                var entitiesField = AccessTools.Field(typeof(DXGame), "_Entities");
+                if (entitiesField?.GetValue(game) is List<DXEntity> list && list.Count > 1)
                 {
-                    list.Sort((a, b) => a.ID.CompareTo(b.ID));
-                    ModLogger.Info($"[GameBridge] Re-ordered {list.Count} entities by ID for deterministic update order.");
+                    list.Sort(CompareEntitiesDeterministically);
+                    var indexField = AccessTools.Field(typeof(DXEntity), "_Index");
+                    if (indexField != null)
+                    {
+                        for (int i = 0; i < list.Count; i++)
+                        {
+                            if (list[i] != null)
+                                indexField.SetValue(list[i], i);
+                        }
+                    }
+                    ModLogger.Info($"[GameBridge] Re-ordered {list.Count} entities deterministically.");
+
+                    // ClearEntities() clears HashSets in place without resetting bucket capacities, so an
+                    // in-level reload leaves larger _buckets arrays than a fresh MainMenu load and makes
+                    // EntitiesOfType<T>() iterate in a different hash-collision order (e.g. SysColonists).
+                    // Rebuild _EntitiesPerType and _DicBaseTypesPerEntity from fresh HashSets in sorted order.
+                    var perTypeField = AccessTools.Field(typeof(DXGame), "_EntitiesPerType");
+                    var baseTypesField = AccessTools.Field(typeof(DXGame), "_DicBaseTypesPerEntity");
+                    if (perTypeField?.GetValue(game) is Dictionary<Type, HashSet<DXEntity>> perType &&
+                        baseTypesField?.GetValue(null) is Dictionary<Type, List<HashSet<DXEntity>>> baseTypes)
+                    {
+                        int rebuiltSets = 0;
+                        lock (DXGame.SyncLogic)
+                        {
+                            perType.Clear();
+                            baseTypes.Clear();
+                            for (int i = 0; i < list.Count; i++)
+                            {
+                                var e = list[i];
+                                if (e == null) continue;
+                                Type et = e.GetType();
+                                if (!baseTypes.TryGetValue(et, out var setList))
+                                {
+                                    setList = new List<HashSet<DXEntity>>();
+                                    baseTypes.Add(et, setList);
+                                    Type t = et;
+                                    while (t != null && t != typeof(DXEntity))
+                                    {
+                                        if (!perType.TryGetValue(t, out var hs))
+                                        {
+                                            hs = new HashSet<DXEntity>();
+                                            perType.Add(t, hs);
+                                            rebuiltSets++;
+                                        }
+                                        setList.Add(hs);
+                                        t = t.BaseType;
+                                    }
+                                }
+                                for (int j = 0; j < setList.Count; j++)
+                                    setList[j].Add(e);
+                            }
+                        }
+                        ModLogger.Info($"[GameBridge] Rebuilt {rebuiltSets} _EntitiesPerType sets deterministically.");
+                    }
                 }
 
+                // Flush deferred DXEntity.CreateBody() calls queued during async level load, then sort
+                // DXPhysicWorld.Bodies in place WITHOUT calling Clear() — InitLevel also registers ~358
+                // static terrain/gate colliders directly via DXPhysicBody.CreateRectangle(userData:null
+                // or gate sub-bodies) that CreateBody() does not recreate.
+                AccessTools.Method(typeof(DXPhysicWorld), "FinishPhysics")?.Invoke(null, null);
                 var bodies = DXPhysicWorld.Bodies;
                 if (bodies != null && bodies.Count > 1)
                 {
-                    bodies.Sort((a, b) => (a?.GameEntity?.ID ?? 0UL).CompareTo(b?.GameEntity?.ID ?? 0UL));
-                    ModLogger.Info($"[GameBridge] Re-ordered {bodies.Count} physics bodies by entity ID.");
+                    bodies.RemoveAll(b => b == null || b.Handle == IntPtr.Zero);
+                    bodies.Sort(CompareBodiesDeterministically);
+                    var bodyIndexField = AccessTools.Field(typeof(DXPhysicBody), "_Index");
+                    if (bodyIndexField != null)
+                    {
+                        for (int i = 0; i < bodies.Count; i++)
+                        {
+                            if (bodies[i] != null)
+                                bodyIndexField.SetValue(bodies[i], i);
+                        }
+                    }
+                    ModLogger.Info($"[GameBridge] Re-ordered {bodies.Count} physics bodies deterministically (preserved terrain/gate colliders).");
                 }
             }
             catch (Exception ex)
             {
-                ModLogger.Warn($"[GameBridge] SortEntitiesById failed: {ex.Message}");
+                ModLogger.Warn($"[GameBridge] SortEntitiesById failed: {ex.InnerException ?? ex}");
             }
         }
 
@@ -814,8 +973,20 @@ namespace TABCoopMod.Core
         private static MethodInfo _mBuildGetForType;
         private static MethodInfo _mTrainGetForType;
 
+        private static Type _typeZXCommand;
         private static Type _typeCMovable;
         private static Type _typeCCommandable;
+        private static Type[] _groupRoutedCommandTypes;
+        private static readonly Dictionary<Type, PropertyInfo> _cmdIndicatorColorCache = new Dictionary<Type, PropertyInfo>();
+
+        public static Type TypeZXCommand
+        {
+            get
+            {
+                if (_typeZXCommand == null) _typeZXCommand = GameAssembly?.GetType("ZX.Commands.ZXCommand");
+                return _typeZXCommand;
+            }
+        }
 
         public static Type TypeZXEntity => _mCmdExec?.GetParameters()[0].ParameterType;
         public static Type TypeZXCommandTarget => _mCmdExec?.GetParameters()[1].ParameterType;
@@ -849,6 +1020,82 @@ namespace TABCoopMod.Core
             }
             if (prop == null) return 0;
             try { return Convert.ToInt32(prop.GetValue(command)); } catch { return 0; }
+        }
+
+        public static ulong[] GetSelectedPlayerEntityIds()
+        {
+            var listObj = _fieldSelectedList?.GetValue(null) as IEnumerable;
+            if (listObj == null) return Array.Empty<ulong>();
+
+            var ids = new List<ulong>();
+            foreach (object item in listObj)
+            {
+                var comp = item as DXComponent;
+                var ent = comp?.Entity;
+                if (ent == null || ent.Disposed) continue;
+                if (HasComponent(ent, TypeCMovable) && HasComponent(ent, TypeCCommandable) && IsPlayerEntity(ent))
+                    ids.Add(ent.ID);
+            }
+            ids.Sort();
+            return ids.ToArray();
+        }
+
+        public static bool IsGroupRoutedCommand(object command)
+        {
+            if (command == null) return false;
+            if (_groupRoutedCommandTypes == null && GameAssembly != null)
+            {
+                _groupRoutedCommandTypes = new[]
+                {
+                    GameAssembly.GetType("ZX.Commands.Travel"),
+                    GameAssembly.GetType("ZX.Commands.Patrol"),
+                    GameAssembly.GetType("ZX.Commands.Chase"),
+                    GameAssembly.GetType("ZX.Commands.UseItem_Grenade")
+                };
+            }
+            if (_groupRoutedCommandTypes == null) return false;
+            for (int i = 0; i < _groupRoutedCommandTypes.Length; i++)
+            {
+                var t = _groupRoutedCommandTypes[i];
+                if (t != null && t.IsInstanceOfType(command)) return true;
+            }
+            return false;
+        }
+
+        public static bool IsBuildOrBonusCommand(object command, out bool isBonus)
+        {
+            isBonus = false;
+            if (command == null) return false;
+            string name = command.GetType().Name;
+            if (string.Equals(name, "EntityBonusCreation", StringComparison.Ordinal))
+            {
+                isBonus = true;
+                return true;
+            }
+            return string.Equals(name, "Build", StringComparison.Ordinal);
+        }
+
+        public static void ShowGroundIndicatorForCommand(object command, PointF worldPos, float scale = 1f)
+        {
+            if (command == null || _methodShowGroundIndicator == null) return;
+            object levelSys = _mLevelSysCurrent?.Invoke(null, null);
+            if (levelSys == null) return;
+
+            Type t = command.GetType();
+            if (!_cmdIndicatorColorCache.TryGetValue(t, out PropertyInfo prop))
+            {
+                prop = t.GetProperty("TargetIndicatorColor", BindingFlags.Public | BindingFlags.Instance);
+                _cmdIndicatorColorCache[t] = prop;
+            }
+            if (prop == null) return;
+
+            try
+            {
+                object colorVal = prop.GetValue(command);
+                if (colorVal != null)
+                    _methodShowGroundIndicator.Invoke(levelSys, new[] { worldPos, colorVal, scale });
+            }
+            catch { }
         }
 
         /// <summary>
@@ -900,6 +1147,8 @@ namespace TABCoopMod.Core
         private static PropertyInfo _pSerPosition, _pSerSize, _pSerOrigin, _pSerEntityRef;
         private static Type _typeEntityRefClosed;
         private static PropertyInfo _pEntityRefEntity;
+        private static PropertyInfo _pEntityRefId;
+        private static FieldInfo _fEntityRefId;
 
         private static void EnsureCommandTargetMeta()
         {
@@ -918,6 +1167,42 @@ namespace TABCoopMod.Core
             {
                 _typeEntityRefClosed = typeof(DXEntityRef<>).MakeGenericType(zxEntity);
                 _pEntityRefEntity = _typeEntityRefClosed.GetProperty("Entity", F);
+                _pEntityRefId = _typeEntityRefClosed.GetProperty("IDEntity", F);
+                if (_pEntityRefId == null)
+                    _fEntityRefId = _typeEntityRefClosed.GetField("IDEntity", F);
+            }
+        }
+
+        public static void UnpackCommandTarget(object target, out ulong targetEntityId, out PointF pos, out SizeF size, out PointF origin)
+        {
+            targetEntityId = 0UL;
+            pos = PointF.Empty;
+            size = SizeF.Empty;
+            origin = PointF.Empty;
+            if (target == null) return;
+
+            EnsureCommandTargetMeta();
+            if (_typeZXCommandTargetRef == null) return;
+
+            try
+            {
+                if (_pSerPosition?.GetValue(target) is PointF p) pos = p;
+                if (_pSerSize?.GetValue(target) is SizeF s) size = s;
+                if (_pSerOrigin?.GetValue(target) is PointF o) origin = o;
+                object refObj = _pSerEntityRef?.GetValue(target);
+                if (refObj != null)
+                {
+                    if (_pEntityRefId != null)
+                        targetEntityId = Convert.ToUInt64(_pEntityRefId.GetValue(refObj));
+                    else if (_fEntityRefId != null)
+                        targetEntityId = Convert.ToUInt64(_fEntityRefId.GetValue(refObj));
+                    else if (_pEntityRefEntity?.GetValue(refObj) is DXEntity refEnt)
+                        targetEntityId = refEnt.ID;
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] UnpackCommandTarget failed: {ex.Message}");
             }
         }
 

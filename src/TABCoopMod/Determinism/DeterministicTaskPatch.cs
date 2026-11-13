@@ -17,13 +17,47 @@ namespace TABCoopMod.Determinism
     /// Everything else (DXScene.UpdateObjects culling, texture baking, level-table loading) keeps its
     /// native parallelism; serializing those made large saves (6666, 33k entities) take minutes.
     /// </summary>
+    /// <summary>
+    /// Brackets ZX.GameSystems.ZXMapDrawer.#=zl2XxwLg=(DXLevel) so level/map RNG streams are
+    /// seeded identically and DXHelper_Task.For runs sequentially during terrain/tree/grass generation.
+    /// </summary>
+    [HarmonyPatch]
+    public static class DeterministicMapDrawerPatch
+    {
+        public static System.Reflection.MethodBase TargetMethod()
+        {
+            var type = GameBridge.GameAssembly?.GetType("ZX.GameSystems.ZXMapDrawer");
+            return type != null ? AccessTools.Method(type, "#=zl2XxwLg=", new[] { typeof(DXLevel) }) : null;
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix(DXLevel __0, out bool __state)
+        {
+            __state = LockstepClock.InMapDrawer;
+            LockstepClock.InMapDrawer = true;
+            if (LockstepClock.IsDeterministicModeActive)
+            {
+                if (__0 != null)
+                    __0.Random = new DXRandom(LockstepClock.EffectiveLoadSeed);
+                LockstepClock.ResetSyncedRandomStreamsForInitLevel();
+            }
+        }
+
+        [HarmonyFinalizer]
+        public static void Finalizer(bool __state)
+        {
+            LockstepClock.InMapDrawer = __state;
+        }
+    }
+
     [HarmonyPatch]
     public static class DeterministicTaskPatch
     {
-        // Serialize only the two position-affecting physics loops. Level deserialization and scene
-        // culling keep native parallelism: serializing them made 6666.zxsav take minutes, and the
-        // ctor seed sequence is already isolated per-thread by DXRandomCtorPatch.
-        private static bool Active => LockstepClock.IsDeterministicModeActive && LockstepClock.InPhysicsStep;
+        // Serialize physics stepping and MapDrawer generation loops. Level deserialization and
+        // scene culling keep native parallelism: serializing them made 6666.zxsav take minutes,
+        // and constructor seeds are already isolated per-thread by DXRandomCtorPatch.
+        private static bool Active => LockstepClock.IsDeterministicModeActive
+            && (LockstepClock.InPhysicsStep || LockstepClock.InMapDrawer);
 
         [HarmonyPatch]
         public static class ForIndex

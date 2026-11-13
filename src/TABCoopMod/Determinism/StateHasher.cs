@@ -92,12 +92,16 @@ namespace TABCoopMod.Determinism
                         continue;
                     if ((entity.ID & 0x8000000000000000UL) != 0)
                         continue;
+                    // Bare DXEntity instances (e.g. blood/hit sprites) and non-interactive ambient birds
+                    // (Raven) are purely visual/ambient and do not affect simulation state.
+                    string typeName = entity.GetType().Name;
+                    if (entity.GetType() == typeof(DXEntity) || string.Equals(typeName, "Raven", StringComparison.Ordinal))
+                        continue;
 
                     entityCount++;
                     long qx = (long)Math.Round(entity.Position.X * 100f);
                     long qy = (long)Math.Round(entity.Position.Y * 100f);
 
-                    string typeName = entity.GetType().Name;
                     bool isProjectile = IsProjectileName(typeName);
                     int lifeValue = GameBridge.GetLifeValue(entity);
 

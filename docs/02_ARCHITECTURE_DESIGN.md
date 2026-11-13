@@ -1,181 +1,132 @@
 # 02 — 核心技术架构设计 (Technical Architecture Design)
 
-## 1. 架构选型总览：为什么采用“确定性帧同步 + 原生存档快照”混合架构？
+> **状态**: 已实机验证定型（Gate A1/A2/B1/B2/C/D 全通过）
 
-《亿万僵尸》（TAB）在生存模式后期同屏拥有 **10,000 ~ 25,000 个活跃僵尸实体（`ZX.Entities.Zombie`）** 以及数千个建筑、投射物（`Proyectile`）和地形格子状态。
-- **纯状态同步（State Synchronization）不可行**：若每秒广播 20,000 个实体的位置（`PointF`）、朝向（`Angle`）、生命值（`CLife.Life`）与物理速度（`Velocity`），每秒产生的数据量高达 `20,000 * 24 bytes * 15 Hz ≈ 7.2 MB/s`，远超 Steam P2P 转发带宽上限。
-- **纯指令帧同步（Pure Lockstep）痛点**：虽然每秒仅需同步几百字节的玩家指令（`ZXCommand`），但要求所有客户端每帧逻辑计算 100% 确定，且无法支持中途加入或 Desync 后的自愈。
+---
 
-### 💡 最终确定方案：**Deterministic Lockstep（确定性指令帧同步） + Native Save-Stream Snapshot（原生存档流秒级同步）**
+## 1. 架构选型总览：Deterministic Lockstep + Native Save-Stream Snapshot
+
+《亿万僵尸》（TAB）在生存中后期同屏存在 **10,000 ~ 33,000+ 个实体**（如 `6666.zxsav` 含 33,555 实体）：
+- **纯状态同步不可行**：全量实体状态广播带宽高达数 MB/s，远超 Steam P2P 转发能力。
+- **纯指令帧同步痛点**：无法低成本支持开局随机地图同步与极偶发算力漂移自愈。
+
+因此本项目采用 **“确定性指令帧同步为主 + 原生存档流快照秒传为辅”** 的混合架构：
 
 ```text
 +-----------------------------------------------------------------------------------+
 |                              TABCoopMod 运行时架构                                 |
 +-----------------------------------------------------------------------------------+
 |                                                                                   |
-|  [注入引导层 Bootstrap]                                                            |
-|   winmm.dll / Doorstop -> HarmonyX (0Harmony.dll) -> TABCoopMod.Entry.Initialize()|
-|                                                                                   |
-|  [核心桥接层 Core / GameBridge]                                                    |
-|   封装 #=z4RevDP3eECXqXS6JRA== (ZXGame), #=zxRcpu6e7NYzT7tGWqPjpOkc= (LevelSys)   |
-|   统一提供强类型 API，隔离全部 Eazfuscator 混淆符号                                 |
+|  [无损注入层 Bootstrap]                                                            |
+|   TheyAreBillions.exe.config -> ModAppDomainManager (AssemblyLoad)                |
+|   -> <Module>..cctor -> GameBridge.InitializeAndValidate() -> Harmony 逐类容错加载  |
+|   -> Patch_DXRender_VirtualDisplayFallback (无物理显示器 Direct3DEx 兼容)           |
 |                                                                                   |
 |  +-------------------------------+  +------------------------------------------+  |
-|  | 确定性沙盒层 (Determinism)     |  | 指令拦截与回放层 (Command Sync)           |  |
-|  | - 开启 DXGame.IsIADeterministic|  | - 拦截右键移动/攻击/交互                 |  |
-|  | - 接管 LoadPhysics 异步线程    |  | - 拦截 Build.#=zBTwSMLo= 建筑放置        |  |
-|  | - 隔离 DXGuid (Synced vs UI)  |  | - 拦截 ZXCommand.#=zfmgzkuw= 生产/科技   |  |
-|  | - 固定 DXRandom 梅森旋转种子   |  | - 脱离 CSelectable 的独立实体集命令回放   |  |
-|  +---------------+---------------+  +--------------------+---------------------+  |
-|                  |                                       |                        |
-|                  v                                       v                        |
+|  | 确定性沙盒层 (Determinism)     |  | 指令拦截与无状态回放层 (Command Sync)     |  |
+|  | - DXGame.IsIADeterministic=true| | - CommandInterceptorPatch (5 处主入口)    |  |
+|  | - DeterministicPathfindingPatch| | - PauseAndSpeedInputPatch (输入层暂停/倍速)|  |
+|  | - DeterministicTaskPatch       | | - MayorSyncPatch (4 重守卫按 MayorId 应用) |  |
+|  |   (仅 InPhysicsStep 串行)      | | - CommandExecutor (全 object+反射，不碰    |  |
+|  | - DXGuid 双轨分流与载入后校准    | |   CSelectable，模拟 Shift 状态)          |  |
+|  | - DXRandom 多维定种与线程隔离    | +--------------------+---------------------+  |
+|  +---------------+---------------+                        |                        |
+|                  |                                        |                        |
+|                  v                                        v                        |
 |  +-----------------------------------------------------------------------------+  |
-|  | 帧同步步进调度器 (LockstepEngine) & 快照同步器 (SnapshotSyncManager)          |  |
-|  | - 30Hz 逻辑帧步进 (每帧固定 GameTime += 33.333333333333336 ms)               |  |
-|  | - Turn Window (默认每 2 Ticks = 66ms 交换一次全员输入批次 TickInputBatch)    |  |
-|  | - 暂停态控制帧 (Paused Control Tick): 暂停时照常同步建造、撤回与移动路径      |  |
-|  | - 内存存档流直传: 复用 ZipSerializer (.zxsav) 实现开局同步与一键热重连       |  |
+|  | 帧同步编排层 (CoopSessionManager & TurnInputTickGate & PauseSyncController)  |  |
+|  | - 30Hz 固定步长 (33.333336ms/tick)，TurnInputTickGate 按 TargetSimTick 门控  |  |
+|  | - PausedBySession 真正冻结 SimTick，OnFrameTick 持续刷新暂停期间微操指令      |  |
+|  | - 浅栈导出/加载 .zxsav+.zxcheck 快照流 + 60 tick StateHasher v2 对账与自愈    |  |
 |  +---------------------------------------+-------------------------------------+  |
 |                                          |                                        |
 |                                          v                                        |
 |  +-----------------------------------------------------------------------------+  |
 |  | 双模传输抽象层 (INetworkTransport)                                           |  |
-|  | - SteamP2PTransport: SteamMatchmaking (Lobby) + SteamNetworking (P2P Relay) |  |
-|  | - LocalTcpLoopbackTransport: 127.0.0.1:27099 (供 AI Agent 单机双开自动化测试)|  |
+|  | - SteamP2PTransport: SteamMatchmaking Lobby + SteamNetworking P2P           |  |
+|  | - LocalTcpLoopbackTransport: 127.0.0.1:27099 (支持 ChaosTransport 故障注入)  |  |
 |  +-----------------------------------------------------------------------------+  |
 +-----------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 2. 注入与启动引导层设计（Bootstrap & Injection）
+## 2. 无损注入与显示兼容（Bootstrap & Render Compat）
 
-### 2.1 为什么不修改 `TheyAreBillions.exe`？
-如 `00_AGENT_DEVELOPMENT_GUIDE.md` 所述，`TheyAreBillions.exe` 内置了 Eazfuscator 的完整性与调用栈深度检查。此外，主程序的 `<Module>..cctor` 注册了 `AppDomain.CurrentDomain.AssemblyResolve`，在首次访问 `DXVision`、`DXPlatform_Desktop`、`Steamworks.NET` 时，从加密的 ManifestResource 中实时解压并加载到内存。
+### 2.1 `.NET AppDomainManager` 引导（`ModAppDomainManager.cs`）
+由于 `TheyAreBillions.exe` 内置 Eazfuscator 完整性与 `StackTrace.GetFrame(3)` 校验，Mod 保持主程序磁盘字节 100% 不变，仅通过 `TheyAreBillions.exe.config` 注入 `ModAppDomainManager`：
+1. 在 `InitializeNewDomain` 初始化日志与全局异常监听，订阅 `AppDomain.CurrentDomain.AssemblyLoad`。
+2. 当 `TheyAreBillions` 加载完成时，先执行 `RuntimeHelpers.RunModuleConstructor(loaded.ManifestModule.ModuleHandle)` 注册内置资源解密器（`DXVision` / `Steamworks.NET` / `DXPlatform_Desktop`）。
+3. 调用 `ModEntry.Initialize()` → `GameBridge.InitializeAndValidate()`（启动自检必须 `0 missing`）→ 逐类 `PatchClassProcessor.Patch()` 包 `try/catch` 应用全部 Harmony 补丁（实机 `Classes OK=40, failed-tolerant=0`）。
 
-### 2.2 推荐注入方案：Doorstop 4 / 代理 DLL 引导 + HarmonyX
-1. 使用轻量级原生代理 DLL（如 `winhttp.dll` 或 `version.dll` 放置在游戏根目录，与 `BepInEx` / `UnityDoorstop` 原理相同）或在测试期使用 `NetLauncher` 进程引导器：
-   - 宿主启动 `TheyAreBillions.exe` 进程，等待主模块加载并完成 `<Module>..cctor` 初始化后，调用 `Assembly.LoadFrom("TABCoopMod.dll")` 并执行 `TABCoopMod.Bootstrap.Init()`。
-   - **补充更稳妥的纯托管引导方案（AppDomain Manager Injection）**：
-     由于 `TheyAreBillions.exe` 是标准 `.NET Framework 4.6` 托管程序且带有 `TheyAreBillions.exe.config`（不参与 Eazfuscator 对 `.exe` 字节的校验！），我们只需在 `TheyAreBillions.exe.config`（或环境变量 `APPDOMAIN_MANAGER_ASM` / `APPDOMAIN_MANAGER_TYPE`）中配置自定义的 `AppDomainManager`！
-     - **优势**：100% 原生 .NET 机制，无需任何 C++ 注入器或第三方代理 DLL，不会触发任何杀毒软件报警，且在 `ZX.Program.Main` 执行前的第一时刻即可挂载 `Harmony` 补丁！
-     - **注意**：在 `AppDomainManager.InitializeNewDomain` 中，先让 `TheyAreBillions.exe` 的 `<Module>..cctor` 运行以注册 `AssemblyResolve`，然后再执行 `Harmony.PatchAll()`。
+### 2.2 虚拟显示器 `Direct3DEx` 回退（`Patch_DXRender_VirtualDisplayFallback`）
+在无物理显示器的虚拟显示环境（如远程虚拟屏适配器报错 `D3DERR_NOTAVAILABLE`）下，对纯 C# 封装类 `DXPlatform_Desktop.DXRender_SlimDX` 的 9 个方法应用 IL Transpiler：当 `Direct3D.GetDeviceCaps` 失败时自动回退至 `SlimDX.Direct3D9.Direct3DEx`，并将 `Pool.Managed` 纹理替换为 `Pool.Default | Usage.Dynamic`（避开直接补丁 C++/CLI 混合程序集 `SlimDX.dll` 导致的 `InvalidProgramException`）。
 
 ---
 
-## 3. 确定性沙盒改造方案（Deterministic Sandbox）
+## 3. 确定性沙盒层（Determinism Sandbox）
 
-通过反编译 `DXVision.dll`，我们精确掌握了游戏主循环与物理循环的源码逻辑，必须对以下 4 个关键点进行接管：
+核心代码位于 `src/TABCoopMod/Determinism/`（`LockstepClock.cs`、`DeterministicTaskPatch.cs`、`DXRandomCtorPatch.cs`、`TickGate.cs`、`StateHasher.cs`）：
 
-### 3.1 开启引擎内置确定性标志 `DXGame.IsIADeterministic`
-在 `DXVision.DXGame`（`DXGame_Engine.cs:1023`）中：
-```csharp
-public static bool IsIADeterministic = false;
-```
-当我们在 Mod 初始化时设置 `DXGame.IsIADeterministic = true`：
-1. 在 `UpdateGameLogic()`（`DXGame_Engine.cs:2779`）中，引擎不再使用 `DXHelper_Task.For` 多线程乱序更新实体，而是走：
-   ```csharp
-   for (int j = 0; j < _Entities.Count; j++) {
-       DXEntity dXEntity = _Entities[j];
-       if (!dXEntity.Disposed && !dXEntity.FreeingToPool) dXEntity.Update();
-   }
-   ```
-2. 在 `SetCamera()`（`DXGame_Engine.cs:2079`）中，每次 `UpdateGameLogic()` 完成后，引擎会紧接着在同一线程同步调用 `UpdatePhysics()`。
+### 3.1 固定步长时钟与 `TurnInputTickGate`
+- **开启确定性主循环**：`DXGame.IsIADeterministic = true`，阻止 `LoadPhysics`/`LoadPhysicsOld` 启动异步计时线程。
+- **固定步长推进**：在 `UpdateGameLogic_Prefix` 中检查 `LockstepClock.TickGate.IsTickReady(nextTick)`。
+  - 若 `PausedBySession == true`：通过 `HoldClocks(__instance)` 冻结 `GameTime` 与 `LastGameTimeIAUpdate`，**真正冻结 `SimTick`**。
+  - 若运行中且 Gate 就绪：按固定步长 `FixedStepMs = 33.333333333333336` 推进，并在关卡加载完成及基线对齐时通过 `GameBridge.AlignSimulationClocks()` 将 `LastGameTimeIAUpdate` 与 `DXPhysicWorld.LastGameTimeUpdatePhysics`、`TimeBodyPosition`、`TimeLastBodyPosition` 同步对齐到 `GameTime`，避免相差相位或清零导致单帧物理狂步。
+- **窗口焦点与帧模数隔离**：联机与测试模式下强制 `DXGame.Focused/Visible = true`（保证后台窗口正常驱动 `DXScene` 动画）；`FrameSceneModuleDeterminismPatch` 将 `DXGame.IsFrameSceneModule(n)` 改为按 `IAIterationInt % n` 判定，切断本地渲染帧率对逻辑分支的影响。
 
-### 3.2 接管异步计时器线程 `DXGame.LoadPhysics()`
-**原版隐患**：在 `DXGame.LoadPhysics()`（`DXGame_Engine.cs:2844`）和 `LoadPhysicsOld()` 中，引擎即使在 `IsIADeterministic = true` 时，依然启动了后台线程 `_TaskGameTime` 和 `_ThreadPhysic` 来异步累加 `GameTime += num5 * num` 并调用 `DXPhysicWorld.UpdateDefaultTime()`。这会导致两台电脑因帧率/CPU 调度不同，每帧推进的 `GameTime` 不同！
-**接管方案**：
-- 使用 Harmony `Prefix` 拦截 `DXGame.LoadPhysics()` 和 `DXGame.LoadPhysicsOld()`，在联机模式下直接返回 `false`（阻止后台物理线程和计时线程启动）。
-- 由我们的 `LockstepEngine` 在主线程 `DXGame.SetCamera()` 调用 `UpdateGameLogic()` 之前，精确控制 `GameTime` 的步进：
-  - 每个逻辑 Tick 固定令 `DXGame.Current.GameTime = DXGame.LastGameTimeIAUpdate + 33.333333333333336`。
-  - 调用 `WaitForGameLogic()` 确保单步逻辑在当前帧内同步执行完毕，使 `IAIterationInt` 与我们的 `LockstepTick` 严格 1:1 锁定！
+### 3.2 同步寻路接管（`DeterministicPathfindingPatch`）
+- **根因**：原版 `ZXGame.#=zB3Vhdin5PerfrubjO4AblAA=()`（`IsMultiplayer`）仅 6~8 字节 IL，会被 x64 RyuJIT 内联进 `CMovable.#=zUPt0E_k=`，导致 `ZXGameMultiplayerModePatch` 被绕过、寻路落入后台多线程 `FindPathConcurrent` 产生 A/B 二值轨迹分叉。
+- **架构**：直接拦截引擎层 `DXVision.DXWorldGrid.FindPathConcurrent` 与 `FindPathConcurrentWithHighPriority`（位于 `DXVision.dll`，不会被内联），在当前逻辑线程同步调用 `DXWorldGrid.FindPath`（保留单位体型 `cellSize` 与空路径字段 `#=ziMavkfK9ZJji` 清空逻辑，规避原版多人分支的体型硬编码与递归栈溢出 Bug）。
 
-### 3.3 实体唯一 ID 生成器 `DXGuid.New()` 双轨分流
-**原版隐患**：`DXVision.DXGuid.New()`（`DXGuid.cs:15`）使用 `private static Random _WindowsRandom = new Random();` 生成 `ulong` ID。且不仅创建单位/建筑会调它，连本地 UI（如 `OMiniMap` 从对象池拿提示图标、本地鼠标点击特效）也会调它。
-**接管方案**：
-- 使用 Harmony `Prefix` 完全替换 `DXGuid.New()`：
-  ```csharp
-  public static bool Prefix(ref ulong __result) {
-      if (!LockstepEngine.IsMultiplayerActive) return true;
-      // 仅当处于确定性逻辑 Tick 更新或网络同步命令执行上下文时，使用同步计数器
-      if (LockstepEngine.InDeterministicContext) {
-          __result = LockstepEngine.NextSyncedGuid();
-      } else {
-          // 本地 UI / 渲染帧特效对象，分配高位标记的本地 ID，绝不消耗同步计数器！
-          __result = 0x8000000000000000UL | Interlocked.Increment(ref _localUiGuidCounter);
-      }
-      return false;
-  }
-  ```
+### 3.3 仅在物理步进串行化并行任务（`DeterministicTaskPatch`）
+- 反编译全部 `DXHelper_Task.For` 调用点确认：读档期（`DXLevel.LoadTable`）与场景渲染裁剪（`DXScene.UpdateObjects`）是只读/独立任务，**只有 `DXPhysicWorld.UpdateDefaultTime()` 内的两次循环影响模拟状态**。
+- 因此 `DeterministicTaskPatch` 仅在 `LockstepClock.IsDeterministicModeActive && LockstepClock.InPhysicsStep` 为 `true` 时将 `DXHelper_Task.For` 转为单线程顺序执行，同时在 `SortEntitiesById` 中剔除 `null` 与 `DXPhysicBody.Handle == IntPtr.Zero` 的空句柄并按 ID 升序排列。大存档 `6666.zxsav`（33,555 实体）得以保持 **~7.8 秒**原生级加载速度。
 
-### 3.4 伪随机数生成器 `DXRandom` 种子同步
-**原版隐患**：
-- `DXRandom.Global` 是 `[ThreadStatic]`，首次访问时用 `new Random().Next()` 随机种子初始化（`DXRandom.cs:44`）。
-- 无参构造函数 `new DXRandom()` 使用 `ThreadId * Ticks` 初始化（`DXRandom.cs:66`）。
-**接管方案**：
-- Hook `DXRandom` 无参构造函数与 `DXRandom.get_Global`：在联机模式下，使用基于当前 `MapSeed ^ LockstepTick` 派生的确定性梅森旋转实例，并在每次快照加载后重置状态数组 `Mt`（`uint[624]`）。
+### 3.4 `DXGuid` 双轨分流与 `DXRandom` 多维定种
+1. **`DXGuid.New()` 双轨分流**：
+   - 仅当处于确定性逻辑/命令上下文（`InDeterministicContext || LogicTickActive` 且非加载期）时消耗同步 ID 计数器（`_syncedEntityIdCounter`，支持校准与 `SnapshotBegin` 同步）；
+   - 加载期及本地 UI/渲染特效一律分配高位 ID（`0x8000000000000000UL | localCounter`），`StateHasher` 自动忽略高位 ID。
+2. **`DXRandom` 全域隔离与重种**：
+   - `DXRandomCtorPatch` 拆分同步模拟线程与非模拟/渲染线程的种子计数器，防止主线程动画插队污染逻辑序列。
+   - `LockstepClock` 对 `DXRandom.Global` 按上下文分流（`synced` / `aux` / `render`）；对 `[ThreadStatic]` 的 `DXBehaviour<BData>._GlobalRandom` 通过 `EntityUpdateBehaviourRandomPatch` 在逻辑线程内按“线程 + 载入代次”重置；同步重置 `DXLevel.Random`、`SysColonists` 游标与列表、`BHFarmer` 农田选格随机，并隔离音频（`AudioRngIsolationPatch`）、纯视觉特效（`VisualVfxIsolationPatch`）及视口精灵拉取（`CSpritePullIsolationPatch` / `CMovableSpriteProgressSyncPatch`）的随机与状态污染。
+
+### 3.5 `StateHasher` v2（顺序无关校验与非对局实体过滤）
+- FNV-1a 64 位校验，覆盖资源、预留、实体坐标（量化 `Math.Round(v * 100)`）、生命值、投射物与生产队列。
+- 跳过不参与模拟交互的裸 `DXVision.DXEntity`（受击飙血/弹花等纯视觉特效，依赖视野可见性）与 `Raven` 环境飞鸟。
 
 ---
 
 ## 4. 指令拦截与无状态回放系统（Command Interception & Replay）
 
-### 4.1 玩家全操作入口梳理與拦截点
-经过对 `ZXSystemGameLevel` (`#=zxRcpu6e7NYzT7tGWqPjpOkc=`) 与 `ZXCommand` 的完整反编译，玩家在局内的所有修改世界状态的操作只有以下 **7 类**，我们只需在这 7 个入口做 Harmony 拦截：
+### 4.1 拦截点（`Patches/`）
+- **`CommandInterceptorPatch.cs`**：拦截 `Build`/`EntityBonusCreation` 建造放置、`ZXSystemGameLevel` 群体移动（`#=zQp2M56bpPd9jmiNkVA==` / `#=zgn6bDkSd9MGS3$WvAQ==`）、通用命令 `ZXCommand.#=zfmgzkuw=`、取消当前命令（`#=zWGiN6nrTv8Dp`）与取消队列槽位（`#=z8g7GC7xLrr8j`）。所有守卫均排除回放期、生产队列自动推进（`#=zrz2EI1A=`）、确定性逻辑帧内部 AI 调用以及非玩家阵营，且严禁对内部类型调用 `HasComponent<T>()`。
+- **`PauseAndSpeedInputPatch.cs`**：从 `ZXSystemGameLevel.OnKeyDown` / `OnKeyUp` 拦截空格暂停与 `+`/`-` 倍速键，交由 `PauseSyncController` 与 `CommandInterceptor.Dispatch` 处理。
+- **`MayorSyncPatch.cs`**：Hook `ZXMayor.#=zPTw8CXGE0RqF`，带四重守卫（`IsInterceptionEnabled && !IsReplayingCommand && !LoadingLevel && IAIterationInt > 0`），按 `MayorId` 广播应用。
 
-| 序号 | 操作类型 | 原版调用入口（混淆符号见字典 03） | 拦截与网络化处理方式 |
-| :---: | :--- | :--- | :--- |
-| **1** | **建造建筑** | `ZX.Commands.Build.#=zBTwSMLo=` | 当本地玩家放置建筑时，不直接生成建筑，发送 `CmdPlaceBuilding(BuilderEntityId, TargetRect, EntityTypeName, IsBonus, InstantBuild)`；收到网络包后调用原函数。 |
-| **2** | **群体移动/巡逻/散开** | `ZXSystemGameLevel.#=zgn6bDkSd9MGS3$WvAQ==` | 当本地玩家右键地面/小地图或点击移动/巡逻/投掷手雷到点时，捕获传入的 `List<DXEntity>` 的 ID 数组、`Command.ID` 与目标 `PointF`，发送 `CmdGroupMove`；回放时根据 ID 列表还原 `List<DXEntity>` 调用原函数并触发各实体的 `cmd.#=zfmgzkuw=`。 |
-| **3** | **单体/群体通用命令** (攻击目标、训练单位、科技升级、修理、拆除、市场买卖、老兵/攻击优先级切换、下车) | `ZX.Commands.ZXCommand.#=zfmgzkuw=(ZXEntity, ZXCommandTarget)` | 区分调用源：若来自玩家本地 UI/右键交互（非命令队列自动流转 `#=zrz2EI1A=`，也非 AI 行为树内部调用），拦截并打包 `(ExecutorId, CommandId, TargetEntityId, TargetPos, TargetSize, IsShiftPressed)`。 |
-| **4** | **取消当前正在执行的命令/建造** | `CCommandable.#=zWGiN6nrTv8Dp()` | 拦截取消按钮点击/快捷键，发送 `CmdCancelCurrent(EntityId)`。 |
-| **5** | **取消生产队列中的槽位** | `CCommandable.#=z8g7GC7xLrr8j(int slot)` | 拦截点击生产队列头像取消，发送 `CmdCancelQueueSlot(EntityId, SlotIndex)`。 |
-| **6** | **暂停 / 游戏速度切换** | `DXGame.set_Paused` / `set_GameSpeed` | 拦截本地按键（空格 / `+` / `-`）与 UI 暂停按钮，发送 `CmdSetPaused(bool)`，在统一的 `LockstepTick` 生效。 |
-| **7** | **市长选举二选一** | `ZXGame.#=zcITiOSD6YNmD` 内匿名委托 | 拦截市长窗口左/右按钮点击事件，发送 `CmdSelectMayor(int optionIndex)`（0=男市长，1=女市长）。 |
-
-### 4.2 关键技术点：如何防止 `Shift` 键状态不一致？
-看 `ZXCommand.#=zfmgzkuw=` 的第 1 行代码（`ZXCommand.cs:376`）：
-```csharp
-public void #=zfmgzkuw=(ZXEntity #=zCb8SJ4S0dwZU, ZXCommandTarget #=zQRhD0TA=)
-{
-    DXInputState.Current.IsKeyPressed((DXKeys)8, false);
-```
-且在 `ZXSystemGameLevel` 中判断连续放置建筑或排队命令时，会读取 `DXInputState.Current.IsKeyPressed((DXKeys)65536, false)`（即 `Shift` 键）。
-- **风险**：如果玩家 A 按住 Shift 点命令，而玩家 B 没按 Shift，在玩家 B 的机器上回放该命令时读取了玩家 B 本地的 `DXInputState` 就会出错！
-- **解决方案**：在网络指令包中显式携带 `bool ModifierShift` 标志。当 `CommandExecutor` 在各客户端回放某条网络指令时，临时将 `DXInputState.Current` 的 Shift 状态覆盖为指令包中的 `ModifierShift`，执行完毕后立即恢复本地真实按键状态！
-
-### 4.3 关键技术点：暂停期间的“实时建筑放置与路径预览”
-在《亿万僵尸》中，90% 的建造和部队分兵是在**暂停状态（`Paused = true`）**下完成的。
-Look at `Build.#=zBTwSMLo=` (`Build.cs:199`):
-```csharp
-DXGame.Current.InvokeOnStartFrame((Action)(() => {
-    ((DXEntity)zXEntity).AddToScene((DXObject)null);
-    ...
-}));
-```
-因为 `InvokeOnStartFrame` 是在**渲染帧（`OnRender -> PostMethods_OnStartFrame.ExecuteAll()`）**执行的，即使游戏逻辑暂停（`Paused = true`），渲染帧依然以 60FPS 运行！
-因此：
-- 我们的 `LockstepEngine` 将 Tick 分为两层：
-  1. **Network Control Tick（网络控制帧，恒定 30Hz）**：无论游戏是否暂停，只要全员网络连通，每 33ms 交换一次指令包并执行 `CommandExecutor`。因此**暂停期间队友放下的房子、拉的木墙、点的兵营训练队列、拉的部队移动线，会在所有人的屏幕上立即显示出来！**
-  2. **Simulation Logic Tick（世界模拟帧，非暂停时与 Control Tick 同步推进）**：仅当 `SyncedPaused == false` 时，每个 Control Tick 同时推进 `GameTime += 33.333333333333336` 并驱动单位移动、战斗与物理更新。
+### 4.2 无状态回放与暂停微操（`NetCommand.cs` & `CoopSessionManager.cs`）
+- `CommandExecutor` 全量使用 `object` + `GameBridge` 反射，**绝不读取或修改 `CSelectable`**；执行期间临时模拟指令携带的 `IsShiftQueued` 按键状态并带有 `_executionDepth` 递归深度保护。
+- **暂停态实时微操**：当 `LockstepClock.PausedBySession == true` 时，`UpdateGameLogic` 不触发，由 `CoopSessionManager.OnFrameTick()` 在 `RunInDeterministicContext` 保护下对冻结的当前 `pausedTick` 主动调用 `FlushDueTurnCommands(pausedTick)`，从而在暂停下即时执行建造/拉兵/训练/解暂指令并立即渲染上屏。
 
 ---
 
-## 5. 内存存档流同步架构（Zero-MapGen Save Sync）
+## 5. 内存存档流同步与 `Auto-resync`
 
-通过反编译 `ZXGame.cs`（`1286~1604` 行），我们摸清了 TAB 存档读写的全部机制：
-- **写存档核心函数**：`ZXGame.#=zMtGuEM2lBSlZ5BGWvg==(string filePath)`
-  - 内部调用 `#=zpKDARrtdO1GK7shdnQ==` 设置 `ZipSerializer.Current.Password`，然后调用 `ZipSerializer.Write` 写出 `.zxsav` 文件，最后调用 `#=zv3_eRJTVn6$5` 写出 `.zxcheck` 校验文件。
-- **读存档核心函数**：`ZXGame.#=z9IpK6P4YlW8GIY7olg==(string filePath)`
-  - 内部校验 `.zxcheck`，调用 `#=z3YFOTVtBw_rT7oSQRA==` 反序列化出 `ZXGameState`，重建 `ZXLevelState`、实体字典 `LevelEntities` 与物理世界，并调用 `ZXLevelState.#=zF1YHTRUZSNRa()` 恢复所有计时器变量！
+1. **同名 `.zxcheck` 校验与乱序分片重组**：
+   - 引擎 `ReadSaveFile` 校验存档时将 `.zxcheck` 与 `.zxsav` 文件名绑定。Host 与 Client 统一读写 **`coop_host_snapshot.zxsav` / `coop_host_snapshot.zxcheck`**。
+   - 客机使用 `Dictionary<int, byte[]>` 按分片索引缓冲重组，容忍传输抖动重排。
+2. **浅调用栈导出/加载（消除 `0xc00000fd` 栈溢出）**：
+   - `OnLevelLoadComplete`（`ZXSystemGameLevel.#=zwK_pUIeRBpbp`）或收到分片后只设置 `_pendingHostSnapshotExport` / `_pendingClientSnapshotLoadPath` 标志，统一延迟到下一帧 `CoopSessionManager.OnFrameTick()` 顶层浅栈执行 `WriteSaveFile` / `LoadSaveFileAndEnter`。
+3. **无焦点淡入推进与 `CShadow` NRE 修复**：
+   - 客机加载期间强制 `Focused = true` 并每帧调用 `GameBridge.KickLoadingFade()` 推进原生黑屏淡入动画，使 `loadAction` 顺利执行。
+   - 调用读档前执行 `GameBridge.PrepareForProgrammaticLoad()`：显式将旧 `CurrentGameSystem.Enabled = false`、置 `Paused = true` 并调用 `ClearEntities()`，补齐原版 `LoadGameAndEnter` 第 229 行 `== null` 空判写反导致的二次读档 `CShadow` `NullReferenceException`。
+4. **周期校验与 `Auto-resync`**：
+   - 每 60 逻辑帧比对 `StateHash`；面对密集尸潮下非托管 `DXPhysicsNative.Space_Step`（Chipmunk C++ 求解器）偶发的 `1e-4` 级别位置漂移，自动触发快照重建，实测约 **3 秒内**完成无缝重同步。
 
-### 快照同步工作流：
-1. **房主打包（Host Snapshot Export）**：
-   - 房主进入新地图（或触发 Resync）时，锁定 `DXGame.Current.Paused = true`。
-   - 调用 `ZXLevelState.#=zuartwoo=().#=zQXHqcVh9mGZZ()` 保存当前精确时间参数，然后调用 `#=zMtGuEM2lBSlZ5BGWvg==(tempSavePath)` 生成 `coop_sync_temp.zxsav` 与 `coop_sync_temp.zxcheck`。
-   - 读取这两个文件的字节数组（通常共 `1.5 MB ~ 3.5 MB`），计算 SHA256，切分为 `32 KB` 的 `SaveChunkPacket` 广播给所有客机。
-2. **客机加载（Client Snapshot Import）**：
-   - 客机接收全部分片并重组为本地 `Saves/coop_client_sync.zxsav` 和 `Saves/coop_client_sync.zxcheck`。
-   - 客机在主线程调用 `ZXGame.#=zuartwoo=().#=z9IpK6P4YlW8GIY7olg==(clientSyncSavePath)`。
-   - 客机加载完成回调触发后，重置本地 `LockstepEngine.SyncedGuidCounter` 和 `DXRandom` 状态，向房主发送 `ClientSyncReadyPacket(StateHash)`。
-3. **全员就绪（All Ready）**：
-   - 房主收到所有客机的 `ClientSyncReadyPacket` 且校验 `StateHash` 一致后，广播 `StartLockstepPacket`，正式开始协同作战！
+---
+
+## 6. 协同 UX 渲染（`UI/`）
+
+- **联机大厅（`CoopLobbyWindow.cs`）**：通过 `MainMenuPatch` 在主菜单注入 `CO-OP MULTIPLAYER` 按钮，调用原版列表弹窗提供 Steam Lobby 与 Loopback 测试入口。
+- **小地图队友视野框（`AllyOverlayRenderer.cs` → `AllyMiniMapOverlayPatch`）**：Hook `OMiniMap.OnRender` Postfix，为队友创建带 `DXImage.FromColor(Color.Transparent)`、`Z = 1001`、`PixelAligned = true` 与 `2px` 边框的 `DXObject`，通过 `DXHelper_Rectangle.ChangeCoordinates(ally.CameraWorldArea, PlayableArea, miniMap.InnerArea)` 实时更新。
+- **暂停提示与 3 秒恢复倒计时（`PauseSyncController.cs`）**：暂停横幅使用 `durationMs = 0` 确保暂停帧立即 100% 不透明显示；恢复倒计时在 `DXIsometricGridObject.Current` 上挂载顶居中固定像素 `DXTextObject`（`Resume in 3/2/1...`），解冻时立即移除。

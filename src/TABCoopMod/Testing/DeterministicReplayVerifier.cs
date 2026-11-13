@@ -84,7 +84,8 @@ namespace TABCoopMod.Testing
             if (!TestHarnessConfig.Enabled) return;
             try
             {
-                LockstepClock.TickGate = new AlwaysReadyTickGate();
+                if (!Sync.CoopSessionManager.IsSessionActive)
+                    LockstepClock.TickGate = new AlwaysReadyTickGate();
                 LockstepClock.EnableDeterministicSandbox(ReplaySeed);
                 // Defer ID calibration until the async loader reports completion: at this point the
                 // old level's entities are still live and the save's GameTime is not restored yet.
@@ -186,6 +187,7 @@ namespace TABCoopMod.Testing
             GameBridge.SortEntitiesById();
             GameBridge.SeedLevelRandom(ReplaySeed);
             LockstepClock.ResetBehaviourRandom(ReplaySeed);
+            DXWorldGrid.ResetPathsCached();
             GameBridge.AlignSimulationClocks();
             _driver = string.IsNullOrEmpty(_scenarioPath)
                 ? ScriptedCommandDriver.CreateDefault(_baselineTick)
@@ -218,6 +220,7 @@ namespace TABCoopMod.Testing
                     {
                         if (e == null || e.Disposed) continue;
                         if ((e.ID & 0x8000000000000000UL) != 0) continue;
+                        if (e.GetType() == typeof(DXEntity)) continue;
                         sb.Append(e.ID).Append('|')
                           .Append(e.Position.X.ToString("F4", CultureInfo.InvariantCulture)).Append('|')
                           .Append(e.Position.Y.ToString("F4", CultureInfo.InvariantCulture)).Append('|')
@@ -380,6 +383,9 @@ namespace TABCoopMod.Testing
                 File.WriteAllLines(path, _records);
                 ModLogger.Info($"[ReplayVerifier] RUN {_currentRun} finished: {_records.Count} records -> {path}");
 
+                if (TestHarnessConfig.PosDump)
+                    DumpPositions("end");
+
                 if (TestHarnessConfig.ReplayRun == 1 || TestHarnessConfig.ReplayRun == 2)
                 {
                     _phase = Phase.Done;
@@ -398,6 +404,7 @@ namespace TABCoopMod.Testing
                         try
                         {
                             PrepareForLoad(); // re-arm deterministic sandbox + defer ID calibration
+                            GameBridge.PrepareForProgrammaticLoad();
                             GameBridge.LoadSaveFileAndEnter(_savePath);
                         }
                         catch (Exception ex) { ModLogger.Error("[ReplayVerifier] Reload for RUN 2 failed", ex); FallbackRequired(); }
@@ -490,6 +497,7 @@ namespace TABCoopMod.Testing
             {
                 if (e == null || e.Disposed) continue;
                 if ((e.ID & 0x8000000000000000UL) != 0) continue;
+                if (e.GetType() == typeof(DXEntity) || string.Equals(e.GetType().Name, "Raven", StringComparison.Ordinal)) continue;
                 ulong id = e.ID;
                 ulong x = unchecked((ulong)BitConverter.DoubleToInt64Bits(e.Position.X));
                 ulong y = unchecked((ulong)BitConverter.DoubleToInt64Bits(e.Position.Y));

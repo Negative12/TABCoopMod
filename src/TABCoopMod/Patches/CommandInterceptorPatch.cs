@@ -1,16 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Linq;
 using System.Reflection;
 using DXVision;
 using HarmonyLib;
 using TABCoopMod.Commands;
 using TABCoopMod.Core;
 using TABCoopMod.Determinism;
-using ZX.Commands;
-using ZX.Components;
-using ZX.Entities;
 
 namespace TABCoopMod.Patches
 {
@@ -58,10 +54,17 @@ namespace TABCoopMod.Patches
         internal static bool SuppressIndividualMoveExecution;
     }
 
+    // NOTE: ZXCommand, ZXEntity, ZXCommandTarget, CCommandable and CSelectable are cross-assembly
+    // internal types. Desktop CLR 4.6 throws TypeAccessException when a patch signature or body
+    // references them directly, so all 5 patches use TargetMethod() + object / DXEntity / DXComponent.
+
     // 1. Track CCommandable.#=zrz2EI1A= (Queue auto-advance) so we don't intercept internal queue transitions
-    [HarmonyPatch(typeof(CCommandable), ObfuscatedSymbols.Method_CCommandable_AdvanceQueue)]
+    [HarmonyPatch]
     public static class Patch_CCommandable_AdvanceQueue
     {
+        public static MethodBase TargetMethod() =>
+            AccessTools.Method(GameBridge.TypeCCommandable, ObfuscatedSymbols.Method_CCommandable_AdvanceQueue);
+
         [HarmonyPrefix]
         public static void Prefix() => CommandInterceptor.InQueueAutoAdvance = true;
 
@@ -78,30 +81,20 @@ namespace TABCoopMod.Patches
             return AccessTools.Method(
                 GameBridge.TypeZXSystemGameLevel,
                 ObfuscatedSymbols.Method_LevelSys_GroupMoveSelected,
-                new[] { typeof(ZXCommand), typeof(PointF) });
+                new[] { GameBridge.TypeZXCommand, typeof(PointF) });
         }
 
         [HarmonyPrefix]
-        public static bool Prefix(ZXCommand __0, PointF __1)
+        public static bool Prefix(object __0, PointF __1)
         {
             if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand)
                 return true;
 
-            var selectedList = GameBridge.GetLocallySelectedList();
-            if (selectedList == null || selectedList.Count == 0)
-                return true;
-
-            ulong[] unitIds = selectedList
-                .Select(s => ((DXComponent)s).Entity)
-                .Where(e => e != null && !e.Disposed
-                    && GameBridge.HasComponent(e, GameBridge.TypeCMovable)
-                    && GameBridge.HasComponent(e, GameBridge.TypeCCommandable))
-                .Select(e => e.ID)
-                .ToArray();
+            ulong[] unitIds = GameBridge.GetSelectedPlayerEntityIds();
 
             // Nothing movable selected: let vanilla handle the click (e.g. right-clicking with a
             // building selected). Swallowing it here would silently eat legitimate input.
-            if (unitIds.Length == 0)
+            if (unitIds == null || unitIds.Length == 0)
                 return true;
 
             var netCmd = new NetCommand
@@ -110,15 +103,13 @@ namespace TABCoopMod.Patches
                 PlayerId = CommandInterceptor.LocalPlayerId,
                 TargetSimTick = DXGame.Current?.IAIterationInt ?? 0,
                 IsShiftQueued = DXInputState.Current?.IsKeyPressed(DXKeys.Shift, false) ?? false,
-                CommandId = __0.ID,
+                CommandId = GameBridge.GetCommandId(__0),
                 ExecutorEntityIds = unitIds,
                 TargetPosition = __1
             };
 
             // Show local ground click indicator immediately for responsive feel
-            GameBridge.TypeZXSystemGameLevel
-                .GetMethod(ObfuscatedSymbols.Method_LevelSys_ShowGroundIndicator, BindingFlags.Public | BindingFlags.Instance)
-                ?.Invoke(GameBridge.LevelSystemInstance, new object[] { __1, __0.TargetIndicatorColor, 1f });
+            GameBridge.ShowGroundIndicatorForCommand(__0, __1, 1f);
 
             CommandInterceptor.SuppressIndividualMoveExecution = true;
             CommandInterceptor.OnLocalCommandCaptured?.Invoke(netCmd);
@@ -127,17 +118,26 @@ namespace TABCoopMod.Patches
     }
 
     // 3. Intercept Generic ZXCommand.#=zfmgzkuw=(ZXEntity executor, ZXCommandTarget target)
-    [HarmonyPatch(typeof(ZXCommand), ObfuscatedSymbols.Method_ZXCommand_Execute)]
+    [HarmonyPatch]
     public static class Patch_ZXCommand_Execute
     {
+        public static MethodBase TargetMethod()
+        {
+            return AccessTools.Method(
+                GameBridge.TypeZXCommand,
+                ObfuscatedSymbols.Method_ZXCommand_Execute,
+                new[] { GameBridge.TypeZXEntity, GameBridge.TypeZXCommandTarget });
+        }
+
         [HarmonyPrefix]
-        public static bool Prefix(ZXCommand __instance, ZXEntity __0, ZXCommandTarget __1)
+        public static bool Prefix(object __instance, object __0, object __1)
         {
             if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || CommandInterceptor.InQueueAutoAdvance)
                 return true;
 
             // Only intercept commands issued on Player team entities! (Never intercept Zombie AI attacks or neutral entities)
-            if (__0 == null || __0.Team != ZX.ZXTeamType.Player)
+            var executor = __0 as DXEntity;
+            if (executor == null || !GameBridge.IsPlayerEntity(executor))
                 return true;
 
             // Ignore unit basic auto-attack commands triggered by BHSoldier / BHAttackTower AI behaviors during UpdateGameLogic
@@ -145,21 +145,16 @@ namespace TABCoopMod.Patches
                 return true;
 
             // If this is the per-unit Travel/Patrol follow-up loop right after #=zQp2M56bpPd9jmiNkVA==, swallow it
-            if (CommandInterceptor.SuppressIndividualMoveExecution &&
-                (__instance is Travel || __instance is Patrol || __instance is Chase || __instance is UseItem_Grenade))
-            {
+            if (CommandInterceptor.SuppressIndividualMoveExecution && GameBridge.IsGroupRoutedCommand(__instance))
                 return false;
-            }
 
             bool isShift = DXInputState.Current?.IsKeyPressed(DXKeys.Shift, false) ?? false;
+            int cmdId = GameBridge.GetCommandId(__instance);
+            GameBridge.UnpackCommandTarget(__1, out ulong targetEntityId, out PointF targetPos, out SizeF targetSize, out PointF targetOrigin);
 
             // Build and the free mayor-reward buildings (EntityBonusCreation) are both entity-creation
             // commands; they must be replayed as PlaceBuilding so the peer builds the same structure.
-            // Checked by runtime type NAME, never `is Build` (both types are internal / obfuscated).
-            string cmdTypeName = __instance.GetType().Name;
-            bool isBuildingCmd = string.Equals(cmdTypeName, "Build", StringComparison.Ordinal)
-                              || string.Equals(cmdTypeName, "EntityBonusCreation", StringComparison.Ordinal);
-            if (isBuildingCmd)
+            if (GameBridge.IsBuildOrBonusCommand(__instance, out bool isBonus))
             {
                 Type buildingType = GameBridge.GetBuildingTypeFromCommand(__instance);
                 if (buildingType != null)
@@ -170,14 +165,14 @@ namespace TABCoopMod.Patches
                         PlayerId = CommandInterceptor.LocalPlayerId,
                         TargetSimTick = DXGame.Current?.IAIterationInt ?? 0,
                         IsShiftQueued = isShift,
-                        CommandId = __instance.ID,
+                        CommandId = cmdId,
                         BuildingTypeName = buildingType.FullName,
-                        IsBonusBuilding = string.Equals(cmdTypeName, "EntityBonusCreation", StringComparison.Ordinal),
-                        ExecutorEntityIds = new[] { __0.ID },
-                        TargetEntityId = __1.SerEntityRef.IDEntity,
-                        TargetPosition = __1.SerPosition,
-                        TargetSize = __1.SerSize,
-                        TargetOrigin = __1.SerOrigin
+                        IsBonusBuilding = isBonus,
+                        ExecutorEntityIds = new[] { executor.ID },
+                        TargetEntityId = targetEntityId,
+                        TargetPosition = targetPos,
+                        TargetSize = targetSize,
+                        TargetOrigin = targetOrigin
                     };
                     CommandInterceptor.OnLocalCommandCaptured?.Invoke(netBuild);
                     return false;
@@ -190,12 +185,12 @@ namespace TABCoopMod.Patches
                 PlayerId = CommandInterceptor.LocalPlayerId,
                 TargetSimTick = DXGame.Current?.IAIterationInt ?? 0,
                 IsShiftQueued = isShift,
-                CommandId = __instance.ID,
-                ExecutorEntityIds = new[] { __0.ID },
-                TargetEntityId = __1.SerEntityRef.IDEntity,
-                TargetPosition = __1.SerPosition,
-                TargetSize = __1.SerSize,
-                TargetOrigin = __1.SerOrigin
+                CommandId = cmdId,
+                ExecutorEntityIds = new[] { executor.ID },
+                TargetEntityId = targetEntityId,
+                TargetPosition = targetPos,
+                TargetSize = targetSize,
+                TargetOrigin = targetOrigin
             };
 
             CommandInterceptor.OnLocalCommandCaptured?.Invoke(netCmd);
@@ -242,17 +237,20 @@ namespace TABCoopMod.Patches
     }
 
     // 4. Intercept Cancel Current Order (CCommandable.#=zWGiN6nrTv8Dp)
-    [HarmonyPatch(typeof(CCommandable), ObfuscatedSymbols.Method_CCommandable_CancelCurrent)]
+    [HarmonyPatch]
     public static class Patch_CCommandable_CancelCurrent
     {
+        public static MethodBase TargetMethod() =>
+            AccessTools.Method(GameBridge.TypeCCommandable, ObfuscatedSymbols.Method_CCommandable_CancelCurrent);
+
         [HarmonyPrefix]
-        public static bool Prefix(CCommandable __instance)
+        public static bool Prefix(DXComponent __instance)
         {
             if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.InDeterministicContext)
                 return true;
 
-            var ent = ((DXComponent)__instance).Entity as ZXEntity;
-            if (ent == null || ent.Team != ZX.ZXTeamType.Player)
+            var ent = __instance?.Entity;
+            if (ent == null || !GameBridge.IsPlayerEntity(ent))
                 return true;
 
             var netCmd = new NetCommand
@@ -268,17 +266,20 @@ namespace TABCoopMod.Patches
     }
 
     // 5. Intercept Cancel Production Queue Slot (CCommandable.#=z8g7GC7xLrr8j)
-    [HarmonyPatch(typeof(CCommandable), ObfuscatedSymbols.Method_CCommandable_CancelQueueAt)]
+    [HarmonyPatch]
     public static class Patch_CCommandable_CancelQueueSlot
     {
+        public static MethodBase TargetMethod() =>
+            AccessTools.Method(GameBridge.TypeCCommandable, ObfuscatedSymbols.Method_CCommandable_CancelQueueAt, new[] { typeof(int) });
+
         [HarmonyPrefix]
-        public static bool Prefix(CCommandable __instance, int __0)
+        public static bool Prefix(DXComponent __instance, int __0)
         {
             if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.InDeterministicContext)
                 return true;
 
-            var ent = ((DXComponent)__instance).Entity as ZXEntity;
-            if (ent == null || ent.Team != ZX.ZXTeamType.Player)
+            var ent = __instance?.Entity;
+            if (ent == null || !GameBridge.IsPlayerEntity(ent))
                 return true;
 
             var netCmd = new NetCommand

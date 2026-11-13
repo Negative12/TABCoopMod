@@ -46,6 +46,10 @@
       <HintPath><SteamDir>\steamapps\common\They Are Billions\System.ValueTuple.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="SlimDX">
+      <HintPath><SteamDir>\steamapps\common\They Are Billions\SlimDX.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>
