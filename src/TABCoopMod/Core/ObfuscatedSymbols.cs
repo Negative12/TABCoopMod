@@ -86,6 +86,8 @@ namespace TABCoopMod.Core
         public const string Field_LevelSys_BuildAreaCursor     = "#=zZ$S0aaS3NQsgmtkOww==";
         public const string Field_LevelSys_CommandsManager     = "#=z4cHfUtNBoiM8";
         public const string Field_LevelSys_SelectionManager    = "#=zCJSdEwbGvSqa";
+        public const string Field_LevelSys_PauseButton         = "#=z1pCAbqKOgI6v";
+        public const string Field_LevelSys_MiniMap             = "#=zFVczThlAAVvq";
         /// <summary>Private static bool: true during the 6s opening camera zoom animation that overwrites CameraArea each frame.</summary>
         public const string Field_LevelSys_CameraIntroAnim     = "#=zfFXkD0aj1o9gF76ANQ==";
 

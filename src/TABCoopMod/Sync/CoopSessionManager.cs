@@ -747,6 +747,29 @@ namespace TABCoopMod.Sync
             return field != null ? (PointF)field.GetValue(levelSys) : PointF.Empty;
         }
 
+        /// <summary>
+        /// Triggers a tactical ping locally and broadcasts it to all session peers.
+        /// Pings are purely visual UI signals (not deterministic world mutations) so they travel over
+        /// PacketType.TacticalPing immediately without consuming a lockstep command slot.
+        /// </summary>
+        public static void SendTacticalPing(Point cell, string label = null)
+        {
+            byte pid = Transport != null ? Transport.LocalPlayerId : CommandInterceptor.LocalPlayerId;
+            string effectiveLabel = string.IsNullOrEmpty(label) ? $"Player {pid}" : label;
+
+            AllyOverlayRenderer.TriggerMinimapAndGroundPing(pid, cell, effectiveLabel);
+
+            if (!IsSessionActive || !IsInSyncedLevel || Transport == null) return;
+
+            Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.TacticalPing, w =>
+            {
+                w.Write(pid);
+                w.Write(cell.X);
+                w.Write(cell.Y);
+                w.Write(effectiveLabel);
+            });
+        }
+
         private static void OnPacketReceived(byte senderId, PacketType pktType, BinaryReader r)
         {
             switch (pktType)
@@ -900,7 +923,21 @@ namespace TABCoopMod.Sync
                     int cellX = r.ReadInt32();
                     int cellY = r.ReadInt32();
                     string label = r.ReadString();
+                    if (Transport != null && pid == Transport.LocalPlayerId) break;
+
                     AllyOverlayRenderer.TriggerMinimapAndGroundPing(pid, new Point(cellX, cellY), label);
+
+                    // If Host, relay to other clients in 3-player session
+                    if (Transport != null && Transport.IsHost && Transport.ConnectedPeers.Count > 2)
+                    {
+                        Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.TacticalPing, w =>
+                        {
+                            w.Write(pid);
+                            w.Write(cellX);
+                            w.Write(cellY);
+                            w.Write(label);
+                        });
+                    }
                     break;
                 }
             }

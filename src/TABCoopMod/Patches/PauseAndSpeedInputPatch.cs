@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using DXVision;
 using DXVision.GUI;
 using HarmonyLib;
@@ -11,12 +12,14 @@ using TABCoopMod.Sync;
 namespace TABCoopMod.Patches
 {
     /// <summary>
-    /// Intercepts pause (Space) and game-speed (+/-) at the input layer instead of hooking
-    /// DXGame.set_Paused. Hooking the setter broke level loading (the engine calls it during load).
-    /// OnKeyDown/OnKeyUp are only reached from real user input, never from the loader.
+    /// Intercepts pause (Space + top-right HUD button) and game-speed (+/-) at the input layer
+    /// instead of hooking DXGame.set_Paused. Hooking the setter broke level loading (the engine
+    /// calls it during load). OnKeyDown/OnKeyUp and DXButton.Activate are only reached from UI/user input.
     /// </summary>
     public static class PauseAndSpeedInputPatch
     {
+        private static FieldInfo _pauseButtonField;
+
         private static bool CanIntercept()
         {
             if (!CommandInterceptor.IsInterceptionEnabled) return false;
@@ -26,10 +29,28 @@ namespace TABCoopMod.Patches
             return true;
         }
 
+        private static bool IsPauseButton(DXButton button)
+        {
+            if (button == null) return false;
+            object levelSys = GameBridge.LevelSystemInstance;
+            if (levelSys == null) return false;
+            if (_pauseButtonField == null && GameBridge.TypeZXSystemGameLevel != null)
+            {
+                _pauseButtonField = AccessTools.Field(GameBridge.TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_PauseButton);
+            }
+            object pauseBtn = _pauseButtonField?.GetValue(levelSys);
+            return pauseBtn != null && object.ReferenceEquals(button, pauseBtn);
+        }
+
+        private static bool IsCurrentlyPaused()
+        {
+            return LockstepClock.PausedBySession || (DXGame.Current != null && DXGame.Current.Paused);
+        }
+
         [HarmonyPatch]
         public static class Patch_LevelSys_PauseKey
         {
-            public static System.Reflection.MethodBase TargetMethod()
+            public static MethodBase TargetMethod()
             {
                 return AccessTools.Method(GameBridge.TypeZXSystemGameLevel, "OnKeyDown", new[] { typeof(DXKeys) });
             }
@@ -39,8 +60,35 @@ namespace TABCoopMod.Patches
             {
                 if (__0 != DXKeys.Space || !CanIntercept()) return true;
 
-                PauseSyncController.RequestPause(!DXGame.Current.Paused);
+                PauseSyncController.RequestPause(!IsCurrentlyPaused());
                 __result = true;
+                return false;
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_DXButton_PauseActivate
+        {
+            public static MethodBase TargetMethod()
+            {
+                return AccessTools.Method(typeof(DXButton), "Activate", Type.EmptyTypes);
+            }
+
+            [HarmonyPrefix]
+            public static bool Prefix(DXButton __instance)
+            {
+                if (!CanIntercept() || !IsPauseButton(__instance)) return true;
+
+                // Preserve DXButton's native activation debounce while skipping the local Paused toggle.
+                var scene = DXScene.Current;
+                if (scene != null)
+                {
+                    if (__instance.LastTimeActivated + __instance.MinTimeBetweenActivations > scene.VirtualTimeInt)
+                        return false;
+                    __instance.LastTimeActivated = scene.VirtualTimeInt;
+                }
+
+                PauseSyncController.RequestPause(!IsCurrentlyPaused());
                 return false;
             }
         }

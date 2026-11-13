@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Reflection;
 using DXVision;
+using DXVision.GUI;
 using HarmonyLib;
 using TABCoopMod.Core;
+using TABCoopMod.Determinism;
 using TABCoopMod.Networking;
 using TABCoopMod.Sync;
 using ZX;
@@ -17,6 +19,9 @@ namespace TABCoopMod.UI
     /// </summary>
     public static class AllyOverlayRenderer
     {
+        private static FieldInfo _miniMapField;
+        private static MethodInfo _pingCellMethod;
+
         public static Color GetPlayerColor(byte playerId)
         {
             switch (playerId)
@@ -42,6 +47,24 @@ namespace TABCoopMod.UI
                 AccessTools.Method(GameBridge.TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_ShowGroundIndicator)
                     ?.Invoke(levelSys, new object[] { worldPos, ZXCommandTargetIndicatorColor.Green, 1.5f });
 
+                // Pulse minimap ping ring via OMiniMap.#=zvr$ku1Q=
+                try
+                {
+                    if (_miniMapField == null && GameBridge.TypeZXSystemGameLevel != null)
+                        _miniMapField = AccessTools.Field(GameBridge.TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_MiniMap);
+                    object miniMap = _miniMapField?.GetValue(levelSys);
+                    if (miniMap != null)
+                    {
+                        if (_pingCellMethod == null)
+                            _pingCellMethod = AccessTools.Method(miniMap.GetType(), ObfuscatedSymbols.Method_OMiniMap_PingCell);
+                        _pingCellMethod?.Invoke(miniMap, new object[] { cell, label ?? string.Empty, null, 2000 });
+                    }
+                }
+                catch (Exception mmEx)
+                {
+                    ModLogger.Warn($"[AllyOverlayRenderer] Minimap ping failed: {mmEx.Message}");
+                }
+
                 // Show top banner alert
                 GameBridge.ShowTopBanner($"[PING] {label} ({cell.X}, {cell.Y})", color, 2500);
             }
@@ -49,6 +72,44 @@ namespace TABCoopMod.UI
             {
                 ModLogger.Error("[AllyOverlayRenderer] Error in TriggerMinimapAndGroundPing", ex);
             }
+        }
+    }
+
+    /// <summary>
+    /// Captures Alt + Left Click on the world scene in an active co-op session and emits a
+    /// synchronized tactical ping without disturbing local unit selection.
+    /// </summary>
+    [HarmonyPatch]
+    public static class AllyTacticalPingInputPatch
+    {
+        private static FieldInfo _mouseCellField;
+
+        public static MethodBase TargetMethod()
+        {
+            return AccessTools.Method(GameBridge.TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_OnSceneLeftClick);
+        }
+
+        [HarmonyPrefix]
+        public static bool Prefix()
+        {
+            if (!CoopSessionManager.IsSessionActive || !CoopSessionManager.IsInSyncedLevel) return true;
+            if (LockstepClock.LoadingLevel || DXModalScreen.IsInModal) return true;
+
+            var input = DXInputState.Current;
+            if (input == null || !input.IsKeyPressed(DXKeys.Menu)) return true;
+
+            object levelSys = GameBridge.LevelSystemInstance;
+            if (levelSys == null) return true;
+
+            if (_mouseCellField == null && GameBridge.TypeZXSystemGameLevel != null)
+                _mouseCellField = AccessTools.Field(GameBridge.TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_MouseWorldCell);
+            if (_mouseCellField == null) return true;
+
+            Point cell = (Point)_mouseCellField.GetValue(levelSys);
+            if (!DXWorldGrid.ExistCell(cell)) return true;
+
+            CoopSessionManager.SendTacticalPing(cell);
+            return false;
         }
     }
 
