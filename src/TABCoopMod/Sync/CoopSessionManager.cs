@@ -1,8 +1,11 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.IO.Compression;
+using System.Threading;
+using System.Threading.Tasks;
 using DXVision;
 using HarmonyLib;
 using TABCoopMod.Commands;
@@ -115,7 +118,47 @@ namespace TABCoopMod.Sync
             public readonly Dictionary<int, byte[]> Chunks = new Dictionary<int, byte[]>();
         }
 
+        private struct EntityDeltaFix
+        {
+            public ulong Id;
+            public float Dx;
+            public float Dy;
+        }
+
+        private sealed class OutgoingPosSyncBatch
+        {
+            public int Generation;
+            public byte TargetPlayerId;
+            public int Seq;
+            public int Tick;
+            public bool ApplyCorrection;
+            public int TotalCompressedLen;
+            public List<byte[]> Chunks;
+        }
+
+        private sealed class PendingPosAlignApply
+        {
+            public int Generation;
+            public int Tick;
+            public bool ApplyCorrection;
+            public int ComparedCount;
+            public int Drifted001, Drifted01, Drifted1, Drifted5;
+            public float MaxDelta;
+            public float RmsDelta;
+            public ulong MaxDeltaEntityId;
+            public bool ExceededThreshold;
+            public List<EntityDeltaFix> Deltas;
+        }
+
         public static readonly Dictionary<byte, AllyVisualState> AllyStates = new Dictionary<byte, AllyVisualState>();
+        private static readonly StateHasher.IncrementalEpochHasher _epochHasher = new StateHasher.IncrementalEpochHasher();
+        private static readonly ConcurrentQueue<OutgoingPosSyncBatch> _outgoingPosSyncQueue =
+            new ConcurrentQueue<OutgoingPosSyncBatch>();
+        private static readonly ConcurrentQueue<PendingPosAlignApply> _incomingPosAlignQueue =
+            new ConcurrentQueue<PendingPosAlignApply>();
+        private static volatile int _asyncGeneration;
+        private static int _posSyncBuildInFlight;
+
         private static double _lastCursorBroadcastTicks;
         private static int _lastCheckedSimTick = -1;
         private static bool _firstChecksumPosDumped;
@@ -129,6 +172,22 @@ namespace TABCoopMod.Sync
         private static readonly Queue<int> _tickPosCacheOrder = new Queue<int>();
         private static readonly Dictionary<int, PosSyncReceiveBuffer> _posSyncIncoming =
             new Dictionary<int, PosSyncReceiveBuffer>();
+
+        private static void ResetSyncTrackingState()
+        {
+            _asyncGeneration++;
+            Interlocked.Exchange(ref _posSyncBuildInFlight, 0);
+            _lastCheckedSimTick = -1;
+            _consecutiveProjOnlyMismatch = 0;
+            _epochHasher.Reset();
+            _hostTickDigests.Clear();
+            _clientTickDigests.Clear();
+            _tickPosCache.Clear();
+            _tickPosCacheOrder.Clear();
+            _posSyncIncoming.Clear();
+            while (_outgoingPosSyncQueue.TryDequeue(out _)) { }
+            while (_incomingPosAlignQueue.TryDequeue(out _)) { }
+        }
 
         public static void StartHostSession(bool useLoopback)
         {
@@ -169,13 +228,7 @@ namespace TABCoopMod.Sync
             CommandInterceptor.InQueueAutoAdvance = false;
             CommandExecutor.IsReplayingCommand = false;
             IsInSyncedLevel = false;
-            _lastCheckedSimTick = -1;
-            _consecutiveProjOnlyMismatch = 0;
-            _hostTickDigests.Clear();
-            _clientTickDigests.Clear();
-            _tickPosCache.Clear();
-            _tickPosCacheOrder.Clear();
-            _posSyncIncoming.Clear();
+            ResetSyncTrackingState();
             LockstepClock.DisableDeterministicSandbox();
             AllyStates.Clear();
             _localOutgoingQueue.Clear();
@@ -395,13 +448,7 @@ namespace TABCoopMod.Sync
             _awaitingClientAckStartTicks = -1.0;
             _clientSnapshotAckReceived = false;
 
-            _hostTickDigests.Clear();
-            _clientTickDigests.Clear();
-            _tickPosCache.Clear();
-            _tickPosCacheOrder.Clear();
-            _posSyncIncoming.Clear();
-            _consecutiveProjOnlyMismatch = 0;
-            _lastCheckedSimTick = -1;
+            ResetSyncTrackingState();
 
             EnterSyncedLevel();
 
@@ -622,6 +669,8 @@ namespace TABCoopMod.Sync
             if (!IsInSyncedLevel || GameBridge.CurrentLevelState == null)
                 return;
 
+            DrainAsyncQueues();
+
             // 1. Flush Client outgoing commands to Host
             if (!Transport.IsHost)
             {
@@ -732,53 +781,71 @@ namespace TABCoopMod.Sync
                 });
             }
 
-            // 4. At initial SessionStart frame and every 60 SimTicks (2 seconds), compute and verify StateHash
+            // 4. Verify StateHash: 1-time initial baseline on session entry, then amortized 1/60th of
+            //    entities per SimTick (zero 60-tick spike, zero work while paused).
             int curTick = DXGame.Current?.IAIterationInt ?? 0;
-            if (curTick > 0 && (curTick % 60 == 0 || _lastCheckedSimTick < 0) && curTick != _lastCheckedSimTick)
+            if (curTick > 0)
             {
-                _lastCheckedSimTick = curTick;
+                bool hasDigest = false;
+                StateHasher.LevelStateSnapshotDigest digest = default;
+                List<StateHasher.EntityPosSample> dynamicPositions = null;
 
-                // Prune stale digests (keep ~20s of history) so dictionaries cannot grow unbounded.
-                if (Transport.IsHost)
+                if (_lastCheckedSimTick < 0)
                 {
-                    if (_hostTickDigests.Count > 0)
-                    {
-                        var stale = new List<int>();
-                        foreach (var k in _hostTickDigests.Keys)
-                            if (k < curTick - 600) stale.Add(k);
-                        foreach (var k in stale) _hostTickDigests.Remove(k);
-                    }
-                    if (_clientTickDigests.Count > 0)
-                    {
-                        var stale = new List<int>();
-                        foreach (var k in _clientTickDigests.Keys)
-                            if (k < curTick - 600) stale.Add(k);
-                        foreach (var k in stale) _clientTickDigests.Remove(k);
-                    }
+                    dynamicPositions = new List<StateHasher.EntityPosSample>(2048);
+                    digest = StateHasher.ComputeDigest(dynamicPositions);
+                    _epochHasher.Reset();
+                    hasDigest = true;
+                }
+                else if (_epochHasher.Step(curTick, out digest, out dynamicPositions))
+                {
+                    hasDigest = true;
                 }
 
-                var dynamicPositions = new List<StateHasher.EntityPosSample>(2048);
-                var digest = StateHasher.ComputeDigest(dynamicPositions);
-                CacheTickPositions(digest.SimTick, dynamicPositions);
-
-                string digestSummary =
-                    $"Pos={digest.PosChecksum:X16} Coarse={digest.CoarsePosChecksum:X16} Life={digest.LifeChecksum:X16} " +
-                    $"Aggro={digest.ZombieAggroChecksum:X16}({digest.AggroZombieCount}) Proj={digest.ProjectileChecksum:X16} " +
-                    $"Prod={digest.ProductionChecksum:X16} Resv={digest.ReservationChecksum:X16} " +
-                    $"(entities={digest.EntityCount} proj={digest.ProjectileCount} queued={digest.QueuedOrderCount} " +
-                    $"res={digest.Gold}/{digest.Wood}/{digest.Stone}/{digest.Iron}/{digest.Oil} time={digest.GameTimeMs})";
-
-                if (Transport.IsHost)
+                if (hasDigest)
                 {
-                    _hostTickDigests[digest.SimTick] = new TickDigestRecord { Digest = digest, Summary = digestSummary };
-                    VerifyTickChecksum(digest.SimTick);
-                }
-                else
-                {
-                    Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.StateChecksumReport, w =>
+                    _lastCheckedSimTick = digest.SimTick;
+
+                    // Prune stale digests (keep ~20s of history) so dictionaries cannot grow unbounded.
+                    if (Transport.IsHost)
                     {
-                        WriteDigestReport(w, in digest, digestSummary);
-                    });
+                        if (_hostTickDigests.Count > 0)
+                        {
+                            var stale = new List<int>();
+                            foreach (var k in _hostTickDigests.Keys)
+                                if (k < curTick - 600) stale.Add(k);
+                            foreach (var k in stale) _hostTickDigests.Remove(k);
+                        }
+                        if (_clientTickDigests.Count > 0)
+                        {
+                            var stale = new List<int>();
+                            foreach (var k in _clientTickDigests.Keys)
+                                if (k < curTick - 600) stale.Add(k);
+                            foreach (var k in stale) _clientTickDigests.Remove(k);
+                        }
+                    }
+
+                    CacheTickPositions(digest.SimTick, dynamicPositions);
+
+                    string digestSummary =
+                        $"Pos={digest.PosChecksum:X16} Coarse={digest.CoarsePosChecksum:X16} Life={digest.LifeChecksum:X16} " +
+                        $"Aggro={digest.ZombieAggroChecksum:X16}({digest.AggroZombieCount}) Proj={digest.ProjectileChecksum:X16} " +
+                        $"Prod={digest.ProductionChecksum:X16} Resv={digest.ReservationChecksum:X16} " +
+                        $"(entities={digest.EntityCount} proj={digest.ProjectileCount} queued={digest.QueuedOrderCount} " +
+                        $"res={digest.Gold}/{digest.Wood}/{digest.Stone}/{digest.Iron}/{digest.Oil} time={digest.GameTimeMs})";
+
+                    if (Transport.IsHost)
+                    {
+                        _hostTickDigests[digest.SimTick] = new TickDigestRecord { Digest = digest, Summary = digestSummary };
+                        VerifyTickChecksum(digest.SimTick);
+                    }
+                    else
+                    {
+                        Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.StateChecksumReport, w =>
+                        {
+                            WriteDigestReport(w, in digest, digestSummary);
+                        });
+                    }
                 }
             }
         }
@@ -860,13 +927,7 @@ namespace TABCoopMod.Sync
                     int startTick = r.ReadInt32();
                     int seed = r.ReadInt32();
                     long idCounter = r.ReadInt64();
-                    _hostTickDigests.Clear();
-                    _clientTickDigests.Clear();
-                    _tickPosCache.Clear();
-                    _tickPosCacheOrder.Clear();
-                    _posSyncIncoming.Clear();
-                    _lastCheckedSimTick = -1;
-                    _consecutiveProjOnlyMismatch = 0;
+                    ResetSyncTrackingState();
                     EnterSyncedLevel();
                     ModLogger.Info($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
                     break;
@@ -1061,6 +1122,11 @@ namespace TABCoopMod.Sync
             w.Write(d.HardHash);
             w.Write(d.FullHash);
             w.Write(summary ?? string.Empty);
+
+            int bucketLen = d.PosBuckets?.Length ?? 0;
+            w.Write((ushort)bucketLen);
+            for (int i = 0; i < bucketLen; i++)
+                w.Write(d.PosBuckets[i]);
         }
 
         private static TickDigestRecord ReadDigestReport(BinaryReader r)
@@ -1089,7 +1155,37 @@ namespace TABCoopMod.Sync
                 FullHash = r.ReadUInt64(),
             };
             string summary = r.BaseStream.Position < r.BaseStream.Length ? r.ReadString() : string.Empty;
+            if (r.BaseStream.Position + 2 <= r.BaseStream.Length)
+            {
+                ushort bucketLen = r.ReadUInt16();
+                if (bucketLen > 0 && r.BaseStream.Position + bucketLen * 8L <= r.BaseStream.Length)
+                {
+                    d.PosBuckets = new ulong[bucketLen];
+                    for (int i = 0; i < bucketLen; i++)
+                        d.PosBuckets[i] = r.ReadUInt64();
+                }
+            }
             return new TickDigestRecord { Digest = d, Summary = summary };
+        }
+
+        private static ushort ComputeDiffBucketMask(
+            in StateHasher.LevelStateSnapshotDigest host,
+            in StateHasher.LevelStateSnapshotDigest client)
+        {
+            if (host.PosBuckets == null || client.PosBuckets == null ||
+                host.PosBuckets.Length != StateHasher.BucketCount ||
+                client.PosBuckets.Length != StateHasher.BucketCount)
+            {
+                return 0xFFFF;
+            }
+
+            ushort mask = 0;
+            for (int i = 0; i < StateHasher.BucketCount; i++)
+            {
+                if (host.PosBuckets[i] != client.PosBuckets[i])
+                    mask |= (ushort)(1 << i);
+            }
+            return mask;
         }
 
         private static void VerifyTickChecksum(int tick)
@@ -1144,7 +1240,7 @@ namespace TABCoopMod.Sync
                         _desyncDumped = true;
                         DumpHostEntitiesOnDesync(tick);
                     }
-                    TrySendPosDriftSync(senderId, tick, applyCorrection: false);
+                    TrySendPosDriftSync(senderId, tick, applyCorrection: false, bucketMask: ComputeDiffBucketMask(in host, in client));
                     GameBridge.ShowTopBanner("State Drift Detected (see log)", Color.Orange, 2500);
 
                     if (EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport && (now - _lastAutoResyncTicks >= AutoResyncCooldownMs))
@@ -1165,7 +1261,7 @@ namespace TABCoopMod.Sync
                     if (posDiff && (now - _lastPosSyncSentTicks >= AsyncPosAlignCooldownMs))
                     {
                         _lastPosSyncSentTicks = now;
-                        TrySendPosDriftSync(senderId, tick, applyCorrection: EnableAsyncPosAlign);
+                        TrySendPosDriftSync(senderId, tick, applyCorrection: EnableAsyncPosAlign, bucketMask: ComputeDiffBucketMask(in host, in client));
                     }
                     continue;
                 }
@@ -1181,7 +1277,7 @@ namespace TABCoopMod.Sync
                     if (now - _lastPosSyncSentTicks >= 2000.0)
                     {
                         _lastPosSyncSentTicks = now;
-                        TrySendPosDriftSync(senderId, tick, applyCorrection: false);
+                        TrySendPosDriftSync(senderId, tick, applyCorrection: false, bucketMask: ComputeDiffBucketMask(in host, in client));
                     }
                     if (EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport && (now - _lastAutoResyncTicks >= AutoResyncCooldownMs))
                     {
@@ -1195,7 +1291,7 @@ namespace TABCoopMod.Sync
                     if (now - _lastPosSyncSentTicks >= AsyncPosAlignCooldownMs)
                     {
                         _lastPosSyncSentTicks = now;
-                        TrySendPosDriftSync(senderId, tick, applyCorrection: EnableAsyncPosAlign);
+                        TrySendPosDriftSync(senderId, tick, applyCorrection: EnableAsyncPosAlign, bucketMask: ComputeDiffBucketMask(in host, in client));
                     }
                 }
             }
@@ -1206,60 +1302,194 @@ namespace TABCoopMod.Sync
                 _clientTickDigests.Remove(tick);
         }
 
-        private static void TrySendPosDriftSync(byte targetPlayerId, int tick, bool applyCorrection)
+        private static void DrainAsyncQueues()
+        {
+            int curGen = _asyncGeneration;
+
+            while (_outgoingPosSyncQueue.TryDequeue(out var batch))
+            {
+                if (batch.Generation != curGen || Transport == null) continue;
+                try
+                {
+                    int totalChunks = batch.Chunks.Count;
+                    for (int idx = 0; idx < totalChunks; idx++)
+                    {
+                        byte[] chunk = batch.Chunks[idx];
+                        int len = chunk.Length;
+                        Transport.SendToPeer(batch.TargetPlayerId, SendChannel.ReliableOrdered, PacketType.PosDriftSyncChunk, w =>
+                        {
+                            w.Write(batch.Seq);
+                            w.Write(batch.Tick);
+                            w.Write(batch.ApplyCorrection);
+                            w.Write(totalChunks);
+                            w.Write(idx);
+                            w.Write(batch.TotalCompressedLen);
+                            w.Write(len);
+                            w.Write(chunk, 0, len);
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[AsyncPosAlign] Drain outgoing failed: {ex.Message}");
+                }
+            }
+
+            while (_incomingPosAlignQueue.TryDequeue(out var item))
+            {
+                if (item.Generation != curGen || Transport == null) continue;
+
+                var game = DXGame.Current;
+                int nCells = DXWorldGrid.NCells;
+                float maxCoord = nCells > 1 ? nCells - 0.5f : 10000f;
+
+                int appliedCount = 0;
+                if (item.ApplyCorrection && item.Deltas != null && game != null)
+                {
+                    for (int i = 0; i < item.Deltas.Count; i++)
+                    {
+                        var d = item.Deltas[i];
+                        DXEntity e = game.GetEntityByID(d.Id);
+                        if (e == null || e.Disposed || e.PhysicalType != DXBodyType.Dynamic) continue;
+
+                        float nx = e.Position.X + d.Dx;
+                        float ny = e.Position.Y + d.Dy;
+                        if (float.IsNaN(nx) || float.IsInfinity(nx) || float.IsNaN(ny) || float.IsInfinity(ny)) continue;
+
+                        nx = Math.Max(0.5f, Math.Min(maxCoord, nx));
+                        ny = Math.Max(0.5f, Math.Min(maxCoord, ny));
+                        var newPos = new PointF(nx, ny);
+                        e.LastPosition = new PointF(e.LastPosition.X + d.Dx, e.LastPosition.Y + d.Dy);
+                        e.Position = newPos;
+                        var body = e.Body;
+                        if (body != null && body.Handle != IntPtr.Zero)
+                        {
+                            body.LastPositionComputed = new PointF(body.LastPositionComputed.X + d.Dx, body.LastPositionComputed.Y + d.Dy);
+                            body.PositionComputed = newPos;
+                            body.PhysicPosition = newPos;
+                        }
+                        appliedCount++;
+                    }
+                }
+
+                DXEntity maxEnt = item.MaxDeltaEntityId != 0 ? game?.GetEntityByID(item.MaxDeltaEntityId) : null;
+                string maxType = maxEnt != null ? maxEnt.GetType().Name : "None";
+
+                ModLogger.Info(
+                    $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}({appliedCount}/{item.ComparedCount}) " +
+                    $"Drifted(>0.001={item.Drifted001}, >0.01={item.Drifted01}, >0.1={item.Drifted1}, >0.5={item.Drifted5}) " +
+                    $"MaxDelta={item.MaxDelta:F4} Rms={item.RmsDelta:F4} MaxType={maxType} Exceeded={item.ExceededThreshold}");
+
+                Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.PosDriftStatsReport, w =>
+                {
+                    w.Write(item.Tick);
+                    w.Write(item.ApplyCorrection);
+                    w.Write(appliedCount);
+                    w.Write(item.ComparedCount);
+                    w.Write(item.Drifted001);
+                    w.Write(item.Drifted01);
+                    w.Write(item.Drifted1);
+                    w.Write(item.Drifted5);
+                    w.Write(item.MaxDelta);
+                    w.Write(item.RmsDelta);
+                    w.Write(item.ExceededThreshold);
+                    w.Write(maxType ?? "Unknown");
+                });
+            }
+        }
+
+        private static void TrySendPosDriftSync(byte targetPlayerId, int tick, bool applyCorrection, ushort bucketMask)
         {
             if (Transport == null || !Transport.IsHost) return;
             if (!_tickPosCache.TryGetValue(tick, out var samples) || samples == null || samples.Count == 0)
                 return;
 
-            try
+            ushort effectiveMask = bucketMask == 0 ? (ushort)0xFFFF : bucketMask;
+            int gen = _asyncGeneration;
+            if (Interlocked.CompareExchange(ref _posSyncBuildInFlight, 1, 0) != 0)
+                return;
+
+            List<StateHasher.EntityPosSample> filtered;
+            if (effectiveMask == 0xFFFF)
             {
-                byte[] compressed;
-                using (var rawMs = new MemoryStream(samples.Count * 16 + 8))
-                using (var bw = new BinaryWriter(rawMs))
+                filtered = new List<StateHasher.EntityPosSample>(samples);
+            }
+            else
+            {
+                filtered = new List<StateHasher.EntityPosSample>(samples.Count / 4 + 16);
+                for (int i = 0; i < samples.Count; i++)
                 {
-                    bw.Write(samples.Count);
-                    for (int i = 0; i < samples.Count; i++)
-                    {
-                        bw.Write(samples[i].Id);
-                        bw.Write(samples[i].X);
-                        bw.Write(samples[i].Y);
-                    }
-                    bw.Flush();
-                    byte[] rawBytes = rawMs.ToArray();
-                    using (var outMs = new MemoryStream(rawBytes.Length / 2))
-                    {
-                        using (var ds = new DeflateStream(outMs, CompressionLevel.Fastest, leaveOpen: true))
-                            ds.Write(rawBytes, 0, rawBytes.Length);
-                        compressed = outMs.ToArray();
-                    }
+                    var s = samples[i];
+                    if ((effectiveMask & (1 << (int)(s.Id & 0xFUL))) != 0)
+                        filtered.Add(s);
                 }
+                if (filtered.Count == 0)
+                    filtered = new List<StateHasher.EntityPosSample>(samples);
+            }
 
-                int seq = ++_posSyncSeq;
-                int totalLen = compressed.Length;
-                int totalChunks = Math.Max(1, (totalLen + ChunkSizeBytes - 1) / ChunkSizeBytes);
-
-                for (int idx = 0; idx < totalChunks; idx++)
+            int seq = ++_posSyncSeq;
+            Task.Run(() =>
+            {
+                try
                 {
-                    int offset = idx * ChunkSizeBytes;
-                    int len = Math.Min(ChunkSizeBytes, totalLen - offset);
-                    Transport.SendToPeer(targetPlayerId, SendChannel.ReliableOrdered, PacketType.PosDriftSyncChunk, w =>
+                    if (gen != _asyncGeneration) return;
+
+                    byte[] compressed;
+                    using (var rawMs = new MemoryStream(filtered.Count * 16 + 8))
+                    using (var bw = new BinaryWriter(rawMs))
                     {
-                        w.Write(seq);
-                        w.Write(tick);
-                        w.Write(applyCorrection);
-                        w.Write(totalChunks);
-                        w.Write(idx);
-                        w.Write(totalLen);
-                        w.Write(len);
-                        w.Write(compressed, offset, len);
+                        bw.Write(filtered.Count);
+                        for (int i = 0; i < filtered.Count; i++)
+                        {
+                            bw.Write(filtered[i].Id);
+                            bw.Write(filtered[i].X);
+                            bw.Write(filtered[i].Y);
+                        }
+                        bw.Flush();
+                        byte[] rawBytes = rawMs.ToArray();
+                        using (var outMs = new MemoryStream(Math.Max(64, rawBytes.Length / 2)))
+                        {
+                            using (var ds = new DeflateStream(outMs, CompressionLevel.Fastest, leaveOpen: true))
+                                ds.Write(rawBytes, 0, rawBytes.Length);
+                            compressed = outMs.ToArray();
+                        }
+                    }
+
+                    if (gen != _asyncGeneration) return;
+
+                    int totalLen = compressed.Length;
+                    int totalChunks = Math.Max(1, (totalLen + ChunkSizeBytes - 1) / ChunkSizeBytes);
+                    var chunks = new List<byte[]>(totalChunks);
+                    for (int idx = 0; idx < totalChunks; idx++)
+                    {
+                        int offset = idx * ChunkSizeBytes;
+                        int len = Math.Min(ChunkSizeBytes, totalLen - offset);
+                        var chunk = new byte[len];
+                        Buffer.BlockCopy(compressed, offset, chunk, 0, len);
+                        chunks.Add(chunk);
+                    }
+
+                    _outgoingPosSyncQueue.Enqueue(new OutgoingPosSyncBatch
+                    {
+                        Generation = gen,
+                        TargetPlayerId = targetPlayerId,
+                        Seq = seq,
+                        Tick = tick,
+                        ApplyCorrection = applyCorrection,
+                        TotalCompressedLen = totalLen,
+                        Chunks = chunks
                     });
                 }
-            }
-            catch (Exception ex)
-            {
-                ModLogger.Warn($"[AsyncPosAlign] TrySendPosDriftSync failed: {ex.Message}");
-            }
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[AsyncPosAlign] Async compress failed: {ex.Message}");
+                }
+                finally
+                {
+                    if (gen == _asyncGeneration)
+                        Interlocked.Exchange(ref _posSyncBuildInFlight, 0);
+                }
+            });
         }
 
         private static void OnPosDriftSyncChunkReceived(BinaryReader r)
@@ -1306,113 +1536,103 @@ namespace TABCoopMod.Sync
                 return;
             }
 
-            var clientMap = new Dictionary<ulong, PointF>(clientSamples.Count);
-            for (int i = 0; i < clientSamples.Count; i++)
-                clientMap[clientSamples[i].Id] = new PointF(clientSamples[i].X, clientSamples[i].Y);
+            var clientSnapshot = clientSamples.ToArray();
+            int gen = _asyncGeneration;
+            int simTick = buf.SimTick;
+            bool apply = buf.ApplyCorrection;
 
-            int count;
-            var hostSamples = new List<StateHasher.EntityPosSample>(clientSamples.Count);
-            using (var inMs = new MemoryStream(compressed))
-            using (var ds = new DeflateStream(inMs, CompressionMode.Decompress))
-            using (var br = new BinaryReader(ds))
+            Task.Run(() =>
             {
-                count = br.ReadInt32();
-                for (int i = 0; i < count; i++)
+                try
                 {
-                    hostSamples.Add(new StateHasher.EntityPosSample
+                    if (gen != _asyncGeneration) return;
+
+                    var clientMap = new Dictionary<ulong, PointF>(clientSnapshot.Length);
+                    for (int i = 0; i < clientSnapshot.Length; i++)
+                        clientMap[clientSnapshot[i].Id] = new PointF(clientSnapshot[i].X, clientSnapshot[i].Y);
+
+                    int count;
+                    List<StateHasher.EntityPosSample> hostSamples;
+                    using (var inMs = new MemoryStream(compressed))
+                    using (var ds = new DeflateStream(inMs, CompressionMode.Decompress))
+                    using (var br = new BinaryReader(ds))
                     {
-                        Id = br.ReadUInt64(),
-                        X = br.ReadSingle(),
-                        Y = br.ReadSingle()
-                    });
-                }
-            }
-
-            int comparedCount = 0;
-            int drifted001 = 0, drifted01 = 0, drifted1 = 0, drifted5 = 0;
-            int appliedCount = 0;
-            float maxDelta = 0f;
-            double sumSq = 0.0;
-            string maxType = "None";
-
-            var game = DXGame.Current;
-            int nCells = DXWorldGrid.NCells;
-            float maxCoord = nCells > 1 ? nCells - 0.5f : 10000f;
-
-            for (int i = 0; i < hostSamples.Count; i++)
-            {
-                var hs = hostSamples[i];
-                if (!clientMap.TryGetValue(hs.Id, out PointF cp)) continue;
-                comparedCount++;
-
-                float dx = hs.X - cp.X;
-                float dy = hs.Y - cp.Y;
-                float dist = (float)Math.Sqrt(dx * dx + dy * dy);
-                if (dist > 0.001f)
-                {
-                    drifted001++;
-                    sumSq += dist * dist;
-                }
-                if (dist > 0.01f) drifted01++;
-                if (dist > 0.1f) drifted1++;
-                if (dist > 0.5f) drifted5++;
-
-                if (dist > maxDelta)
-                {
-                    maxDelta = dist;
-                    DXEntity maxEnt = game?.GetEntityByID(hs.Id);
-                    maxType = maxEnt != null ? maxEnt.GetType().Name : "Unknown";
-                }
-
-                if (buf.ApplyCorrection && dist > 0.0005f && dist <= MaxAsyncTeleportCells && game != null)
-                {
-                    DXEntity e = game.GetEntityByID(hs.Id);
-                    if (e != null && !e.Disposed && e.PhysicalType == DXBodyType.Dynamic)
-                    {
-                        float nx = e.Position.X + dx;
-                        float ny = e.Position.Y + dy;
-                        if (!float.IsNaN(nx) && !float.IsInfinity(nx) && !float.IsNaN(ny) && !float.IsInfinity(ny))
+                        count = br.ReadInt32();
+                        hostSamples = new List<StateHasher.EntityPosSample>(count);
+                        for (int i = 0; i < count; i++)
                         {
-                            nx = Math.Max(0.5f, Math.Min(maxCoord, nx));
-                            ny = Math.Max(0.5f, Math.Min(maxCoord, ny));
-                            var newPos = new PointF(nx, ny);
-                            e.LastPosition = new PointF(e.LastPosition.X + dx, e.LastPosition.Y + dy);
-                            e.Position = newPos;
-                            var body = e.Body;
-                            if (body != null && body.Handle != IntPtr.Zero)
+                            hostSamples.Add(new StateHasher.EntityPosSample
                             {
-                                body.LastPositionComputed = new PointF(body.LastPositionComputed.X + dx, body.LastPositionComputed.Y + dy);
-                                body.PositionComputed = newPos;
-                                body.PhysicPosition = newPos;
-                            }
-                            appliedCount++;
+                                Id = br.ReadUInt64(),
+                                X = br.ReadSingle(),
+                                Y = br.ReadSingle()
+                            });
                         }
                     }
+
+                    if (gen != _asyncGeneration) return;
+
+                    int comparedCount = 0;
+                    int drifted001 = 0, drifted01 = 0, drifted1 = 0, drifted5 = 0;
+                    float maxDelta = 0f;
+                    ulong maxDeltaId = 0;
+                    double sumSq = 0.0;
+                    List<EntityDeltaFix> deltas = apply ? new List<EntityDeltaFix>(64) : null;
+
+                    for (int i = 0; i < hostSamples.Count; i++)
+                    {
+                        var hs = hostSamples[i];
+                        if (!clientMap.TryGetValue(hs.Id, out PointF cp)) continue;
+                        comparedCount++;
+
+                        float dx = hs.X - cp.X;
+                        float dy = hs.Y - cp.Y;
+                        float dist = (float)Math.Sqrt(dx * dx + dy * dy);
+                        if (dist > 0.001f)
+                        {
+                            drifted001++;
+                            sumSq += dist * dist;
+                        }
+                        if (dist > 0.01f) drifted01++;
+                        if (dist > 0.1f) drifted1++;
+                        if (dist > 0.5f) drifted5++;
+
+                        if (dist > maxDelta)
+                        {
+                            maxDelta = dist;
+                            maxDeltaId = hs.Id;
+                        }
+
+                        if (apply && dist > 0.0005f && dist <= MaxAsyncTeleportCells)
+                            deltas.Add(new EntityDeltaFix { Id = hs.Id, Dx = dx, Dy = dy });
+                    }
+
+                    float rmsDelta = drifted001 > 0 ? (float)Math.Sqrt(sumSq / drifted001) : 0f;
+                    bool exceededThreshold = maxDelta >= MaxAsyncTeleportCells;
+
+                    if (gen != _asyncGeneration) return;
+
+                    _incomingPosAlignQueue.Enqueue(new PendingPosAlignApply
+                    {
+                        Generation = gen,
+                        Tick = simTick,
+                        ApplyCorrection = apply,
+                        ComparedCount = comparedCount,
+                        Drifted001 = drifted001,
+                        Drifted01 = drifted01,
+                        Drifted1 = drifted1,
+                        Drifted5 = drifted5,
+                        MaxDelta = maxDelta,
+                        RmsDelta = rmsDelta,
+                        MaxDeltaEntityId = maxDeltaId,
+                        ExceededThreshold = exceededThreshold,
+                        Deltas = deltas
+                    });
                 }
-            }
-
-            float rmsDelta = drifted001 > 0 ? (float)Math.Sqrt(sumSq / drifted001) : 0f;
-            bool exceededThreshold = maxDelta >= MaxAsyncTeleportCells;
-
-            ModLogger.Info(
-                $"[AsyncPosAlign] Tick={buf.SimTick} Apply={buf.ApplyCorrection}({appliedCount}/{comparedCount}) " +
-                $"Drifted(>0.001={drifted001}, >0.01={drifted01}, >0.1={drifted1}, >0.5={drifted5}) " +
-                $"MaxDelta={maxDelta:F4} Rms={rmsDelta:F4} MaxType={maxType} Exceeded={exceededThreshold}");
-
-            Transport?.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.PosDriftStatsReport, w =>
-            {
-                w.Write(buf.SimTick);
-                w.Write(buf.ApplyCorrection);
-                w.Write(appliedCount);
-                w.Write(comparedCount);
-                w.Write(drifted001);
-                w.Write(drifted01);
-                w.Write(drifted1);
-                w.Write(drifted5);
-                w.Write(maxDelta);
-                w.Write(rmsDelta);
-                w.Write(exceededThreshold);
-                w.Write(maxType ?? "Unknown");
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[AsyncPosAlign] Async decompress/scan failed: {ex.Message}");
+                }
             });
         }
 

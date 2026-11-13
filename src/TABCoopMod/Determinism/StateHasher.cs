@@ -19,6 +19,8 @@ namespace TABCoopMod.Determinism
     public static class StateHasher
     {
         public const int HashVersion = 3;
+        public const int BucketCount = 16;
+        public const int EpochTicks = 60;
 
         private static PropertyInfo[] _reservationProps;
         private static Type _reservationStateType;
@@ -39,6 +41,7 @@ namespace TABCoopMod.Determinism
             public int EntityCount;
             public long PosChecksum, CoarsePosChecksum, LifeChecksum, ZombieAggroChecksum, ProjectileChecksum, ProductionChecksum, ReservationChecksum;
             public int ProjectileCount, QueuedOrderCount, AggroZombieCount;
+            public ulong[] PosBuckets;
             public ulong HardHash;
             public ulong FullHash;
 
@@ -49,14 +52,184 @@ namespace TABCoopMod.Determinism
             }
         }
 
+        private sealed class DigestAccumulators
+        {
+            public int EntityCount;
+            public int ProjectileCount;
+            public int QueuedOrderCount;
+            public int AggroZombieCount;
+            public long PosChecksum;
+            public long CoarsePosChecksum;
+            public long LifeChecksum;
+            public long ZombieAggroChecksum;
+            public long ProjectileChecksum;
+            public long ProductionChecksum;
+            public ulong[] PosBuckets;
+            public List<EntityPosSample> DynamicPositions;
+
+            public void Reset(bool allocateBuckets, List<EntityPosSample> dynamicOut)
+            {
+                EntityCount = 0;
+                ProjectileCount = 0;
+                QueuedOrderCount = 0;
+                AggroZombieCount = 0;
+                PosChecksum = 0;
+                CoarsePosChecksum = 0;
+                LifeChecksum = 0;
+                ZombieAggroChecksum = 0;
+                ProjectileChecksum = 0;
+                ProductionChecksum = 0;
+                PosBuckets = allocateBuckets ? new ulong[BucketCount] : null;
+                DynamicPositions = dynamicOut;
+            }
+        }
+
+        /// <summary>
+        /// Splits the per-epoch entity hashing, reflection inspection and position sampling evenly
+        /// across 60 consecutive simulation ticks (1/60 of entities per tick by ID % 60), so Host
+        /// and Client eliminate periodic 60-tick CPU spikes while remaining lockstep-identical.
+        /// </summary>
+        public sealed class IncrementalEpochHasher
+        {
+            private readonly DigestAccumulators _acc = new DigestAccumulators();
+            private int _lastSteppedTick = -1;
+            private bool _inEpoch;
+
+            public void Reset()
+            {
+                _inEpoch = false;
+                _lastSteppedTick = -1;
+                _acc.Reset(allocateBuckets: false, dynamicOut: null);
+            }
+
+            public bool Step(int curTick, out LevelStateSnapshotDigest digest, out List<EntityPosSample> dynamicPositions)
+            {
+                digest = default;
+                dynamicPositions = null;
+
+                var game = DXGame.Current;
+                object ls = GameBridge.CurrentLevelState;
+                if (game == null || ls == null || curTick <= 0 || curTick == _lastSteppedTick)
+                    return false;
+
+                if (_inEpoch && curTick != _lastSteppedTick + 1)
+                    _inEpoch = false;
+
+                _lastSteppedTick = curTick;
+                int slot = (curTick - 1) % EpochTicks;
+
+                if (!_inEpoch)
+                {
+                    if (slot != 0)
+                        return false;
+                    _acc.Reset(allocateBuckets: true, dynamicOut: new List<EntityPosSample>(2048));
+                    _inEpoch = true;
+                }
+
+                if (game.Entities != null)
+                {
+                    ulong targetSlot = (ulong)slot;
+                    foreach (var entity in game.Entities)
+                    {
+                        if (entity == null || entity.Disposed)
+                            continue;
+                        if ((entity.ID & 0x8000000000000000UL) != 0)
+                            continue;
+                        if ((entity.ID % (ulong)EpochTicks) != targetSlot)
+                            continue;
+                        AccumulateEntity(entity, _acc);
+                    }
+                }
+
+                if (slot != EpochTicks - 1)
+                    return false;
+
+                _inEpoch = false;
+                digest = FinalizeDigest(game, ls, curTick, _acc);
+                dynamicPositions = _acc.DynamicPositions;
+                _acc.DynamicPositions = null;
+                _acc.PosBuckets = null;
+                return true;
+            }
+        }
+
         public static LevelStateSnapshotDigest ComputeDigest(List<EntityPosSample> outDynamicPositions = null)
         {
-            var digest = new LevelStateSnapshotDigest();
             var game = DXGame.Current;
             object ls = GameBridge.CurrentLevelState;
             if (game == null || ls == null)
-                return digest;
+                return new LevelStateSnapshotDigest();
 
+            var acc = new DigestAccumulators();
+            acc.Reset(allocateBuckets: true, dynamicOut: outDynamicPositions);
+
+            if (game.Entities != null)
+            {
+                foreach (var entity in game.Entities)
+                {
+                    if (entity == null || entity.Disposed)
+                        continue;
+                    if ((entity.ID & 0x8000000000000000UL) != 0)
+                        continue;
+                    AccumulateEntity(entity, acc);
+                }
+            }
+
+            return FinalizeDigest(game, ls, game.IAIterationInt, acc);
+        }
+
+        private static void AccumulateEntity(DXEntity entity, DigestAccumulators acc)
+        {
+            // Bare DXEntity instances (e.g. blood/hit sprites) and non-interactive ambient birds
+            // (Raven) are purely visual/ambient and do not affect simulation state.
+            string typeName = entity.GetType().Name;
+            if (entity.GetType() == typeof(DXEntity) || string.Equals(typeName, "Raven", StringComparison.Ordinal))
+                return;
+
+            acc.EntityCount++;
+            float px = entity.Position.X;
+            float py = entity.Position.Y;
+            long qx = (long)Math.Round(px * 100f);
+            long qy = (long)Math.Round(py * 100f);
+
+            bool isProjectile = IsProjectileName(typeName);
+            int lifeValue = GameBridge.GetLifeValue(entity);
+
+            if (isProjectile)
+            {
+                acc.ProjectileCount++;
+                acc.ProjectileChecksum += (long)entity.ID ^ (qx * 92837111L) ^ (qy * 689287499L) ^ (lifeValue * 283923481L);
+                return;
+            }
+
+            if (acc.DynamicPositions != null && entity.PhysicalType == DXBodyType.Dynamic)
+                acc.DynamicPositions.Add(new EntityPosSample { Id = entity.ID, X = px, Y = py });
+
+            long posMix = (long)entity.ID ^ (qx * 73856093L) ^ (qy * 19349663L);
+            acc.PosChecksum += posMix;
+            acc.PosBuckets[(int)(entity.ID & (ulong)(BucketCount - 1))] += unchecked((ulong)posMix);
+
+            long cx = (long)Math.Floor(px * 0.5f);
+            long cy = (long)Math.Floor(py * 0.5f);
+            acc.CoarsePosChecksum += (long)entity.ID ^ (cx * 73856093L) ^ (cy * 19349663L);
+            acc.LifeChecksum += (long)entity.ID ^ (lifeValue * 83492791L);
+
+            if (entity.PhysicalType == DXBodyType.Dynamic)
+            {
+                long aggroSig = GameBridge.GetZombieAggroSignature(entity, out bool isAlerted);
+                if (isAlerted)
+                {
+                    acc.AggroZombieCount++;
+                    acc.ZombieAggroChecksum += aggroSig;
+                }
+            }
+
+            acc.QueuedOrderCount += MixQueue(entity, ref acc.ProductionChecksum);
+        }
+
+        private static LevelStateSnapshotDigest FinalizeDigest(DXGame game, object ls, int simTick, DigestAccumulators acc)
+        {
+            var digest = new LevelStateSnapshotDigest();
             ulong hash = 14695981039346656037UL;
             void Mix(long val)
             {
@@ -64,7 +237,7 @@ namespace TABCoopMod.Determinism
                 hash *= 1099511628211UL;
             }
 
-            digest.SimTick = game.IAIterationInt;
+            digest.SimTick = simTick;
             digest.GameTimeMs = game.GameTimeInt;
             digest.Gold = GameBridge.GetLevelInt("Gold");
             digest.Wood = GameBridge.GetLevelInt("Wood");
@@ -83,94 +256,30 @@ namespace TABCoopMod.Determinism
 
             long reservationChecksum = MixReservations(ls);
             digest.ReservationChecksum = reservationChecksum;
+            digest.EntityCount = acc.EntityCount;
+            digest.ProjectileCount = acc.ProjectileCount;
+            digest.QueuedOrderCount = acc.QueuedOrderCount;
+            digest.AggroZombieCount = acc.AggroZombieCount;
+            digest.PosChecksum = acc.PosChecksum;
+            digest.CoarsePosChecksum = acc.CoarsePosChecksum;
+            digest.LifeChecksum = acc.LifeChecksum;
+            digest.ZombieAggroChecksum = acc.ZombieAggroChecksum;
+            digest.ProjectileChecksum = acc.ProjectileChecksum;
+            digest.ProductionChecksum = acc.ProductionChecksum;
+            digest.PosBuckets = acc.PosBuckets;
 
-            int entityCount = 0;
-            int projectileCount = 0;
-            int queuedCount = 0;
-            int aggroZombieCount = 0;
-            long posChecksum = 0;
-            long coarsePosChecksum = 0;
-            long lifeChecksum = 0;
-            long zombieAggroChecksum = 0;
-            long projectileChecksum = 0;
-            long productionChecksum = 0;
-
-            if (game.Entities != null)
-            {
-                foreach (var entity in game.Entities)
-                {
-                    if (entity == null || entity.Disposed)
-                        continue;
-                    if ((entity.ID & 0x8000000000000000UL) != 0)
-                        continue;
-                    // Bare DXEntity instances (e.g. blood/hit sprites) and non-interactive ambient birds
-                    // (Raven) are purely visual/ambient and do not affect simulation state.
-                    string typeName = entity.GetType().Name;
-                    if (entity.GetType() == typeof(DXEntity) || string.Equals(typeName, "Raven", StringComparison.Ordinal))
-                        continue;
-
-                    entityCount++;
-                    float px = entity.Position.X;
-                    float py = entity.Position.Y;
-                    long qx = (long)Math.Round(px * 100f);
-                    long qy = (long)Math.Round(py * 100f);
-
-                    bool isProjectile = IsProjectileName(typeName);
-                    int lifeValue = GameBridge.GetLifeValue(entity);
-
-                    if (isProjectile)
-                    {
-                        projectileCount++;
-                        projectileChecksum += (long)entity.ID ^ (qx * 92837111L) ^ (qy * 689287499L) ^ (lifeValue * 283923481L);
-                        continue;
-                    }
-
-                    if (outDynamicPositions != null && entity.PhysicalType == DXBodyType.Dynamic)
-                        outDynamicPositions.Add(new EntityPosSample { Id = entity.ID, X = px, Y = py });
-
-                    posChecksum += (long)entity.ID ^ (qx * 73856093L) ^ (qy * 19349663L);
-                    long cx = (long)Math.Floor(px * 0.5f);
-                    long cy = (long)Math.Floor(py * 0.5f);
-                    coarsePosChecksum += (long)entity.ID ^ (cx * 73856093L) ^ (cy * 19349663L);
-                    lifeChecksum += (long)entity.ID ^ (lifeValue * 83492791L);
-
-                    if (entity.PhysicalType == DXBodyType.Dynamic)
-                    {
-                        long aggroSig = GameBridge.GetZombieAggroSignature(entity, out bool isAlerted);
-                        if (isAlerted)
-                        {
-                            aggroZombieCount++;
-                            zombieAggroChecksum += aggroSig;
-                        }
-                    }
-
-                    queuedCount += MixQueue(entity, ref productionChecksum);
-                }
-            }
-
-            digest.EntityCount = entityCount;
-            digest.ProjectileCount = projectileCount;
-            digest.QueuedOrderCount = queuedCount;
-            digest.AggroZombieCount = aggroZombieCount;
-            digest.PosChecksum = posChecksum;
-            digest.CoarsePosChecksum = coarsePosChecksum;
-            digest.LifeChecksum = lifeChecksum;
-            digest.ZombieAggroChecksum = zombieAggroChecksum;
-            digest.ProjectileChecksum = projectileChecksum;
-            digest.ProductionChecksum = productionChecksum;
-
-            Mix(entityCount);
-            Mix(projectileCount);
-            Mix(queuedCount);
-            Mix(aggroZombieCount);
-            Mix(lifeChecksum);
-            Mix(zombieAggroChecksum);
-            Mix(projectileChecksum);
-            Mix(productionChecksum);
+            Mix(acc.EntityCount);
+            Mix(acc.ProjectileCount);
+            Mix(acc.QueuedOrderCount);
+            Mix(acc.AggroZombieCount);
+            Mix(acc.LifeChecksum);
+            Mix(acc.ZombieAggroChecksum);
+            Mix(acc.ProjectileChecksum);
+            Mix(acc.ProductionChecksum);
             Mix(reservationChecksum);
             digest.HardHash = hash;
 
-            Mix(posChecksum);
+            Mix(acc.PosChecksum);
             digest.FullHash = hash;
             return digest;
         }
