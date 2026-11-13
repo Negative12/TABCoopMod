@@ -1,16 +1,8 @@
 using System;
-using System.Drawing;
-using System.Reflection;
-using DXVision;
-using DXVision.GUI;
-using HarmonyLib;
 using Steamworks;
 using TABCoopMod.Core;
 using TABCoopMod.Networking;
 using TABCoopMod.Sync;
-using ZX;
-using ZX.Editor;
-using ZX.GUI;
 
 namespace TABCoopMod.UI
 {
@@ -39,12 +31,8 @@ namespace TABCoopMod.UI
                     ? $"ACTIVE ({(CoopSessionManager.Transport.IsHost ? "Host" : "Client")}, Peers={CoopSessionManager.Transport.ConnectedPeers.Count})"
                     : "IDLE (Not in a Co-op room)";
 
-                var msg = new ZXWindowMessage
-                {
-                    Title = "CO-OP MULTIPLAYER LOBBY (ARCHON MODE)",
-                    Text = $"Player: {steamStatus}  |  Status: {sessionInfo}\nSelect an action below and click OK:",
-                    AnimationType = ZXWindowAnimationType.Blend
-                };
+                string title = "CO-OP MULTIPLAYER LOBBY (ARCHON MODE)";
+                string text = $"Player: {steamStatus}  |  Status: {sessionInfo}\nSelect an action below and click OK:";
 
                 string[] options = new[]
                 {
@@ -55,25 +43,7 @@ namespace TABCoopMod.UI
                     "5. [Session] Disconnect / Leave Co-op Session"
                 };
 
-                var showListMethod = AccessTools.Method(
-                    GameBridge.TypeZXMessageBoxHelper,
-                    ObfuscatedSymbols.Method_MsgBox_ShowListSelector,
-                    new[] { typeof(ZXWindowMessage), typeof(Action<int>), typeof(Action), typeof(string[]) });
-
-                if (showListMethod != null)
-                {
-                    showListMethod.Invoke(null, new object[]
-                    {
-                        msg,
-                        (Action<int>)OnOptionSelected,
-                        (Action)(() => { }),
-                        options
-                    });
-                }
-                else
-                {
-                    GameBridge.ShowAlertMessageBox(msg.Title, msg.Text);
-                }
+                GameBridge.ShowListSelectorMessageBox(title, text, options, OnOptionSelected, () => { });
             }
             catch (Exception ex)
             {

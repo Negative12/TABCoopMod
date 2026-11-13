@@ -29,6 +29,7 @@ namespace TABCoopMod.Core
         public static Type TypeZXSystemGameLevel { get; private set; }
         public static Type TypeZXSystemMainMenu { get; private set; }
         public static Type TypeZXMessageBoxHelper { get; private set; }
+        public static Type TypeZXWindowMessage { get; private set; }
         public static Type TypeZXSteamManager { get; private set; }
 
         // Cached Reflection Handles
@@ -77,7 +78,10 @@ namespace TABCoopMod.Core
 
         private static MethodInfo _methodShowAlert;
         private static MethodInfo _methodShowYesNo;
+        private static MethodInfo _methodShowListSelector;
         private static MethodInfo _methodGetPlainTextRenderer;
+        private static PropertyInfo _propWindowMsgTitle;
+        private static PropertyInfo _propWindowMsgText;
 
         public static bool IsInitialized { get; private set; }
 
@@ -110,12 +114,14 @@ namespace TABCoopMod.Core
                 TypeZXSystemGameLevel = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXSystemGameLevel);
                 TypeZXSystemMainMenu = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXSystemMainMenu);
                 TypeZXMessageBoxHelper = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXMessageBoxHelper);
+                TypeZXWindowMessage = GameAssembly.GetType("ZX.Editor.ZXWindowMessage");
                 TypeZXSteamManager = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXSteamManager);
 
                 Check(TypeZXGame, $"Type ZXGame ({ObfuscatedSymbols.Type_ZXGame})");
                 Check(TypeZXSystemGameLevel, $"Type ZXSystemGameLevel ({ObfuscatedSymbols.Type_ZXSystemGameLevel})");
                 Check(TypeZXSystemMainMenu, $"Type ZXSystemMainMenu ({ObfuscatedSymbols.Type_ZXSystemMainMenu})");
                 Check(TypeZXMessageBoxHelper, $"Type ZXMessageBoxHelper ({ObfuscatedSymbols.Type_ZXMessageBoxHelper})");
+                Check(TypeZXWindowMessage, "Type ZXWindowMessage (ZX.Editor.ZXWindowMessage)");
 
                 // 2. Singleton Getters
                 _mZXGameCurrent = AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_GetCurrentSingleton, Type.EmptyTypes);
@@ -203,11 +209,20 @@ namespace TABCoopMod.Core
                     new[] { typeof(string), typeof(string), typeof(Action) });
                 _methodShowYesNo = AccessTools.Method(TypeZXMessageBoxHelper, ObfuscatedSymbols.Method_MsgBox_ShowYesNo,
                     new[] { typeof(string), typeof(string), typeof(Action), typeof(Action) });
+                _methodShowListSelector = TypeZXWindowMessage != null
+                    ? AccessTools.Method(TypeZXMessageBoxHelper, ObfuscatedSymbols.Method_MsgBox_ShowListSelector,
+                        new[] { TypeZXWindowMessage, typeof(Action<int>), typeof(Action), typeof(string[]) })
+                    : null;
                 _methodGetPlainTextRenderer = AccessTools.Method(TypeZXMessageBoxHelper, ObfuscatedSymbols.Method_MsgBox_GetPlainTextRenderer, Type.EmptyTypes);
+                _propWindowMsgTitle = TypeZXWindowMessage != null ? AccessTools.Property(TypeZXWindowMessage, "Title") : null;
+                _propWindowMsgText = TypeZXWindowMessage != null ? AccessTools.Property(TypeZXWindowMessage, "Text") : null;
 
                 Check(_methodShowAlert, "ZXMessageBoxHelper.ShowAlert");
                 Check(_methodShowYesNo, "ZXMessageBoxHelper.ShowYesNo");
+                Check(_methodShowListSelector, "ZXMessageBoxHelper.ShowListSelector");
                 Check(_methodGetPlainTextRenderer, "ZXMessageBoxHelper.GetPlainTextRenderer");
+                Check(_propWindowMsgTitle, "ZXWindowMessage.Title");
+                Check(_propWindowMsgText, "ZXWindowMessage.Text");
 
                 if (missingCount == 0)
                 {
@@ -576,6 +591,22 @@ namespace TABCoopMod.Core
         public static ZXWindow ShowYesNoMessageBox(string title, string message, Action onYes, Action onNo = null)
         {
             return (ZXWindow)_methodShowYesNo.Invoke(null, new object[] { title, message, onYes, onNo });
+        }
+
+        public static ZXWindow ShowListSelectorMessageBox(
+            string title,
+            string message,
+            string[] options,
+            Action<int> onOk,
+            Action onCancel = null)
+        {
+            if (TypeZXWindowMessage == null || _methodShowListSelector == null)
+                return ShowAlertMessageBox(title, message, onCancel);
+
+            object msgObj = Activator.CreateInstance(TypeZXWindowMessage);
+            _propWindowMsgTitle?.SetValue(msgObj, title, null);
+            _propWindowMsgText?.SetValue(msgObj, message, null);
+            return (ZXWindow)_methodShowListSelector.Invoke(null, new object[] { msgObj, onOk, onCancel, options });
         }
 
         // ====================================================================
