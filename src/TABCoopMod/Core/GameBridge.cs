@@ -456,6 +456,46 @@ namespace TABCoopMod.Core
             }
         }
 
+        /// <summary>
+        /// Clears any stuck Wait/Hourglass cursor lock left behind by interrupted async level loads
+        /// or programmatic snapshot transitions so hover/click cursor updates resume normally.
+        /// </summary>
+        public static void ClearWaitCursor()
+        {
+            try
+            {
+                var game = _mZXGameCurrent?.Invoke(null, null) as DXGame;
+                if (game == null) return;
+
+                var fWait = AccessTools.Field(TypeZXGame, ObfuscatedSymbols.Field_ZXGame_WaitCursorCount);
+                int prevCount = 0;
+                if (fWait != null)
+                {
+                    prevCount = (int)fWait.GetValue(game);
+                    fWait.SetValue(game, 0);
+                }
+
+                bool wasLocked = game.CursorLocked;
+                var mEnd = AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_ZXGame_EndWaitCursor, Type.EmptyTypes);
+                if (mEnd != null)
+                {
+                    mEnd.Invoke(game, null);
+                }
+                else
+                {
+                    game.CursorLocked = false;
+                }
+
+                game.CursorVisible = true;
+                if (wasLocked || prevCount > 0)
+                    ModLogger.Info($"[GameBridge] Cleared stuck WaitCursor (prevCount={prevCount}, wasLocked={wasLocked}).");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] ClearWaitCursor failed: {ex.Message}");
+            }
+        }
+
         public static void ShowTopBanner(string message, Color color, int durationMs = 3000)
         {
             var levelSys = _mLevelSysCurrent.Invoke(null, null);

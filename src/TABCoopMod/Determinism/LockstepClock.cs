@@ -106,7 +106,38 @@ namespace TABCoopMod.Determinism
         /// </summary>
         public static bool PausedBySession { get; private set; }
 
-        public static void SetSessionPause(bool paused) => PausedBySession = paused;
+        public static void SetSessionPause(bool paused)
+        {
+            PausedBySession = paused;
+            if (paused) ResetHostTickPacing();
+        }
+
+        // Real-time monotonic pacing for live Host co-op play (offline replay remains unthrottled).
+        private static double _nextHostRealTickMs;
+
+        public static void ResetHostTickPacing() => _nextHostRealTickMs = 0.0;
+
+        internal static bool ShouldAdvanceHostRealTimeTick(double gameSpeed)
+        {
+            if (gameSpeed <= 0.001)
+            {
+                _nextHostRealTickMs = 0.0;
+                return false;
+            }
+
+            double nowMs = System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            if (_nextHostRealTickMs <= 0.0 || nowMs - _nextHostRealTickMs > 250.0)
+            {
+                _nextHostRealTickMs = nowMs;
+            }
+
+            // 1ms tolerance avoids skipping a 60Hz VSync frame by sub-millisecond timer jitter.
+            if (nowMs + 1.0 < _nextHostRealTickMs)
+                return false;
+
+            _nextHostRealTickMs += MsPerLogicTick / gameSpeed;
+            return true;
+        }
 
         /// <summary>Executes an action under InDeterministicContext on the calling thread.</summary>
         public static void RunInDeterministicContext(Action action)
@@ -631,6 +662,7 @@ namespace TABCoopMod.Determinism
                         var hostGame = DXGame.Current;
                         if (hostGame != null && hostGame.Paused)
                             hostGame.Paused = false;
+                        GameBridge.ClearWaitCursor();
                         ModLogger.Info($"[LockstepClock] Host snapshot reload complete: baseline applied (seed={seed}, counter={_syncedEntityIdCounter}).");
                         return;
                     }
@@ -644,6 +676,7 @@ namespace TABCoopMod.Determinism
                         clientGame.Paused = false;
                         ModLogger.Info("[LockstepClock] Cleared load-time pause on Client (session remains paused until SessionStart).");
                     }
+                    GameBridge.ClearWaitCursor();
                     ModLogger.Info($"[LockstepClock] Client level load complete: ID counter -> {_syncedEntityIdCounter}, seed={seed}, waiting for SessionStart.");
                     return;
                 }
@@ -660,6 +693,7 @@ namespace TABCoopMod.Determinism
                     game.Paused = false;
                     ModLogger.Info("[LockstepClock] Cleared load-time pause at level completion.");
                 }
+                GameBridge.ClearWaitCursor();
 
                 ModLogger.Info($"[LockstepClock] Level load complete: ID counter -> {_syncedEntityIdCounter}, seed={seed}, clocks aligned.");
             }
@@ -745,6 +779,7 @@ namespace TABCoopMod.Determinism
             // clobber the save's restored GameTime while ReadSaveFile/InitLevel runs on T9/T11.
             if (LockstepClock.LoadingLevel || DXScene.Current == null || !(DXScene.Current.RootObject is DXIsometricGridObject))
             {
+                LockstepClock.ResetHostTickPacing();
                 LockstepClock.AllowPhysicsThisFrame = false;
                 return false;
             }
@@ -769,11 +804,35 @@ namespace TABCoopMod.Determinism
                 return false;
             }
 
-            // Network lockstep: apply the turn's buffered commands exactly at its tick boundary.
-            // This runs even while paused so pause-time build/move orders and SetPaused(false) are
-            // executed on the frozen tick.
+            // Network lockstep: pace live Host simulation ticks to real wall-clock time * GameSpeed
+            // (so 1.0x runs at 30 Hz instead of render FPS), clear any lingering Wait cursor lock,
+            // and apply the turn's buffered commands at its exact tick boundary.
             if (Sync.CoopSessionManager.IsInSyncedLevel)
+            {
+                if (__instance.CursorLocked && !Core.GameBridge.IsGameLoading())
+                    Core.GameBridge.ClearWaitCursor();
+
+                bool isHost = Sync.CoopSessionManager.Transport != null && Sync.CoopSessionManager.Transport.IsHost;
+                if (!LockstepClock.PausedBySession && isHost)
+                {
+                    if (!LockstepClock.ShouldAdvanceHostRealTimeTick(__instance.GameSpeed))
+                    {
+                        __instance.GameTime = DXGame.LastGameTimeIAUpdate;
+                        LockstepClock.AllowPhysicsThisFrame = false;
+                        return false;
+                    }
+                }
+                else
+                {
+                    LockstepClock.ResetHostTickPacing();
+                }
+
                 Sync.CoopSessionManager.FlushDueTurnCommands(nextTick);
+            }
+            else
+            {
+                LockstepClock.ResetHostTickPacing();
+            }
 
             // Honor a synchronized pause: after flushing this frame's commands, freeze SimTick and
             // GameTime while LockstepClock.PausedBySession is set. The engine's own DXGame.Paused is

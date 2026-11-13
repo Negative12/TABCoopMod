@@ -243,6 +243,7 @@ namespace TABCoopMod.Testing
                 ["tick"] = game?.IAIterationInt ?? 0,
                 ["gameTimeMs"] = game?.GameTimeInt ?? 0,
                 ["paused"] = game?.Paused ?? false,
+                ["cursorLocked"] = game?.CursorLocked ?? false,
                 ["gameSpeed"] = game?.GameSpeed ?? 0,
                 ["countdownActive"] = PauseSyncController.CountdownActive,
                 ["mayorCount"] = GameBridge.GetLevelCollectionCount("MayorStates"),

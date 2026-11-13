@@ -63,6 +63,10 @@ namespace TABCoopMod.Core
         public const string Method_ZXGame_SetPlayerMode        = "#=znDPORUoLfC4p";
         /// <summary>Public bool true while ZXGame's black loading/transition fade is active.</summary>
         public const string Field_ZXGame_StartupFadeActive     = "#=zTkvm$fc5hNvM";
+        /// <summary>Nested BeginWaitCursor/EndWaitCursor reference counter on ZXGame.</summary>
+        public const string Field_ZXGame_WaitCursorCount       = "#=z4GoTu3vYw0EXC1201A==";
+        /// <summary>Resets wait cursor lock when WaitCursorCount drops to 0 (sets CursorLocked=false, Cursor=Normal).</summary>
+        public const string Method_ZXGame_EndWaitCursor        = "#=zIB5ucfBCe7G8";
 
         // ====================================================================
         // 4. ZXSystemMainMenu (#=zLs$VX1eoAapVflmW_w==) Members

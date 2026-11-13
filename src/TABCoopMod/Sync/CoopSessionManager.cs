@@ -311,14 +311,18 @@ namespace TABCoopMod.Sync
                     });
                 }
 
-                // Reload the exact exported snapshot on Host too so MapDrawer, Colonist.OnSceneAdded,
-                // and Zombie.UseFastSerializing run the identical load pipeline on both peers.
-                ModLogger.Info($"[CoopSessionManager] Host starting symmetric reload of {savPath}...");
+                // Reload a Host-only save file so loopback Client reads/writes to coop_host_snapshot.zxsav
+                // never collide on Windows file locks while Host's async loader is opening it.
+                string hostSelfSavPath = Path.Combine(savesDir, "coop_host_self.zxsav");
+                ModLogger.Info($"[CoopSessionManager] Exporting Host self-reload snapshot to {hostSelfSavPath}...");
+                GameBridge.WriteSaveFile(hostSelfSavPath);
+
+                ModLogger.Info($"[CoopSessionManager] Host starting symmetric reload of {hostSelfSavPath}...");
                 LockstepClock.EnableDeterministicSandbox(syncSeed);
                 LockstepClock.RequestPostLoadCalibration(syncSeed, idCounter);
                 if (DXGame.Current != null && DXGame.Current.Paused) DXGame.Current.Paused = false;
                 GameBridge.PrepareForProgrammaticLoad();
-                GameBridge.LoadSaveFileAndEnter(savPath);
+                GameBridge.LoadSaveFileAndEnter(hostSelfSavPath);
                 _kickingLoadFade = true;
                 _loadFadeKickFrames = 0;
                 _loadFadeKickStartTicks = -1.0;
@@ -420,7 +424,13 @@ namespace TABCoopMod.Sync
             // The save loader leaves DXGame.Paused/GameSpeed at 0; clear it so engine animations and
             // the fixed-step clock start running. Session pauses are tracked separately.
             LockstepClock.SetSessionPause(false);
-            if (DXGame.Current != null && DXGame.Current.Paused) DXGame.Current.Paused = false;
+            LockstepClock.ResetHostTickPacing();
+            if (DXGame.Current != null)
+            {
+                if (DXGame.Current.Paused) DXGame.Current.Paused = false;
+                if (DXGame.Current.GameSpeed <= 0.0) DXGame.Current.GameSpeed = 1.0;
+            }
+            GameBridge.ClearWaitCursor();
 
             ModLogger.Info($"[CoopSessionManager] Entered synced level at tick {cur} (inputDelay={InputDelayTicks}, role={(Transport.IsHost ? "Host" : "Client")}).");
         }
