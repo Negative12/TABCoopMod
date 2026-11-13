@@ -47,7 +47,7 @@ namespace TABCoopMod.Patches
                     typeof(ZXButtonLink),
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
                     null,
-                    new object[] { "CO-OP MULTIPLAYER", new DXKeys[] { DXKeys.K } },
+                    new object[] { "多人合作模式", new DXKeys[] { DXKeys.K } },
                     null);
 
                 coopButton.Activated += _ =>
