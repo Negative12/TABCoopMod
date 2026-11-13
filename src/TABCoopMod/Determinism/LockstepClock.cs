@@ -784,10 +784,10 @@ namespace TABCoopMod.Determinism
                 return false;
             }
 
-            // Background windows report Focused=false, and some engine paths branch on focus/render
-            // state. Force the flags true so a second (unfocused) process cannot take a different
-            // branch from the first one.
-            if (!__instance.Focused) __instance.Focused = true;
+            // Background windows still need Visible=true so OnPreRender keeps drawing both windows
+            // side-by-side, but NEVER force Focused=true: DXGame.ProcessInputEvents relies on
+            // Focused to ignore global mouse/keyboard polling on the unfocused window so two
+            // instances on the same PC do not mirror local camera/selection/hotkeys.
             if (!__instance.Visible) __instance.Visible = true;
 
             if (DXGame.LastGameTimeIAUpdate == 0.0)

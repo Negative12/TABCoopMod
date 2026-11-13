@@ -254,8 +254,6 @@ namespace TABCoopMod.Testing
                 _autoLoadKickFade = false;
                 return;
             }
-            if (DXGame.Current != null && !DXGame.Current.Focused)
-                DXGame.Current.Focused = true;
             GameBridge.KickLoadingFade(700.0);
             if (_autoLoadStartTicks > 0 && DXHelper_Environment.Ticks - _autoLoadStartTicks > 60000.0)
                 _autoLoadKickFade = false;
