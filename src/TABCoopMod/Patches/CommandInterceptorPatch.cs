@@ -87,7 +87,7 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(object __0, PointF __1)
         {
-            if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand)
+            if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.IsSimulationThreadActive)
                 return true;
 
             ulong[] unitIds = GameBridge.GetSelectedPlayerEntityIds();
@@ -121,6 +121,16 @@ namespace TABCoopMod.Patches
     [HarmonyPatch]
     public static class Patch_ZXCommand_Execute
     {
+        private struct PendingBuildFootprint
+        {
+            public int Tick;
+            public double TimestampMs;
+            public Rectangle Area;
+            public string TypeName;
+        }
+
+        private static readonly List<PendingBuildFootprint> _recentLocalBuilds = new List<PendingBuildFootprint>();
+
         public static MethodBase TargetMethod()
         {
             return AccessTools.Method(
@@ -140,8 +150,8 @@ namespace TABCoopMod.Patches
             if (executor == null || !GameBridge.IsPlayerEntity(executor))
                 return true;
 
-            // Ignore unit basic auto-attack commands triggered by BHSoldier / BHAttackTower AI behaviors during UpdateGameLogic
-            if (LockstepClock.InDeterministicContext)
+            // Ignore unit basic auto-attack commands and internal weapon sub-commands triggered during UpdateGameLogic or UpdatePhysics
+            if (LockstepClock.IsSimulationThreadActive || GameBridge.IsWeaponSubCommand(__instance))
                 return true;
 
             // If this is the per-unit Travel/Patrol follow-up loop right after #=zQp2M56bpPd9jmiNkVA==, swallow it
@@ -151,6 +161,7 @@ namespace TABCoopMod.Patches
             bool isShift = DXInputState.Current?.IsKeyPressed(DXKeys.Shift, false) ?? false;
             int cmdId = GameBridge.GetCommandId(__instance);
             GameBridge.UnpackCommandTarget(__1, out ulong targetEntityId, out PointF targetPos, out SizeF targetSize, out PointF targetOrigin);
+            int curTick = DXGame.Current?.IAIterationInt ?? 0;
 
             // Build and the free mayor-reward buildings (EntityBonusCreation) are both entity-creation
             // commands; they must be replayed as PlaceBuilding so the peer builds the same structure.
@@ -159,11 +170,51 @@ namespace TABCoopMod.Patches
                 Type buildingType = GameBridge.GetBuildingTypeFromCommand(__instance);
                 if (buildingType != null)
                 {
+                    if (!isBonus && !GameBridge.CanExecuteCommandOnEntity(__instance, executor))
+                        return false;
+
+                    if (!GameBridge.CanPlaceBuildingAtTarget(buildingType, targetPos, targetSize, targetOrigin))
+                        return false;
+
+                    Rectangle footprint = GameBridge.ResolveBuildCellArea(null, targetPos, targetSize, targetOrigin);
+                    double nowMs = DXHelper_Environment.Ticks;
+
+                    for (int i = _recentLocalBuilds.Count - 1; i >= 0; i--)
+                    {
+                        var entry = _recentLocalBuilds[i];
+                        bool expiredByTime = nowMs - entry.TimestampMs > 350.0 || nowMs < entry.TimestampMs;
+                        bool expiredByTick = curTick < entry.Tick || (curTick - entry.Tick > 8);
+                        if (expiredByTime || expiredByTick)
+                            _recentLocalBuilds.RemoveAt(i);
+                    }
+
+                    for (int i = 0; i < _recentLocalBuilds.Count; i++)
+                    {
+                        var entry = _recentLocalBuilds[i];
+                        if (!footprint.IsEmpty)
+                        {
+                            if (!entry.Area.IsEmpty && entry.Area.IntersectsWith(footprint))
+                                return false;
+                        }
+                        else if (entry.Area.IsEmpty && string.Equals(entry.TypeName, buildingType.FullName, StringComparison.Ordinal))
+                        {
+                            return false;
+                        }
+                    }
+
+                    _recentLocalBuilds.Add(new PendingBuildFootprint
+                    {
+                        Tick = curTick,
+                        TimestampMs = nowMs,
+                        Area = footprint,
+                        TypeName = buildingType.FullName
+                    });
+
                     var netBuild = new NetCommand
                     {
                         Type = NetCommandType.PlaceBuilding,
                         PlayerId = CommandInterceptor.LocalPlayerId,
-                        TargetSimTick = DXGame.Current?.IAIterationInt ?? 0,
+                        TargetSimTick = curTick,
                         IsShiftQueued = isShift,
                         CommandId = cmdId,
                         BuildingTypeName = buildingType.FullName,
@@ -183,7 +234,7 @@ namespace TABCoopMod.Patches
             {
                 Type = NetCommandType.ExecuteCommand,
                 PlayerId = CommandInterceptor.LocalPlayerId,
-                TargetSimTick = DXGame.Current?.IAIterationInt ?? 0,
+                TargetSimTick = curTick,
                 IsShiftQueued = isShift,
                 CommandId = cmdId,
                 ExecutorEntityIds = new[] { executor.ID },
@@ -193,8 +244,105 @@ namespace TABCoopMod.Patches
                 TargetOrigin = targetOrigin
             };
 
+            if (targetPos != PointF.Empty)
+                GameBridge.ShowGroundIndicatorForCommand(__instance, targetPos, targetEntityId != 0UL ? 0.6f : 1f);
+
             CommandInterceptor.OnLocalCommandCaptured?.Invoke(netCmd);
             return false;
+        }
+    }
+
+    // Isolate CBehaviour local ResetMemNodes/ResetState calls during mouse clicks so UI click
+    // handlers do not mutate unit AI ahead of the synchronized lockstep turn.
+    [HarmonyPatch]
+    public static class Patch_CBehaviour_IsolateLocalReset
+    {
+        public static IEnumerable<MethodBase> TargetMethods()
+        {
+            Type tCBehav = GameBridge.GameAssembly?.GetType("ZX.Components.CBehaviour");
+            if (tCBehav == null) yield break;
+
+            var mResetMem = AccessTools.Method(tCBehav, "#=zXeRMQqKCGSFidmsp4w==", new[] { typeof(bool) });
+            if (mResetMem != null) yield return mResetMem;
+
+            var mResetState = AccessTools.Method(tCBehav, "#=zhPQK_m4yjl9wB_DGFw==", new[] { typeof(bool) });
+            if (mResetState != null) yield return mResetState;
+        }
+
+        [HarmonyPrefix]
+        public static bool Prefix(bool __0)
+        {
+            if (__0
+                && CommandInterceptor.IsInterceptionEnabled
+                && !CommandExecutor.IsReplayingCommand
+                && !LockstepClock.IsSimulationThreadActive)
+            {
+                return false;
+            }
+            return true;
+        }
+    }
+
+    // Intercept right-clicks on world entities in OnSceneRightClick to fix vanilla's zXEntity3
+    // single-unit capture bug on enemy focus-fire and prevent premature local CCommandable mutation.
+    [HarmonyPatch]
+    public static class Patch_LevelSys_OnSceneRightClick
+    {
+        public static MethodBase TargetMethod() =>
+            AccessTools.Method(GameBridge.TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_OnSceneRightClick);
+
+        [HarmonyPrefix]
+        public static bool Prefix(out List<GameBridge.CommandableSnapshot> __state)
+        {
+            __state = null;
+            if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.IsSimulationThreadActive)
+                return true;
+
+            if (GameBridge.GetPendingCommandOnLevelSys() != null)
+                return true;
+
+            DXEntity mouseEntity = GameBridge.GetMouseEntityOnLevelSys();
+            if (mouseEntity == null || mouseEntity.Disposed)
+                return true;
+
+            ulong[] unitIds = GameBridge.GetSelectedPlayerEntityIds();
+            if (unitIds == null || unitIds.Length == 0)
+                return true;
+
+            DXEntity leadUnit = DXGame.Current?.GetEntityByID(unitIds[0]);
+            if (leadUnit != null && GameBridge.IsEnemyOrAttackableCapsule(mouseEntity, leadUnit))
+            {
+                object attackCmd = GameBridge.GetAttackCommandObject();
+                if (attackCmd != null)
+                {
+                    GameBridge.ShowGroundIndicatorForCommand(attackCmd, mouseEntity.Position, 0.6f);
+                    var netCmd = new NetCommand
+                    {
+                        Type = NetCommandType.ExecuteCommand,
+                        PlayerId = CommandInterceptor.LocalPlayerId,
+                        TargetSimTick = DXGame.Current?.IAIterationInt ?? 0,
+                        IsShiftQueued = DXInputState.Current?.IsKeyPressed(DXKeys.Shift, false) ?? false,
+                        CommandId = GameBridge.GetCommandId(attackCmd),
+                        ExecutorEntityIds = unitIds,
+                        TargetEntityId = mouseEntity.ID,
+                        TargetPosition = mouseEntity.Position
+                    };
+                    CommandInterceptor.OnLocalCommandCaptured?.Invoke(netCmd);
+                    return false;
+                }
+            }
+
+            // Friendly CUnitsHolder / CInteractiveObject / PickableItem: let vanilla resolve the exact
+            // per-unit command through Patch_ZXCommand_Execute, then restore local CCommandable state.
+            __state = GameBridge.SnapshotSelectedCommandables();
+            return true;
+        }
+
+        [HarmonyFinalizer]
+        public static void Finalizer(List<GameBridge.CommandableSnapshot> __state)
+        {
+            if (__state != null)
+                GameBridge.RestoreSelectedCommandables(__state);
         }
     }
 
@@ -246,7 +394,7 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(DXComponent __instance)
         {
-            if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.InDeterministicContext)
+            if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.IsSimulationThreadActive)
                 return true;
 
             var ent = __instance?.Entity;
@@ -275,7 +423,7 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(DXComponent __instance, int __0)
         {
-            if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.InDeterministicContext)
+            if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.IsSimulationThreadActive)
                 return true;
 
             var ent = __instance?.Entity;

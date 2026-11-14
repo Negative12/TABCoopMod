@@ -53,11 +53,13 @@ namespace TABCoopMod.Determinism
     [HarmonyPatch]
     public static class DeterministicTaskPatch
     {
-        // Serialize physics stepping and MapDrawer generation loops. Level deserialization and
-        // scene culling keep native parallelism: serializing them made 6666.zxsav take minutes,
-        // and constructor seeds are already isolated per-thread by DXRandomCtorPatch.
+        // Serialize physics position readback (Loop 2: OnNewPositionComputed -> DXWorldGrid.SetNewCellFor)
+        // on the physics thread only (so concurrent render tasks on MainThread are never serialized),
+        // and serialize MapDrawer generation loops. Physics Loop 1 (StartUpdatePhysics) only writes
+        // per-entity Body forces/fields and keeps native DXHelper_Task.For multi-threading across cores.
         private static bool Active => LockstepClock.IsDeterministicModeActive
-            && (LockstepClock.InPhysicsStep || LockstepClock.InMapDrawer);
+            && ((LockstepClock.InPhysicsReadback && LockstepClock.IsPhysicsThreadActive())
+                || LockstepClock.InMapDrawer);
 
         [HarmonyPatch]
         public static class ForIndex
@@ -86,7 +88,18 @@ namespace TABCoopMod.Determinism
             public static bool Prefix(int __0, int __1, Action<int, int> __2)
             {
                 if (!Active) return true;
+                if (!LockstepClock.InPhysicsStep)
+                {
+                    __2(__0, __1);
+                    return false;
+                }
+                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 __2(__0, __1);
+                long dt = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+                if (LockstepClock.InPhysicsReadback)
+                    DeterministicSandboxPatches.DiagPhysFor2Ticks += dt;
+                else
+                    DeterministicSandboxPatches.DiagPhysFor1Ticks += dt;
                 return false;
             }
         }

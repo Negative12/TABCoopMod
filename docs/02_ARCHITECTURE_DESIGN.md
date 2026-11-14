@@ -57,7 +57,7 @@
 由于 `TheyAreBillions.exe` 内置 Eazfuscator 完整性与 `StackTrace.GetFrame(3)` 校验，Mod 保持主程序磁盘字节 100% 不变，仅通过 `TheyAreBillions.exe.config` 注入 `ModAppDomainManager`：
 1. 在 `InitializeNewDomain` 初始化日志与全局异常监听，订阅 `AppDomain.CurrentDomain.AssemblyLoad`。
 2. 当 `TheyAreBillions` 加载完成时，先执行 `RuntimeHelpers.RunModuleConstructor(loaded.ManifestModule.ModuleHandle)` 注册内置资源解密器（`DXVision` / `Steamworks.NET` / `DXPlatform_Desktop`）。
-3. 调用 `ModEntry.Initialize()` → `GameBridge.InitializeAndValidate()`（启动自检必须 `0 missing`）→ 逐类 `PatchClassProcessor.Patch()` 包 `try/catch` 应用全部 Harmony 补丁（实机 `Classes OK=40, failed-tolerant=0`）。
+3. 调用 `ModEntry.Initialize()` → `GameBridge.InitializeAndValidate()`（启动自检必须 `0 missing`）→ 逐类 `PatchClassProcessor.Patch()` 包 `try/catch` 应用全部 Harmony 补丁（实机 `Classes OK=54, failed-tolerant=0`）。
 
 ### 2.2 虚拟显示器 `Direct3DEx` 回退（`Patch_DXRender_VirtualDisplayFallback`）
 在无物理显示器的虚拟显示环境（如远程虚拟屏适配器报错 `D3DERR_NOTAVAILABLE`）下，对纯 C# 封装类 `DXPlatform_Desktop.DXRender_SlimDX` 的 9 个方法应用 IL Transpiler：当 `Direct3D.GetDeviceCaps` 失败时自动回退至 `SlimDX.Direct3D9.Direct3DEx`，并将 `Pool.Managed` 纹理替换为 `Pool.Default | Usage.Dynamic`（避开直接补丁 C++/CLI 混合程序集 `SlimDX.dll` 导致的 `InvalidProgramException`）。
@@ -87,9 +87,10 @@
 1. **`DXGuid.New()` 双轨分流**：
    - 仅当处于确定性逻辑/命令上下文（`InDeterministicContext || LogicTickActive` 且非加载期）时消耗同步 ID 计数器（`_syncedEntityIdCounter`，支持校准与 `SnapshotBegin` 同步）；
    - 加载期及本地 UI/渲染特效一律分配高位 ID（`0x8000000000000000UL | localCounter`），`StateHasher` 自动忽略高位 ID。
-2. **`DXRandom` 全域隔离与重种**：
+2. **`DXRandom` 全域隔离与按实体行为随机流**：
    - `DXRandomCtorPatch` 拆分同步模拟线程与非模拟/渲染线程的种子计数器，防止主线程动画插队污染逻辑序列。
-   - `LockstepClock` 对 `DXRandom.Global` 按上下文分流（`synced` / `aux` / `render`）；对 `[ThreadStatic]` 的 `DXBehaviour<BData>._GlobalRandom` 通过 `EntityUpdateBehaviourRandomPatch` 在逻辑线程内按“线程 + 载入代次”重置；同步重置 `DXLevel.Random`、`SysColonists` 游标与列表、`BHFarmer` 农田选格随机，并隔离音频（`AudioRngIsolationPatch`）、纯视觉特效（`VisualVfxIsolationPatch`）及视口精灵拉取（`CSpritePullIsolationPatch` / `CMovableSpriteProgressSyncPatch`）的随机与状态污染。
+   - `ZXBehaviourRunRngScopePatch`（`DynamicMethod TABCoop_GetBehavOwnerEntityId`）将 `ZXBehaviour.Run()` 内的行为随机调用拦截到基于 `(SyncedRandomSeed, SimTick, Entity.ID, drawIdx)` 的无状态 SplitMix64 序列，消除单个游荡僵尸消耗共享 RNG 造成的级联漂移。
+   - `LockstepClock` 对 `DXRandom.Global` 按上下文分流（`synced` / `aux` / `render`）；同步重置 `DXLevel.Random`、`SysColonists` 游标与列表、`BHFarmer` 农田选格随机，并隔离音频（`AudioRngIsolationPatch`）、纯视觉特效（`VisualVfxIsolationPatch`）、帧时间冻结（`GameTimeIsolationPatch`）、视口精灵拉取（`CSpritePullIsolationPatch` / `CMovableSpriteProgressSyncPatch`）的污染；同时通过 `RenderVisualInterpolationPatch`（位置纠偏残差按 `VisualSnapExpireMs = 600.0`、`VisualSnapTauMs = 180.0` 指数衰减）与 `SmoothCameraPanPatch` 保障渲染帧间移动与平移平滑。
 
 ### 3.5 `StateHasher` v2（顺序无关校验与非对局实体过滤）
 - FNV-1a 64 位校验，覆盖资源、预留、实体坐标（量化 `Math.Round(v * 100)`）、生命值、投射物与生产队列。
@@ -100,12 +101,12 @@
 ## 4. 指令拦截与无状态回放系统（Command Interception & Replay）
 
 ### 4.1 拦截点（`Patches/`）
-- **`CommandInterceptorPatch.cs`**：拦截 `Build`/`EntityBonusCreation` 建造放置、`ZXSystemGameLevel` 群体移动（`#=zQp2M56bpPd9jmiNkVA==` / `#=zgn6bDkSd9MGS3$WvAQ==`）、通用命令 `ZXCommand.#=zfmgzkuw=`、取消当前命令（`#=zWGiN6nrTv8Dp`）与取消队列槽位（`#=z8g7GC7xLrr8j`）。所有守卫均排除回放期、生产队列自动推进（`#=zrz2EI1A=`）、确定性逻辑帧内部 AI 调用以及非玩家阵营，且严禁对内部类型调用 `HasComponent<T>()`。
+- **`CommandInterceptorPatch.cs`**：拦截 `Build`/`EntityBonusCreation` 建造放置、`ZXSystemGameLevel` 群体移动（`#=zQp2M56bpPd9jmiNkVA==` / `#=zgn6bDkSd9MGS3$WvAQ==`）、通用命令 `ZXCommand.#=zfmgzkuw=`、取消当前命令（`#=zWGiN6nrTv8Dp`）与取消队列槽位（`#=z8g7GC7xLrr8j`）。对建造拦截增加 `CanExecuteCommandOnEntity`、`CanPlaceBuildingAtTarget` 与 `_recentLocalBuilds` 短窗面积去重，防止连续误触或资源不足透支排队；所有守卫均排除回放期、生产队列自动推进（`#=zrz2EI1A=`）、确定性逻辑帧内部 AI 调用以及非玩家阵营，且严禁对内部类型调用 `HasComponent<T>()`。
 - **`PauseAndSpeedInputPatch.cs`**：从 `ZXSystemGameLevel.OnKeyDown` / `OnKeyUp` 拦截空格暂停与 `+`/`-` 倍速键，交由 `PauseSyncController` 与 `CommandInterceptor.Dispatch` 处理。
-- **`MayorSyncPatch.cs`**：Hook `ZXMayor.#=zPTw8CXGE0RqF`，带四重守卫（`IsInterceptionEnabled && !IsReplayingCommand && !LoadingLevel && IAIterationInt > 0`），按 `MayorId` 广播应用。
+- **`MayorSyncPatch.cs`**：Hook `ZXMayor.#=zPTw8CXGE0RqF` 与 `ShowMayorSelection`（`MayorModalTrackerPatch`），带四重守卫与 `mayorLevel` / `MayorStates` 幂等去重；先到达的回合选中市长后，自动关闭对端仍打开的市长弹窗并屏蔽过期弹窗，确保每级市长奖励只生效一次。
 
 ### 4.2 无状态回放与暂停微操（`NetCommand.cs` & `CoopSessionManager.cs`）
-- `CommandExecutor` 全量使用 `object` + `GameBridge` 反射，**绝不读取或修改 `CSelectable`**；执行期间临时模拟指令携带的 `IsShiftQueued` 按键状态并带有 `_executionDepth` 递归深度保护。
+- `CommandExecutor` 全量使用 `object` + `GameBridge` 反射，**绝不读取或修改 `CSelectable`**；执行期间临时模拟指令携带的 `IsShiftQueued` 按键状态并带有 `_executionDepth` 递归深度保护。`ExecutePlaceBuilding` 在执行前复用 `CanExecuteCommandOnEntity` + `CanPlaceBuildingAtTarget` 校验资源与格子占用，并在落盘建造后立即调用 `GameBridge.FlushStartFramePostMethods()` 刷新网格占位，保证同 tick 内双方同格并发建造时后一条确定性拒建不重复扣费。
 - **暂停态实时微操**：当 `LockstepClock.PausedBySession == true` 时，`UpdateGameLogic` 不触发，由 `CoopSessionManager.OnFrameTick()` 在 `RunInDeterministicContext` 保护下对冻结的当前 `pausedTick` 主动调用 `FlushDueTurnCommands(pausedTick)`，从而在暂停下即时执行建造/拉兵/训练/解暂指令并立即渲染上屏。
 
 ---
@@ -120,8 +121,9 @@
 3. **无焦点淡入推进与 `CShadow` NRE 修复**：
    - 客机加载期间强制 `Focused = true` 并每帧调用 `GameBridge.KickLoadingFade()` 推进原生黑屏淡入动画，使 `loadAction` 顺利执行。
    - 调用读档前执行 `GameBridge.PrepareForProgrammaticLoad()`：显式将旧 `CurrentGameSystem.Enabled = false`、置 `Paused = true` 并调用 `ClearEntities()`，补齐原版 `LoadGameAndEnter` 第 229 行 `== null` 空判写反导致的二次读档 `CShadow` `NullReferenceException`。
-4. **周期校验与 `Auto-resync`**：
-   - 每 60 逻辑帧比对 `StateHash`；面对密集尸潮下非托管 `DXPhysicsNative.Space_Step`（Chipmunk C++ 求解器）偶发的 `1e-4` 级别位置漂移，自动触发快照重建，实测约 **3 秒内**完成无缝重同步。
+4. **周期校验、`async_align` 与 `Auto-resync`**：
+   - 每 60 逻辑帧比对 `StateHash`；Host 与 Client 采用对称热重载保证基线对齐。
+   - 默认 `async_align` 模式下，通过 `TrySendPosDriftSync` / `OnPosDriftSyncChunkReceived` 将高频血量/击杀修正（`2s`）与低频软位置对齐（`8s`、`MinAsyncPosSnapCells = 0.50f`、单实体 `180 tick` 冷却去抖，遇 `maxDelta >= 3.5f || rmsDelta >= 1.2f` 放行应急对齐）解耦；仅当出现不可自愈的经济/结构或大面积残余分叉时触发快照重同步，实测约 **3 秒内**完成恢复。
 
 ---
 

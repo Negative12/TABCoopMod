@@ -141,6 +141,7 @@ namespace TABCoopMod.Testing
 
         [HarmonyPatch(typeof(DXGame), "UpdateGameLogic")]
         [HarmonyPostfix]
+        [HarmonyPriority(Priority.Last)]
         public static void UpdateGameLogic_Postfix_Verifier(DXGame __instance)
         {
             if (!TestHarnessConfig.Enabled) return;

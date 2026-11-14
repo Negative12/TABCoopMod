@@ -34,10 +34,10 @@
 - 交互拦截与渲染：[`Patches/PauseAndSpeedInputPatch.cs`](../src/TABCoopMod/Patches/PauseAndSpeedInputPatch.cs)、[`Patches/MayorSyncPatch.cs`](../src/TABCoopMod/Patches/MayorSyncPatch.cs)、[`UI/CoopLobbyWindow.cs`](../src/TABCoopMod/UI/CoopLobbyWindow.cs)、[`UI/AllyOverlayRenderer.cs`](../src/TABCoopMod/UI/AllyOverlayRenderer.cs)
 
 #### Phase 2/3 剩余待验收项
-1. **真人键鼠操作全链路联调**：在双开联机或 `TABCOOP_INTERCEPT=1` 下，使用真实鼠标/键盘逐项验证右键移动/攻击、建造（含 Shift 连续放置与市长奖励建筑）、训练、取消队列、空格暂停、右上角倍速、市长弹窗二选一、Alt+左键打点。
+1. **真人键鼠操作全链路验证持续收尾**：已实机修复视角移动卡顿、攻击动作中断、重叠建造透支、市长双倍奖励与客机高频修正抖动问题；待继续覆盖大波尸潮交战平滑体感与其余热键边界。
 2. **Chaos 高延迟/丢包/断连压测**：在 `ChaosTransport` 注入丢包与断连窗口下跑通 60s+ 双端锁步与自动恢复。
 3. **Steam P2P 双账号跨机实测**：验证 `SteamP2PTransport` Lobby 创建、好友邀请与 P2P 通道稳定传输（注意同一 Steam 账号同机双开可能受 Steam 客户端限制，建议双账号或跨机验证）。
-4. **多人 UX 细节打磨**：客机地面队友光标/建筑预览框渲染、市长选举“客机推荐高亮 + 房主拍板”模式、同帧同位置建造冲突扣费保护检查。
+4. **多人 UX 细节与并发防护**：已完成同帧同位置建造冲突扣费保护（`ExecutePlaceBuilding` 校验 + `_recentLocalBuilds` 去重）、并发冲突指令收敛与市长单次去重；后续补充客机地面队友光标/建筑预览框渲染、市长“客机推荐高亮 + 房主拍板”交互。
 
 ### Phase 4：独立基地模式拓展（远期规划）⏳
 - 开局对称多基地生成、Mod 层虚拟阵营资源池与顶栏 UI 隔离、单位所有权锁与尸潮分流。

@@ -36,6 +36,7 @@ namespace TABCoopMod.Determinism
     {
         private int _readyThrough = -1;
 
+        public int ReadyThrough => _readyThrough;
         public void MarkReady(int tick) { if (tick > _readyThrough) _readyThrough = tick; }
         public bool IsTickReady(int nextSimTick) => nextSimTick <= _readyThrough;
     }

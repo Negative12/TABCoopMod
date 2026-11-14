@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Threading;
 using DXVision;
 using HarmonyLib;
@@ -65,6 +67,34 @@ namespace TABCoopMod.Determinism
         /// <summary>True while DXGame.UpdatePhysics() is on the stack (physics callbacks run outside LogicTickActive).</summary>
         public static volatile bool InPhysicsContext;
 
+        /// <summary>Managed thread ID executing UpdatePhysics() (used to keep async physics off MainThread render RNG/GUIDs).</summary>
+        public static volatile int PhysicsThreadId;
+
+        internal static bool IsPhysicsThreadActive()
+        {
+            if (!InPhysicsContext) return false;
+            int pt = PhysicsThreadId;
+            int cur = Thread.CurrentThread.ManagedThreadId;
+            return pt == 0 || cur == pt || (pt != MainThreadId && cur != MainThreadId);
+        }
+
+        /// <summary>
+        /// True whenever the calling thread is currently executing deterministic simulation work
+        /// (sync/replay MainThread context, async _TaskLogic worker thread, or physics step thread).
+        /// Command interceptors and CBehaviour UI isolation use this so worker-thread AI/weapon ticks
+        /// are never misidentified as local player UI clicks.
+        /// </summary>
+        public static bool IsSimulationThreadActive
+        {
+            get
+            {
+                if (InDeterministicContext) return true;
+                int main = MainThreadId;
+                bool onMain = main != 0 && Thread.CurrentThread.ManagedThreadId == main;
+                return (LogicTickActive && !onMain) || IsPhysicsThreadActive();
+            }
+        }
+
         /// <summary>
         /// Only true on frames where UpdateGameLogic_Prefix allowed a logic tick to advance.
         /// Prevents UpdatePhysics() from stepping ahead during MainMenu, LoadingLevel, or PausedBySession.
@@ -72,11 +102,17 @@ namespace TABCoopMod.Determinism
         public static bool AllowPhysicsThisFrame { get; set; }
 
         /// <summary>
-        /// Same span as InPhysicsContext, but also gates DeterministicTaskPatch: only the two
-        /// DXPhysicWorld.UpdateDefaultTime For-loops affect simulated positions. Serializing every
-        /// other For (scene culling, texture baking, level tables) made big saves take minutes.
+        /// Same span as InPhysicsContext, but also gates DeterministicTaskPatch.
         /// </summary>
         public static volatile bool InPhysicsStep;
+
+        /// <summary>
+        /// True only after DXPhysicWorld.Step() completes (inside OnFinishPhysics..UpdatePhysics_Exit)
+        /// during Loop 2 (OnNewPositionComputed), which mutates shared DXWorldGrid cells and must
+        /// run sequentially. Loop 1 (StartUpdatePhysics) only writes per-entity Body forces/fields and
+        /// keeps native DXHelper_Task.For multi-threading.
+        /// </summary>
+        public static volatile bool InPhysicsReadback;
 
         /// <summary>
         /// True while ZXMapDrawer.#=z0Pkwp_k=(DXLevel) runs terrain/tree/grass generation during
@@ -98,6 +134,24 @@ namespace TABCoopMod.Determinism
         /// DXRandom while a save is deserializing.
         /// </summary>
         public static int MainThreadId { get; private set; }
+
+        [ThreadStatic]
+        private static bool _allowRawGameTimeSet;
+
+        /// <summary>
+        /// True only while LockstepClock explicitly updates DXGame.GameTime for a simulation step.
+        /// Prevents DXGame._TaskGameTime background thread from mutating GameTime/GameTimeInt
+        /// mid-tick or mid-physics.
+        /// </summary>
+        internal static bool AllowRawGameTimeSet => _allowRawGameTimeSet;
+
+        internal static void SetDeterministicGameTime(DXGame game, double value)
+        {
+            if (game == null) return;
+            _allowRawGameTimeSet = true;
+            try { game.GameTime = value; }
+            finally { _allowRawGameTimeSet = false; }
+        }
 
         /// <summary>
         /// True while the game is paused by an explicit synchronized pause command. The engine's
@@ -123,7 +177,7 @@ namespace TABCoopMod.Determinism
         /// render FPS (e.g. dual-window GPU sharing or unfocused background window) from slowing
         /// simulation below 1.0x real time and also supports >1x game speeds cleanly.
         /// </summary>
-        internal static int ConsumeHostRealTimeTicks(double gameSpeed, int maxTicks = 4)
+        internal static int ConsumeHostRealTimeTicks(double gameSpeed, int maxTicks = 3)
         {
             if (gameSpeed <= 0.001)
             {
@@ -131,13 +185,15 @@ namespace TABCoopMod.Determinism
                 return 0;
             }
 
+            double stepMs = MsPerLogicTick / gameSpeed;
             double nowMs = System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-            if (_nextHostRealTickMs <= 0.0 || nowMs - _nextHostRealTickMs > 500.0)
+            // Clamp stale backlog to <= 2 ticks so a temporary GC/physics/render spike cannot
+            // trap Host in an 8-tick catchup death spiral (4 FPS).
+            if (_nextHostRealTickMs <= 0.0 || nowMs - _nextHostRealTickMs > Math.Max(120.0, stepMs * 3.0))
             {
-                _nextHostRealTickMs = nowMs;
+                _nextHostRealTickMs = _nextHostRealTickMs <= 0.0 ? nowMs : nowMs - stepMs * 1.5;
             }
 
-            double stepMs = MsPerLogicTick / gameSpeed;
             int count = 0;
             // 1.5ms tolerance prevents ~30-31Hz frame pacing jitter from skipping alternate frames.
             while (count < maxTicks && nowMs + 1.5 >= _nextHostRealTickMs)
@@ -146,6 +202,14 @@ namespace TABCoopMod.Determinism
                 _nextHostRealTickMs += stepMs;
             }
             return count;
+        }
+
+        internal static void RefundHostRealTimeTicks(double gameSpeed, int unrunTicks)
+        {
+            if (unrunTicks <= 0 || gameSpeed <= 0.001 || _nextHostRealTickMs <= 0.0)
+                return;
+            double stepMs = MsPerLogicTick / gameSpeed;
+            _nextHostRealTickMs -= stepMs * unrunTicks;
         }
 
         /// <summary>Executes an action under InDeterministicContext on the calling thread.</summary>
@@ -197,7 +261,7 @@ namespace TABCoopMod.Determinism
             if (InAudioContext || InVisualVfxContext) return false;
             bool onMain = Thread.CurrentThread.ManagedThreadId == MainThreadId;
             return InDeterministicContext
-                || InPhysicsContext
+                || IsPhysicsThreadActive()
                 || (LogicTickActive && !onMain)
                 || (LoadingLevel && !onMain);
         }
@@ -232,6 +296,7 @@ namespace TABCoopMod.Determinism
             _auxGlobalRandom = new DXRandom(unchecked(initialSeed ^ 0x5EEDBEEF));
             _renderGlobalRandom = new DXRandom(unchecked(initialSeed ^ 0x1234ABCD));
             _syncedSceneRandom = new DXRandom(unchecked(initialSeed ^ 0x517CC1B7));
+            _lastReanchoredSimTick = -1;
 
             // The parameterless-ctor seed counter must restart together with the shared RNG, otherwise
             // a run that allocated a different number of DXRandom instances before syncing starts
@@ -261,8 +326,12 @@ namespace TABCoopMod.Determinism
             InDeterministicContext = false;
             LogicTickActive = false;
             InPhysicsContext = false;
+            PhysicsThreadId = 0;
             InPhysicsStep = false;
+            InPhysicsReadback = false;
             AllowPhysicsThisFrame = false;
+            _lastReanchoredSimTick = -1;
+            DeterministicSandboxPatches.ResetAsyncTickState();
             LoadingLevel = false;
             HasPendingPostLoadCalibration = false;
             PendingSnapshotEntityIdCounter = 0;
@@ -371,7 +440,79 @@ namespace TABCoopMod.Determinism
         private static int _behaviourResetGeneration;
         [ThreadStatic] private static int _behaviourResetGenerationOnThread;
         private static readonly Dictionary<Type, DXRandom> _sharedBehaviourRandoms = new Dictionary<Type, DXRandom>();
+        private static DXRandom[] _sharedBehaviourRandomArray = Array.Empty<DXRandom>();
         private static readonly object _behaviourSync = new object();
+        private static int _lastReanchoredSimTick = -1;
+        [ThreadStatic] private static ulong _currentBehaviourEntityId;
+        [ThreadStatic] private static uint _currentBehaviourRngCounter;
+
+        public static void EnterEntityBehaviourRngScope(ulong entityId)
+        {
+            _currentBehaviourEntityId = entityId;
+            _currentBehaviourRngCounter = 0u;
+        }
+
+        public static void ExitEntityBehaviourRngScope()
+        {
+            _currentBehaviourEntityId = 0UL;
+        }
+
+        public static bool TryNextEntityBehaviourRandomUInt(out uint value)
+        {
+            ulong entityId = _currentBehaviourEntityId;
+            if (entityId == 0UL || InAudioContext || InVisualVfxContext || LoadingLevel)
+            {
+                value = 0u;
+                return false;
+            }
+
+            uint drawIdx = ++_currentBehaviourRngCounter;
+            uint tick = (uint)(DXGame.Current?.IAIterationInt ?? 0);
+            ulong z = entityId
+                + ((ulong)unchecked((uint)_syncedRandomSeed) << 32)
+                + (ulong)tick * 0x9E3779B97F4A7C15UL
+                + (ulong)drawIdx * 0xBF58476D1CE4E5B9UL;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBUL;
+            z = z ^ (z >> 31);
+            value = (uint)(z >> 32);
+            return true;
+        }
+
+        private static uint MixTickSeed(int baseSeed, int tick, uint streamSalt)
+        {
+            uint h = unchecked((uint)baseSeed) ^ unchecked((uint)tick * 0x9E3779B9u) ^ streamSalt;
+            h ^= h >> 16;
+            h *= 0x85EBCA6Bu;
+            h ^= h >> 13;
+            h *= 0xC2B2AE35u;
+            h ^= h >> 16;
+            return h != 0u ? h : 1u;
+        }
+
+        /// <summary>
+        /// Deterministically re-anchors the shared simulation PRNG instances and construction counter
+        /// at the start of each simulation tick in O(1), isolating local 1-tick combat/projectile
+        /// variance from propagating into map-wide global RNG draws. Behaviour RNG draws inside
+        /// ZXBehaviour.Run() are further isolated per entity ID via ZXBehaviourRunRngScopePatch.
+        /// </summary>
+        public static void ReanchorSimulationRngForTick(int tick)
+        {
+            if (!IsDeterministicModeActive || LoadingLevel || tick < 0 || _lastReanchoredSimTick == tick)
+                return;
+            _lastReanchoredSimTick = tick;
+
+            DXRandomCtorPatch.ResetSimCounterForTick(tick);
+
+            int baseSeed = _syncedRandomSeed;
+            DXRandomCtorPatch.ReseedInstance(GetSyncedGlobalRandom(), MixTickSeed(baseSeed, tick, 0x9E3779B9u));
+            DXRandomCtorPatch.ReseedInstance(GetAuxGlobalRandom(), MixTickSeed(baseSeed, tick, 0x5EEDBEEFu));
+            DXRandomCtorPatch.ReseedInstance(GetSyncedSceneRandom(), MixTickSeed(baseSeed, tick, 0x517CC1B7u));
+
+            var level = DXLevel.Current;
+            if (level?.Random != null)
+                DXRandomCtorPatch.ReseedInstance(level.Random, MixTickSeed(baseSeed, tick, 0x243F6A88u));
+        }
 
         /// <summary>
         /// DXBehaviour&lt;TData&gt;._GlobalRandom is [ThreadStatic], and DXGame.UpdateGameLogic runs each
@@ -447,6 +588,9 @@ namespace TABCoopMod.Determinism
                         }
                         catch { /* closed generic not constructible for this T — skip */ }
                     }
+                    var arr = new DXRandom[_sharedBehaviourRandoms.Count];
+                    _sharedBehaviourRandoms.Values.CopyTo(arr, 0);
+                    Volatile.Write(ref _sharedBehaviourRandomArray, arr);
                 }
 
                 ModLogger.Info($"[LockstepClock] Reset DXBehaviour<*>.GlobalRandom (types={resetCount}, seed={seed}).");
@@ -491,6 +635,7 @@ namespace TABCoopMod.Determinism
             _syncedGlobalRandom = new DXRandom(_syncedRandomSeed);
             _auxGlobalRandom = new DXRandom(unchecked(_syncedRandomSeed ^ 0x5EEDBEEF));
             _syncedSceneRandom = new DXRandom(unchecked(_syncedRandomSeed ^ 0x517CC1B7));
+            _lastReanchoredSimTick = -1;
             DXRandomCtorPatch.ResetCounter();
         }
 
@@ -498,12 +643,12 @@ namespace TABCoopMod.Determinism
         /// Called before LoadSaveFileAndEnter. The actual calibration is deferred to the level-load
         /// completion postfix, when the async loader has restored every entity and GameTime.
         /// </summary>
-        public static void RequestPostLoadCalibration(int seed, long snapshotEntityIdCounter = 0)
+        public static void RequestPostLoadCalibration(int seed, long snapshotEntityIdCounter = 0, bool markLoading = true)
         {
             PendingLoadSeed = seed;
             PendingSnapshotEntityIdCounter = snapshotEntityIdCounter;
             HasPendingPostLoadCalibration = true;
-            LoadingLevel = true;
+            if (markLoading) LoadingLevel = true;
             AllowPhysicsThisFrame = false;
             DXGame.LastGameTimeIAUpdate = 0.0;
             DXPhysicWorld.LastGameTimeUpdatePhysics = 0.0;
@@ -523,6 +668,7 @@ namespace TABCoopMod.Determinism
             // after the snapshot share one ID space. Only move forward, never rewind below loaded IDs.
             if (snapshotCounter > _syncedEntityIdCounter)
                 _syncedEntityIdCounter = snapshotCounter;
+            RenderVisualInterpolationPatch.Reset();
             LoadingLevel = false;
 
             GameBridge.SortEntitiesById();
@@ -530,6 +676,7 @@ namespace TABCoopMod.Determinism
             NormalizeMovablesAndPhysicsState();
             GameBridge.SeedLevelRandom(seed);
             ResetBehaviourRandom(seed);
+            _lastReanchoredSimTick = -1;
             DXWorldGrid.ResetPathsCached();
             GameBridge.AlignSimulationClocks();
             // The 6s opening camera pan is wall-clock driven; on two processes it lands on
@@ -759,6 +906,7 @@ namespace TABCoopMod.Determinism
         {
             if (!LockstepClock.IsDeterministicModeActive)
                 return true;
+            System.Threading.Interlocked.Increment(ref DiagGuidCalls);
 
             // During (async) save loading or pure-visual VFX particle creation, generated IDs belong
             // to local/transient objects and must never consume the shared synced ID counter.
@@ -768,7 +916,11 @@ namespace TABCoopMod.Determinism
                 return false;
             }
 
-            if (LockstepClock.InDeterministicContext || LockstepClock.LogicTickActive || LockstepClock.InPhysicsContext)
+            int main = LockstepClock.MainThreadId;
+            bool onMain = main != 0 && Thread.CurrentThread.ManagedThreadId == main;
+            if (LockstepClock.InDeterministicContext
+                || (LockstepClock.LogicTickActive && !onMain)
+                || LockstepClock.IsPhysicsThreadActive())
             {
                 __result = LockstepClock.NextSyncedGuid();
                 return false;
@@ -794,6 +946,7 @@ namespace TABCoopMod.Determinism
         {
             if (!LockstepClock.IsDeterministicModeActive)
                 return true;
+            System.Threading.Interlocked.Increment(ref DiagRngGlobalCalls);
 
             // DXRandom.Global is [ThreadStatic] and seeded from new Random()/real ticks, so it must
             // never be handed out while the sandbox is active. Only the logic worker and the level-
@@ -805,11 +958,11 @@ namespace TABCoopMod.Determinism
 
             if (LockstepClock.InAudioContext || LockstepClock.InVisualVfxContext)
                 __result = LockstepClock.GetRenderGlobalRandom();
+            else if (LockstepClock.IsPhysicsThreadActive())
+                __result = LockstepClock.GetAuxGlobalRandom();
             else if (LockstepClock.InDeterministicContext || (LockstepClock.LogicTickActive && !onMain)
                 || (LockstepClock.LoadingLevel && !onMain))
                 __result = LockstepClock.GetSyncedGlobalRandom();
-            else if (LockstepClock.InPhysicsContext)
-                __result = LockstepClock.GetAuxGlobalRandom();
             else
                 __result = LockstepClock.GetRenderGlobalRandom();
             return false;
@@ -818,7 +971,46 @@ namespace TABCoopMod.Determinism
         private static readonly MethodInfo _mUpdateGameLogic = AccessTools.Method(typeof(DXGame), "UpdateGameLogic");
         private static readonly MethodInfo _mUpdatePhysics = AccessTools.Method(typeof(DXGame), "UpdatePhysics");
         private static readonly MethodInfo _mWaitForGameLogic = AccessTools.Method(typeof(DXGame), "WaitForGameLogic");
+        private static readonly FieldInfo _fTaskLogic = AccessTools.Field(typeof(DXGame), "_TaskLogic");
         [ThreadStatic] private static bool _inSingleTickStep;
+
+        private static bool _asyncTickInFlight;
+        internal static bool IsAsyncTickInFlight => _asyncTickInFlight;
+        private static volatile bool _asyncPhysicsChained;
+        private static volatile bool _asyncPhysicsStepped;
+        private static bool _inFinalizeAsyncTick;
+        private static long _asyncLaunchTs;
+        private static long _asyncWaitStartTs;
+        private static double _diagAsyncWaitMs;
+        private static double _diagWorkerLogicMs;
+        private static readonly object _deferredAsyncLock = new object();
+        private static readonly List<Action> _deferredAsyncPostMethods = new List<Action>();
+
+        internal static void ResetAsyncTickState()
+        {
+            _asyncTickInFlight = false;
+            _asyncPhysicsChained = false;
+            _asyncPhysicsStepped = false;
+            _inFinalizeAsyncTick = false;
+            _asyncLaunchTs = 0;
+            _asyncWaitStartTs = 0;
+            _diagAsyncWaitMs = 0.0;
+            _diagWorkerLogicMs = 0.0;
+            lock (_deferredAsyncLock) { _deferredAsyncPostMethods.Clear(); }
+            RenderVisualInterpolationPatch.Reset();
+        }
+
+        internal static void EnqueueDeferredAsyncPostMethod(Action action)
+        {
+            if (action == null) return;
+            lock (_deferredAsyncLock) { _deferredAsyncPostMethods.Add(action); }
+        }
+
+        internal static void FlushPendingAsyncTick(DXGame game)
+        {
+            if (!_asyncTickInFlight || game == null) return;
+            _mWaitForGameLogic?.Invoke(game, null);
+        }
 
         internal static double DiagLastFrameDtMs { get; private set; }
         internal static double DiagAvgFrameMs { get; private set; }
@@ -827,6 +1019,26 @@ namespace TABCoopMod.Determinism
         internal static int DiagLastWantedTicks { get; private set; }
         internal static int DiagLastRanTicks { get; private set; }
         private static double _diagLastEntryMs;
+
+        // Detailed deterministic hotspot telemetry (accumulated per 60-tick window)
+        internal static long DiagTickMovableSyncTicks;
+        internal static long DiagTickMovableSyncCalls;
+        internal static long DiagTickPullSyncTicks;
+        internal static long DiagTickPullSyncCalls;
+        internal static long DiagTickPathfindTicks;
+        internal static long DiagTickPathfindCalls;
+        internal static long DiagTickHashTicks;
+        internal static long DiagTickPostDrainTicks;
+        internal static long DiagPhysFor1Ticks;
+        internal static long DiagPhysFor2Ticks;
+        internal static long DiagRngGlobalCalls;
+        internal static long DiagRngGenCalls;
+        internal static long DiagRngCtorCalls;
+        internal static long DiagGuidCalls;
+        internal static long DiagPostWrapCalls;
+        internal static int DiagTickWindowCount;
+        internal static int DiagPhysStepWindowCount;
+        private static readonly double _swTickToMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
         // 3. Fixed-step clock: drive GameTime in exact 33.333..ms increments and only advance a
         //    tick when the active ITickGate allows it. Vanilla's UpdateGameLogic runs a Task and
@@ -844,11 +1056,14 @@ namespace TABCoopMod.Determinism
             {
                 int tickIdx = __instance.IAIterationInt;
                 if (Sync.CoopSessionManager.IsInSyncedLevel)
+                {
+                    Sync.CoopSessionManager.OnSimulationTickStarting(tickIdx);
                     Sync.CoopSessionManager.FlushDueTurnCommands(tickIdx);
+                }
 
                 if (LockstepClock.PausedBySession)
                 {
-                    __instance.GameTime = DXGame.LastGameTimeIAUpdate;
+                    LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate);
                     LockstepClock.AllowPhysicsThisFrame = false;
                     return false;
                 }
@@ -856,9 +1071,13 @@ namespace TABCoopMod.Determinism
                 LockstepClock.LogicTickActive = true;
                 LockstepClock.InDeterministicContext = true;
                 LockstepClock.AllowPhysicsThisFrame = true;
-                __instance.GameTime = DXGame.LastGameTimeIAUpdate + LockstepClock.MsPerLogicTick;
+                LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate + LockstepClock.MsPerLogicTick);
                 return true;
             }
+
+            // Defensive flush if UpdateGameLogic is ever reached while a prior async tick is in flight.
+            if (_asyncTickInFlight)
+                _mWaitForGameLogic?.Invoke(__instance, null);
 
             // Never touch GameTime or run logic during MainMenu or async level loading:
             // MainMenu ticks would advance LastGameTimeIAUpdate to wall-clock ~15s and later
@@ -890,48 +1109,6 @@ namespace TABCoopMod.Determinism
                 Sync.CoopSessionManager.PumpNetworkBeforeLogic();
             }
 
-            if (LockstepClock.PausedBySession)
-            {
-                if (inCoop)
-                {
-                    int pausedTick = __instance.IAIterationInt;
-                    if (LockstepClock.TickGate == null || LockstepClock.TickGate.IsTickReady(pausedTick))
-                        Sync.CoopSessionManager.FlushDueTurnCommands(pausedTick);
-                }
-                LockstepClock.ResetHostTickPacing();
-                __instance.GameTime = DXGame.LastGameTimeIAUpdate;
-                LockstepClock.AllowPhysicsThisFrame = false;
-                return false;
-            }
-
-            int maxTicksThisFrame = 1;
-            if (inCoop)
-            {
-                bool isHost = Sync.CoopSessionManager.Transport != null && Sync.CoopSessionManager.Transport.IsHost;
-                if (isHost)
-                {
-                    maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, 8);
-                }
-                else
-                {
-                    LockstepClock.ResetHostTickPacing();
-                    // Allow Client to catch up up to 8 already-authorized ticks per frame so low Client
-                    // render FPS never accumulates input lag behind the Host.
-                    maxTicksThisFrame = 8;
-                }
-            }
-            else
-            {
-                LockstepClock.ResetHostTickPacing();
-            }
-
-            if (maxTicksThisFrame <= 0)
-            {
-                __instance.GameTime = DXGame.LastGameTimeIAUpdate;
-                LockstepClock.AllowPhysicsThisFrame = false;
-                return false;
-            }
-
             double swFreqMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
             double nowEntryMs = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs;
             if (_diagLastEntryMs > 0.0)
@@ -941,12 +1118,120 @@ namespace TABCoopMod.Determinism
                 DiagAvgFrameMs = DiagAvgFrameMs <= 0.0 ? dt : DiagAvgFrameMs * 0.85 + dt * 0.15;
             }
             _diagLastEntryMs = nowEntryMs;
+
+            if (LockstepClock.PausedBySession)
+            {
+                if (inCoop)
+                {
+                    int pausedTick = __instance.IAIterationInt;
+                    if (LockstepClock.TickGate == null || LockstepClock.TickGate.IsTickReady(pausedTick))
+                        Sync.CoopSessionManager.FlushDueTurnCommands(pausedTick);
+                }
+                LockstepClock.ResetHostTickPacing();
+                LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate);
+                LockstepClock.AllowPhysicsThisFrame = false;
+                return false;
+            }
+
+            int maxTicksThisFrame = 1;
+            bool isHost = inCoop && Sync.CoopSessionManager.Transport != null && Sync.CoopSessionManager.Transport.IsHost;
+            if (inCoop)
+            {
+                if (isHost)
+                {
+                    maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, 3);
+                }
+                else
+                {
+                    int curTick = __instance.IAIterationInt;
+                    int readyAhead = (LockstepClock.TickGate is TurnInputTickGate netGate)
+                        ? (netGate.ReadyThrough - curTick)
+                        : 1;
+                    if (readyAhead < 0)
+                    {
+                        maxTicksThisFrame = 0;
+                    }
+                    else if (readyAhead <= Sync.CoopSessionManager.InputDelayTicks)
+                    {
+                        // Pace Client smoothly at 30Hz * GameSpeed so it doesn't burn the entire InputDelayTicks
+                        // cushion in a single frame and then stall for the next 2 frames.
+                        maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, 1);
+                    }
+                    else
+                    {
+                        // Client fell behind Host by more than InputDelayTicks: allow up to 2 ticks to catch up.
+                        int catchup = Math.Min(2, readyAhead - Sync.CoopSessionManager.InputDelayTicks + 1);
+                        maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, catchup);
+                        if (maxTicksThisFrame < 1) maxTicksThisFrame = 1;
+                    }
+                }
+            }
+            else
+            {
+                LockstepClock.ResetHostTickPacing();
+            }
+
+            if (maxTicksThisFrame <= 0)
+            {
+                LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate);
+                LockstepClock.AllowPhysicsThisFrame = false;
+                return false;
+            }
+
             DiagLastWantedTicks = maxTicksThisFrame;
 
+            // Pipeline 1 tick asynchronously in _TaskLogic while RenderFrame/Present runs on MainThread
+            // when in co-op (outside replay verifier) at 1x speed when running 1 tick, on fast frames,
+            // or when single-tick logic takes >= 8ms.
+            double estLogicMs = _diagWorkerLogicMs > 0.0 ? _diagWorkerLogicMs : DiagAvgTickLogicMs;
+            bool canOverlapAsync = inCoop
+                && !Testing.DeterministicReplayVerifier.IsRunning
+                && __instance.GameSpeed <= 1.05
+                && (maxTicksThisFrame == 1 || DiagAvgFrameMs < 28.0 || estLogicMs >= 8.0);
+
+            if (canOverlapAsync)
+            {
+                int asyncNextTick = __instance.IAIterationInt;
+                Sync.CoopSessionManager.OnSimulationTickStarting(asyncNextTick);
+                if (LockstepClock.TickGate == null || LockstepClock.TickGate.IsTickReady(asyncNextTick))
+                {
+                    Sync.CoopSessionManager.FlushDueTurnCommands(asyncNextTick);
+                    if (!LockstepClock.PausedBySession && !(__instance.IAIterationInt != asyncNextTick))
+                    {
+                        if (maxTicksThisFrame > 1)
+                            LockstepClock.RefundHostRealTimeTicks(__instance.GameSpeed, maxTicksThisFrame - 1);
+                        _asyncTickInFlight = true;
+                        _asyncPhysicsChained = false;
+                        _asyncPhysicsStepped = false;
+                        _asyncLaunchTs = System.Diagnostics.Stopwatch.GetTimestamp();
+                        LockstepClock.LogicTickActive = true;
+                        LockstepClock.InDeterministicContext = false;
+                        LockstepClock.AllowPhysicsThisFrame = false;
+                        LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate + LockstepClock.MsPerLogicTick);
+                        DiagLastRanTicks = 1;
+                        return true;
+                    }
+                }
+
+                LockstepClock.RefundHostRealTimeTicks(__instance.GameSpeed, maxTicksThisFrame);
+                LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate);
+                LockstepClock.AllowPhysicsThisFrame = false;
+                DiagLastRanTicks = 0;
+                return false;
+            }
+
             int ticksRan = 0;
+            // After running at least 1 tick, only run a 2nd catchup tick if tick 1 finished fast
+            // (< 10ms, e.g. small maps); heavy late-game maps stay at 1 tick/frame to keep FPS smooth.
+            const double FrameSimBudgetMs = 10.0;
             for (int step = 0; step < maxTicksThisFrame; step++)
             {
                 if (LockstepClock.PausedBySession) break;
+                if (ticksRan >= 1)
+                {
+                    double simElapsedMs = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs - nowEntryMs;
+                    if (simElapsedMs >= FrameSimBudgetMs) break;
+                }
 
                 int nextTick = __instance.IAIterationInt;
                 if (LockstepClock.TickGate != null && !LockstepClock.TickGate.IsTickReady(nextTick))
@@ -959,6 +1244,7 @@ namespace TABCoopMod.Determinism
                 // tick boundaries on Host vs Client when catchup runs multiple ticks per frame.
                 if (ticksRan > 0)
                 {
+                    long tDrainStart = System.Diagnostics.Stopwatch.GetTimestamp();
                     bool prevRendering = __instance.RenderingFrame;
                     __instance.RenderingFrame = false;
                     try
@@ -971,6 +1257,7 @@ namespace TABCoopMod.Determinism
                     {
                         __instance.RenderingFrame = prevRendering;
                     }
+                    DiagTickPostDrainTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tDrainStart;
                 }
 
                 double tLogicStart = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs;
@@ -999,21 +1286,61 @@ namespace TABCoopMod.Determinism
                     LockstepClock.AllowPhysicsThisFrame = true;
                     _mUpdatePhysics.Invoke(__instance, null);
                     double pMs = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs - tPhysStart;
-                    DiagAvgPhysicsMs = DiagAvgPhysicsMs <= 0.0 ? pMs : DiagAvgPhysicsMs * 0.9 + pMs * 0.1;
+                    if (pMs > 0.2)
+                    {
+                        DiagAvgPhysicsMs = DiagAvgPhysicsMs <= 0.0 ? pMs : DiagAvgPhysicsMs * 0.9 + pMs * 0.1;
+                        DiagPhysStepWindowCount++;
+                    }
                 }
 
                 if (inCoop)
+                {
+                    long tHashStart = System.Diagnostics.Stopwatch.GetTimestamp();
                     Sync.CoopSessionManager.OnSimulationTickCompleted(__instance.IAIterationInt);
+                    DiagTickHashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tHashStart;
+                }
+
+                DiagTickWindowCount++;
+                if (DiagTickWindowCount >= 60)
+                    LogPerfWindow(__instance, ticksRan);
             }
 
             DiagLastRanTicks = ticksRan;
+            if (isHost && !LockstepClock.PausedBySession && ticksRan < maxTicksThisFrame)
+                LockstepClock.RefundHostRealTimeTicks(__instance.GameSpeed, maxTicksThisFrame - ticksRan);
 
             if (ticksRan == 0)
-                __instance.GameTime = DXGame.LastGameTimeIAUpdate;
+                LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate);
 
             // Physics was already stepped deterministically after each individual tick above.
             LockstepClock.AllowPhysicsThisFrame = false;
             return false;
+        }
+
+        private static void LogPerfWindow(DXGame game, int ranThisFrame)
+        {
+            int tc = DiagTickWindowCount;
+            double movMs = DiagTickMovableSyncTicks * _swTickToMs / tc;
+            double pullMs = DiagTickPullSyncTicks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
+            double pathMs = DiagTickPathfindTicks * _swTickToMs / tc;
+            double hashMs = DiagTickHashTicks * _swTickToMs / tc;
+            double drainMs = DiagTickPostDrainTicks * _swTickToMs / tc;
+            double pFor1Ms = DiagPhysFor1Ticks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
+            double pFor2Ms = DiagPhysFor2Ticks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
+            if (Testing.TestHarnessConfig.Enabled)
+            {
+                ModLogger.Info($"[Perf] tick={game.IAIterationInt} frame={DiagAvgFrameMs:F1}ms logic={DiagAvgTickLogicMs:F1}ms(wait={_diagAsyncWaitMs:F1}ms) phys={DiagAvgPhysicsMs:F1}ms(x{DiagPhysStepWindowCount}/60t) " +
+                    $"| movSync={movMs:F2}ms({DiagTickMovableSyncCalls / tc}/t) pullSync={pullMs:F2}ms({DiagTickPullSyncCalls / Math.Max(1, DiagPhysStepWindowCount)}/p) " +
+                    $"physFor1={pFor1Ms:F2}ms physFor2={pFor2Ms:F2}ms path={pathMs:F2}ms({DiagTickPathfindCalls / tc}/t) coopTick={hashMs:F2}ms drain={drainMs:F2}ms " +
+                    $"| calls/t: rngG={DiagRngGlobalCalls / tc} gen={DiagRngGenCalls / tc} ctor={DiagRngCtorCalls / tc} guid={DiagGuidCalls / tc} post={DiagPostWrapCalls / tc} want={DiagLastWantedTicks} ran={ranThisFrame}");
+            }
+            DiagTickMovableSyncTicks = 0; DiagTickMovableSyncCalls = 0;
+            DiagTickPullSyncTicks = 0; DiagTickPullSyncCalls = 0;
+            DiagTickPathfindTicks = 0; DiagTickPathfindCalls = 0;
+            DiagTickHashTicks = 0; DiagTickPostDrainTicks = 0;
+            DiagPhysFor1Ticks = 0; DiagPhysFor2Ticks = 0;
+            DiagRngGlobalCalls = 0; DiagRngGenCalls = 0; DiagRngCtorCalls = 0; DiagGuidCalls = 0; DiagPostWrapCalls = 0;
+            DiagTickWindowCount = 0; DiagPhysStepWindowCount = 0;
         }
 
         [HarmonyPatch(typeof(DXGame), "UpdateGameLogic")]
@@ -1022,10 +1349,159 @@ namespace TABCoopMod.Determinism
         {
             if (!LockstepClock.IsDeterministicModeActive) return;
 
-            // Wait synchronously for _TaskLogic so logic never overlaps rendering or network replay.
+            // Async overlapped tick continues running in _TaskLogic (and chained UpdatePhysics)
+            // across RenderFrame/Present and is finalized by StartFrame -> FlushPendingAsyncTick
+            // before ComputeSceneAvance / OnSetCamera of the next frame.
+            if (_asyncTickInFlight && !_inSingleTickStep)
+            {
+                var origTask = _fTaskLogic?.GetValue(__instance) as System.Threading.Tasks.Task;
+                if (origTask != null && _fTaskLogic != null)
+                {
+                    long launchTs = _asyncLaunchTs;
+                    var cont = origTask.ContinueWith(_ =>
+                    {
+                        double swMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                        double workerMs = (System.Diagnostics.Stopwatch.GetTimestamp() - launchTs) * swMs;
+                        _diagWorkerLogicMs = _diagWorkerLogicMs <= 0.0 ? workerMs : _diagWorkerLogicMs * 0.9 + workerMs * 0.1;
+                        DiagAvgTickLogicMs = _diagWorkerLogicMs;
+                        LockstepClock.LogicTickActive = false;
+
+                        try
+                        {
+                            if (DXGame.IsIADeterministic && _mUpdatePhysics != null
+                                && __instance != null && !__instance.Disposing
+                                && !LockstepClock.LoadingLevel && !LockstepClock.PausedBySession
+                                && DXScene.Current != null && DXScene.Current.RootObject is DXIsometricGridObject)
+                            {
+                                double tPhysStart = System.Diagnostics.Stopwatch.GetTimestamp() * swMs;
+                                _asyncPhysicsChained = true;
+                                LockstepClock.AllowPhysicsThisFrame = true;
+                                _mUpdatePhysics.Invoke(__instance, null);
+                                LockstepClock.AllowPhysicsThisFrame = false;
+                                double pMs = System.Diagnostics.Stopwatch.GetTimestamp() * swMs - tPhysStart;
+                                if (pMs > 0.2)
+                                {
+                                    DiagAvgPhysicsMs = DiagAvgPhysicsMs <= 0.0 ? pMs : DiagAvgPhysicsMs * 0.9 + pMs * 0.1;
+                                    DiagPhysStepWindowCount++;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            ModLogger.Warn($"[LockstepClock] Async UpdatePhysics continuation error: {ex}");
+                        }
+                    }, System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously);
+                    _fTaskLogic.SetValue(__instance, cont);
+                }
+                return;
+            }
+
             _mWaitForGameLogic?.Invoke(__instance, null);
             LockstepClock.LogicTickActive = false;
             LockstepClock.InDeterministicContext = false;
+        }
+
+        [HarmonyPatch(typeof(DXGame), "WaitForGameLogic")]
+        [HarmonyPrefix]
+        public static void WaitForGameLogic_Prefix()
+        {
+            if (_asyncTickInFlight && !_inFinalizeAsyncTick)
+                _asyncWaitStartTs = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+
+        [HarmonyPatch(typeof(DXGame), "WaitForGameLogic")]
+        [HarmonyPostfix]
+        public static void WaitForGameLogic_Postfix(DXGame __instance)
+        {
+            if (!_asyncTickInFlight || _inFinalizeAsyncTick) return;
+            _inFinalizeAsyncTick = true;
+            try
+            {
+                bool didChainedPhysics = _asyncPhysicsChained;
+                bool didAsyncPhysStep = _asyncPhysicsStepped;
+                _asyncTickInFlight = false;
+                _asyncPhysicsChained = false;
+                _asyncPhysicsStepped = false;
+                double swFreqMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                double waitMs = _asyncWaitStartTs > 0
+                    ? (System.Diagnostics.Stopwatch.GetTimestamp() - _asyncWaitStartTs) * swFreqMs
+                    : 0.0;
+                _asyncWaitStartTs = 0;
+                _diagAsyncWaitMs = _diagAsyncWaitMs <= 0.0 ? waitMs : _diagAsyncWaitMs * 0.9 + waitMs * 0.1;
+
+                LockstepClock.LogicTickActive = false;
+                LockstepClock.InDeterministicContext = false;
+
+                if (__instance == null || __instance.Disposing || !LockstepClock.IsDeterministicModeActive
+                    || LockstepClock.LoadingLevel || DXScene.Current == null || !(DXScene.Current.RootObject is DXIsometricGridObject))
+                {
+                    lock (_deferredAsyncLock) { _deferredAsyncPostMethods.Clear(); }
+                    return;
+                }
+
+                if (!didChainedPhysics && DXGame.IsIADeterministic && _mUpdatePhysics != null)
+                {
+                    double tPhysStart = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs;
+                    LockstepClock.AllowPhysicsThisFrame = true;
+                    _mUpdatePhysics.Invoke(__instance, null);
+                    LockstepClock.AllowPhysicsThisFrame = false;
+                    double pMs = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs - tPhysStart;
+                    if (pMs > 0.2)
+                    {
+                        DiagAvgPhysicsMs = DiagAvgPhysicsMs <= 0.0 ? pMs : DiagAvgPhysicsMs * 0.9 + pMs * 0.1;
+                        DiagPhysStepWindowCount++;
+                    }
+                }
+
+                if (didAsyncPhysStep)
+                {
+                    RenderVisualInterpolationPatch.OnPhysicsStepCompleted();
+                    CSpritePullIsolationPatch.RunDeterministicPullUpdates(__instance);
+                }
+
+                if (Sync.CoopSessionManager.IsInSyncedLevel)
+                {
+                    long tHashStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                    Sync.CoopSessionManager.OnSimulationTickCompleted(__instance.IAIterationInt);
+                    DiagTickHashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tHashStart;
+                }
+
+                List<Action> deferred = null;
+                lock (_deferredAsyncLock)
+                {
+                    if (_deferredAsyncPostMethods.Count > 0)
+                    {
+                        deferred = new List<Action>(_deferredAsyncPostMethods);
+                        _deferredAsyncPostMethods.Clear();
+                    }
+                }
+                if (deferred != null)
+                {
+                    long tDrainStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                    bool prevRendering = __instance.RenderingFrame;
+                    __instance.RenderingFrame = false;
+                    try
+                    {
+                        for (int i = 0; i < deferred.Count; i++)
+                            LockstepClock.RunInDeterministicContext(deferred[i]);
+                        // Flush nested frame post-methods (e.g. DXComponent.set_Entity -> SceneChanged)
+                        // queued by the deferred callbacks above, matching sync DXPostMethodManager.ExecuteAll().
+                        __instance.PostMethods_OnFinishFrame?.ExecuteAll();
+                        __instance.PostMethods_OnSafeLogicAndDrawing?.ExecuteAll();
+                        __instance.PostMethods_OnStartFrame?.ExecuteAll();
+                    }
+                    finally { __instance.RenderingFrame = prevRendering; }
+                    DiagTickPostDrainTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tDrainStart;
+                }
+
+                DiagTickWindowCount++;
+                if (DiagTickWindowCount >= 60)
+                    LogPerfWindow(__instance, 1);
+            }
+            finally
+            {
+                _inFinalizeAsyncTick = false;
+            }
         }
 
         // 4. Suppress the engine's background GameTime/physics threads while deterministic:
@@ -1053,9 +1529,19 @@ namespace TABCoopMod.Determinism
 
             __state = DXPhysicWorld.NUpdates;
             LockstepClock.AllowPhysicsThisFrame = false;
+            LockstepClock.PhysicsThreadId = Thread.CurrentThread.ManagedThreadId;
             LockstepClock.InPhysicsContext = true;
             LockstepClock.InPhysicsStep = true;
+            LockstepClock.InPhysicsReadback = false;
             return true;
+        }
+
+        [HarmonyPatch(typeof(DXGame), "OnFinishPhysics")]
+        [HarmonyPostfix]
+        public static void OnFinishPhysics_Postfix()
+        {
+            if (LockstepClock.InPhysicsStep)
+                LockstepClock.InPhysicsReadback = true;
         }
 
         [HarmonyPatch(typeof(DXGame), "UpdatePhysics")]
@@ -1064,19 +1550,31 @@ namespace TABCoopMod.Determinism
         {
             bool didStep = LockstepClock.InPhysicsStep;
             LockstepClock.InPhysicsContext = false;
+            LockstepClock.PhysicsThreadId = 0;
             LockstepClock.InPhysicsStep = false;
+            LockstepClock.InPhysicsReadback = false;
 
             if (LockstepClock.IsDeterministicModeActive)
             {
                 DXPhysicWorld.TimeLastBodyPosition = DXPhysicWorld.TimeBodyPosition;
                 if (didStep && DXPhysicWorld.NUpdates != __state && !LockstepClock.LoadingLevel)
-                    CSpritePullIsolationPatch.RunDeterministicPullUpdates(DXGame.Current);
+                {
+                    if (_asyncTickInFlight)
+                    {
+                        _asyncPhysicsStepped = true;
+                    }
+                    else
+                    {
+                        RenderVisualInterpolationPatch.OnPhysicsStepCompleted();
+                        CSpritePullIsolationPatch.RunDeterministicPullUpdates(DXGame.Current);
+                    }
+                }
             }
         }
 
-        // Prevent DXEntity.UpdateSceneObjectParallel (called only for entities inside the local
-        // camera viewport during SetCamera) from mutating authoritative Entity.Position and
-        // triggering DXWorldGrid.SetNewCellFor on parallel render threads via InterpolatedPosition.
+        // Prevent DXEntity.UpdateSceneObjectParallel from mutating authoritative Entity.Position and
+        // triggering DXWorldGrid.SetNewCellFor; visual-only interpolation is projected cleanly inside
+        // RenderVisualInterpolationPatch around CSprite / CSelectable scene updates.
         [HarmonyPatch(typeof(DXPhysicBody), nameof(DXPhysicBody.InterpolatedPosition), MethodType.Getter)]
         [HarmonyPrefix]
         public static bool InterpolatedPosition_Prefix(DXPhysicBody __instance, ref PointF __result)
@@ -1088,11 +1586,376 @@ namespace TABCoopMod.Determinism
 
         // Remember which thread runs the frame loop; DXRandomCtorPatch uses it to keep the
         // level-loading worker's seed sequence synced while the UI thread stays off that counter.
+        // Flush any overlapped async tick before sampling interpolation alpha or camera delta.
         [HarmonyPatch(typeof(DXGame), "StartFrame")]
         [HarmonyPrefix]
         public static void StartFrame_CaptureMainThread()
         {
             if (LockstepClock.MainThreadId == 0) LockstepClock.CaptureMainThread();
+            FlushPendingAsyncTick(DXGame.Current);
+            RenderVisualInterpolationPatch.UpdateFrameAlpha();
+        }
+    }
+
+    /// <summary>
+    /// Isolates visual sprite/selection-ring smoothing from deterministic simulation state.
+    /// Hooks CSprite and CSelectable parallel visual updates (called inside SetCamera for viewport
+    /// entities while logic threads are idle), temporarily projecting Body's frame-interpolated
+    /// position onto DXEntity._Position (bypassing Entity.set_Position and DXWorldGrid.SetNewCellFor)
+    /// so unit visuals and selection rings glide at render FPS while authoritative Entity.Position stays discrete.
+    /// </summary>
+    [HarmonyPatch]
+    public static class RenderVisualInterpolationPatch
+    {
+        public struct RestoreState
+        {
+            public DXEntity Entity;
+            public PointF OrigPos;
+            public bool Active;
+        }
+
+        private struct VisualSnapEntry
+        {
+            public float OffsetX;
+            public float OffsetY;
+            public long StartTimestamp;
+        }
+
+        private const double VisualSnapExpireMs = 600.0;
+        private const double VisualSnapTauMs = 180.0;
+        private const float MaxVisualSnapOffsetCells = 3.5f;
+
+        private static readonly double _swToMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        private static long _lastStartFrameWallTs;
+        private static double _accumPhysicsElapsedMs;
+        private static double _currentPhysicsSpanMs = LockstepClock.MsPerPhysicsTick;
+        private static volatile bool _hasPhysicsStep;
+        private static volatile float _frameInterpAlpha = -1f;
+        private static readonly ConcurrentDictionary<ulong, VisualSnapEntry> _visualSnapOffsets =
+            new ConcurrentDictionary<ulong, VisualSnapEntry>();
+        private static readonly List<ulong> _staleVisualSnapIds = new List<ulong>();
+        private static volatile bool _hasVisualSnapOffsets;
+        private static long _currentFrameTimestamp;
+
+        private static bool _posAccessorsCompiled;
+        private static Func<DXEntity, PointF> _fastGetRawPos;
+        private static Action<DXEntity, PointF> _fastSetRawPos;
+
+        public static void RecordVisualSnapOffset(ulong entityId, float offsetX, float offsetY)
+        {
+            if (entityId == 0) return;
+            long nowTs = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_visualSnapOffsets.TryGetValue(entityId, out var prev))
+            {
+                double prevAgeMs = (nowTs - prev.StartTimestamp) * _swToMs;
+                if (prevAgeMs > 0.0 && prevAgeMs < VisualSnapExpireMs)
+                {
+                    float prevDecay = (float)Math.Exp(-prevAgeMs / VisualSnapTauMs);
+                    offsetX += prev.OffsetX * prevDecay;
+                    offsetY += prev.OffsetY * prevDecay;
+                }
+            }
+
+            float magSq = offsetX * offsetX + offsetY * offsetY;
+            if (magSq < 0.0025f) return;
+            if (magSq > MaxVisualSnapOffsetCells * MaxVisualSnapOffsetCells)
+            {
+                float scale = MaxVisualSnapOffsetCells / (float)Math.Sqrt(magSq);
+                offsetX *= scale;
+                offsetY *= scale;
+            }
+
+            _visualSnapOffsets[entityId] = new VisualSnapEntry
+            {
+                OffsetX = offsetX,
+                OffsetY = offsetY,
+                StartTimestamp = nowTs
+            };
+            _hasVisualSnapOffsets = true;
+        }
+
+        private static void EnsureRawPosAccessors()
+        {
+            if (_posAccessorsCompiled) return;
+            _posAccessorsCompiled = true;
+            try
+            {
+                var fPos = typeof(DXEntity).GetField("_Position", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (fPos == null || fPos.FieldType != typeof(PointF))
+                {
+                    ModLogger.Warn("[RenderInterp] DXEntity._Position field not found; staying discrete.");
+                    return;
+                }
+
+                var dmGet = new DynamicMethod("TABCoop_GetRawEntityPos", typeof(PointF), new[] { typeof(DXEntity) },
+                    typeof(RenderVisualInterpolationPatch).Module, skipVisibility: true);
+                var ilG = dmGet.GetILGenerator();
+                ilG.Emit(OpCodes.Ldarg_0);
+                ilG.Emit(OpCodes.Ldfld, fPos);
+                ilG.Emit(OpCodes.Ret);
+                _fastGetRawPos = (Func<DXEntity, PointF>)dmGet.CreateDelegate(typeof(Func<DXEntity, PointF>));
+
+                var dmSet = new DynamicMethod("TABCoop_SetRawEntityPos", typeof(void), new[] { typeof(DXEntity), typeof(PointF) },
+                    typeof(RenderVisualInterpolationPatch).Module, skipVisibility: true);
+                var ilS = dmSet.GetILGenerator();
+                ilS.Emit(OpCodes.Ldarg_0);
+                ilS.Emit(OpCodes.Ldarg_1);
+                ilS.Emit(OpCodes.Stfld, fPos);
+                ilS.Emit(OpCodes.Ret);
+                _fastSetRawPos = (Action<DXEntity, PointF>)dmSet.CreateDelegate(typeof(Action<DXEntity, PointF>));
+
+                ModLogger.Info("[Perf] Compiled DynamicMethods TABCoop_GetRawEntityPos / SetRawEntityPos.");
+            }
+            catch (Exception ex)
+            {
+                _fastGetRawPos = null;
+                _fastSetRawPos = null;
+                ModLogger.Warn($"[RenderInterp] Failed to compile raw position accessors: {ex.Message}");
+            }
+        }
+
+        internal static void Reset()
+        {
+            _hasPhysicsStep = false;
+            _accumPhysicsElapsedMs = 0.0;
+            _currentPhysicsSpanMs = LockstepClock.MsPerPhysicsTick;
+            _lastStartFrameWallTs = 0;
+            _frameInterpAlpha = -1f;
+            _hasVisualSnapOffsets = false;
+            _visualSnapOffsets.Clear();
+            _currentFrameTimestamp = 0;
+        }
+
+        internal static void OnPhysicsStepCompleted()
+        {
+            double prevSpan = _currentPhysicsSpanMs > 1.0 ? _currentPhysicsSpanMs : LockstepClock.MsPerPhysicsTick;
+            double overshoot = _hasPhysicsStep ? (_accumPhysicsElapsedMs - prevSpan) : 0.0;
+            if (overshoot < 0.0) overshoot = 0.0;
+            if (overshoot > LockstepClock.MsPerLogicTick * 0.9) overshoot = LockstepClock.MsPerLogicTick * 0.9;
+
+            double rem = DXGame.Current != null ? (DXGame.Current.GameTime - DXPhysicWorld.LastGameTimeUpdatePhysics) : 0.0;
+            if (rem < 0.0 || rem > LockstepClock.MsPerPhysicsTick) rem = 0.0;
+            int ticksToNext = Math.Max(1, (int)Math.Ceiling((LockstepClock.MsPerPhysicsTick - rem - 0.001) / LockstepClock.MsPerLogicTick));
+            _currentPhysicsSpanMs = ticksToNext * LockstepClock.MsPerLogicTick;
+
+            _accumPhysicsElapsedMs = overshoot;
+            _hasPhysicsStep = true;
+            float a = (float)(_accumPhysicsElapsedMs / _currentPhysicsSpanMs);
+            _frameInterpAlpha = a < 0f ? 0f : (a > 1f ? 1f : a);
+        }
+
+        internal static void UpdateFrameAlpha()
+        {
+            long nowTs = System.Diagnostics.Stopwatch.GetTimestamp();
+            double dtMs = _lastStartFrameWallTs > 0 ? (nowTs - _lastStartFrameWallTs) * _swToMs : 0.0;
+            _lastStartFrameWallTs = nowTs;
+            _currentFrameTimestamp = nowTs;
+
+            if (_hasVisualSnapOffsets)
+            {
+                _staleVisualSnapIds.Clear();
+                foreach (var kv in _visualSnapOffsets)
+                {
+                    if ((nowTs - kv.Value.StartTimestamp) * _swToMs > VisualSnapExpireMs)
+                        _staleVisualSnapIds.Add(kv.Key);
+                }
+                for (int i = 0; i < _staleVisualSnapIds.Count; i++)
+                    _visualSnapOffsets.TryRemove(_staleVisualSnapIds[i], out _);
+                _hasVisualSnapOffsets = !_visualSnapOffsets.IsEmpty;
+            }
+
+            if (!LockstepClock.IsDeterministicModeActive
+                || Testing.DeterministicReplayVerifier.IsRunning
+                || LockstepClock.LoadingLevel
+                || !_hasPhysicsStep
+                || DXGame.IsInDesigner)
+            {
+                _frameInterpAlpha = -1f;
+                return;
+            }
+
+            EnsureRawPosAccessors();
+            if (_fastGetRawPos == null || _fastSetRawPos == null)
+            {
+                _frameInterpAlpha = -1f;
+                return;
+            }
+
+            var game = DXGame.Current;
+            if (!LockstepClock.PausedBySession && game != null && !game.Paused && game.GameSpeed > 0.001)
+            {
+                double clampedDt = dtMs < 0.0 ? 0.0 : (dtMs > 100.0 ? 100.0 : dtMs);
+                _accumPhysicsElapsedMs += clampedDt * game.GameSpeed;
+                double maxAccum = _currentPhysicsSpanMs + LockstepClock.MsPerLogicTick;
+                if (_accumPhysicsElapsedMs > maxAccum)
+                    _accumPhysicsElapsedMs = maxAccum;
+            }
+
+            float a = (float)(_accumPhysicsElapsedMs / _currentPhysicsSpanMs);
+            _frameInterpAlpha = a < 0f ? 0f : (a > 1f ? 1f : a);
+        }
+
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            var asm = GameBridge.GameAssembly;
+            if (asm == null) yield break;
+
+            var mSprite = AccessTools.Method(asm.GetType("ZX.Components.CSprite"), "#=zyeyG75rdugKq", Type.EmptyTypes);
+            if (mSprite != null) yield return mSprite;
+
+            var mSel = AccessTools.Method(asm.GetType("ZX.Components.CSelectable"), "#=zyeyG75rdugKq", Type.EmptyTypes);
+            if (mSel != null) yield return mSel;
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix(object __instance, out RestoreState __state)
+        {
+            __state = default;
+            float alpha = _frameInterpAlpha;
+            if (alpha < 0f || __instance == null || _fastGetRawPos == null || _fastSetRawPos == null)
+                return;
+            if (LockstepClock.IsSimulationThreadActive || LockstepClock.InPhysicsStep)
+                return;
+
+            DXEntity ent = (__instance as DXComponent)?.Entity;
+
+            if (ent == null || ent.PhysicalType != DXBodyType.Dynamic || DXGame.IsInDesigner)
+                return;
+
+            var body = ent.Body;
+            if (body == null) return;
+
+            PointF lastPos = body.LastPositionComputed;
+            PointF curPos = body.PositionComputed;
+            float snapOffX = 0f, snapOffY = 0f;
+            if (_hasVisualSnapOffsets && _visualSnapOffsets.TryGetValue(ent.ID, out var snap))
+            {
+                double ageMs = (_currentFrameTimestamp - snap.StartTimestamp) * _swToMs;
+                if (ageMs < 0.0) ageMs = 0.0;
+                if (ageMs < VisualSnapExpireMs)
+                {
+                    float decay = (float)Math.Exp(-ageMs / VisualSnapTauMs);
+                    snapOffX = snap.OffsetX * decay;
+                    snapOffY = snap.OffsetY * decay;
+                }
+            }
+            if (lastPos == curPos && snapOffX == 0f && snapOffY == 0f) return;
+
+            PointF origPos = _fastGetRawPos(ent);
+            float ddx = origPos.X - curPos.X;
+            float ddy = origPos.Y - curPos.Y;
+            if (ddx * ddx + ddy * ddy > 0.01f) return;
+
+            PointF basePos = lastPos == curPos
+                ? curPos
+                : new PointF(
+                    lastPos.X + (curPos.X - lastPos.X) * alpha,
+                    lastPos.Y + (curPos.Y - lastPos.Y) * alpha);
+            PointF interpPos = new PointF(basePos.X + snapOffX, basePos.Y + snapOffY);
+            if (interpPos == origPos) return;
+
+            __state.Entity = ent;
+            __state.OrigPos = origPos;
+            __state.Active = true;
+            _fastSetRawPos(ent, interpPos);
+        }
+
+        [HarmonyFinalizer]
+        public static void Finalizer(RestoreState __state)
+        {
+            if (__state.Active && __state.Entity != null && _fastSetRawPos != null)
+                _fastSetRawPos(__state.Entity, __state.OrigPos);
+        }
+    }
+
+    /// <summary>
+    /// Smooths camera panning frame deltas during ZXSystemGameLevel.OnSetCamera and lifts the
+    /// engine's 0.7f per-frame displacement clamp (which saturates at >=16.7ms / wide zoom and
+    /// causes camera pan velocity to drop/stutter on slower frames).
+    /// </summary>
+    [HarmonyPatch]
+    public static class SmoothCameraPanPatch
+    {
+        public struct CamState
+        {
+            public bool Active;
+            public double OrigElapsed;
+            public RectangleF PrevCam;
+            public double UsedDtMs;
+        }
+
+        private static readonly double _swToMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        private static long _lastCamTs;
+        private static double _smoothedDtMs = 16.67;
+        private static MethodInfo _mApplyCamBounds;
+
+        public static MethodBase TargetMethod()
+        {
+            Type tLevelSys = GameBridge.TypeZXSystemGameLevel ?? AccessTools.TypeByName(ObfuscatedSymbols.Type_ZXSystemGameLevel);
+            return tLevelSys != null ? AccessTools.Method(tLevelSys, "OnSetCamera", Type.EmptyTypes) : null;
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix(out CamState __state)
+        {
+            __state = default;
+            if (!LockstepClock.IsDeterministicModeActive || LockstepClock.LoadingLevel)
+                return;
+            var scene = DXScene.Current;
+            if (scene == null)
+                return;
+
+            long nowTs = System.Diagnostics.Stopwatch.GetTimestamp();
+            double rawDtMs = _lastCamTs > 0 ? (nowTs - _lastCamTs) * _swToMs : 16.67;
+            _lastCamTs = nowTs;
+            if (rawDtMs < 2.0 || rawDtMs > 200.0) rawDtMs = 16.67;
+            _smoothedDtMs = _smoothedDtMs * 0.65 + rawDtMs * 0.35;
+            double useDtMs = _smoothedDtMs < 4.0 ? 4.0 : (_smoothedDtMs > 55.0 ? 55.0 : _smoothedDtMs);
+
+            __state.Active = true;
+            __state.OrigElapsed = scene.ElapsedTime;
+            __state.PrevCam = scene.CameraArea;
+            __state.UsedDtMs = useDtMs;
+            scene.ElapsedTime = useDtMs;
+        }
+
+        [HarmonyFinalizer]
+        public static void Finalizer(object __instance, CamState __state)
+        {
+            if (!__state.Active)
+                return;
+            var scene = DXScene.Current;
+            if (scene == null)
+                return;
+
+            scene.ElapsedTime = __state.OrigElapsed;
+
+            RectangleF curCam = scene.CameraArea;
+            RectangleF prevCam = __state.PrevCam;
+            if (Math.Abs(curCam.Width - prevCam.Width) < 0.001f
+                && Math.Abs(curCam.Height - prevCam.Height) < 0.001f)
+            {
+                float desiredStep = Math.Min(2.4f, 0.0007f * (float)__state.UsedDtMs * prevCam.Width);
+                if (desiredStep > 0.705f)
+                {
+                    float dx = curCam.X - prevCam.X;
+                    float dy = curCam.Y - prevCam.Y;
+                    bool pannedX = Math.Abs(Math.Abs(dx) - 0.7f) < 0.02f;
+                    bool pannedY = Math.Abs(Math.Abs(dy) - 0.7f) < 0.02f;
+                    if (pannedX || pannedY)
+                    {
+                        float scale = desiredStep / 0.7f;
+                        var adjusted = new RectangleF(
+                            prevCam.X + (pannedX ? dx * scale : dx),
+                            prevCam.Y + (pannedY ? dy * scale : dy),
+                            curCam.Width,
+                            curCam.Height);
+                        if (_mApplyCamBounds == null && __instance != null)
+                            _mApplyCamBounds = AccessTools.Method(__instance.GetType(), "#=zTPyBK8tWy$hm", new[] { typeof(RectangleF) });
+                        _mApplyCamBounds?.Invoke(__instance, new object[] { adjusted });
+                    }
+                }
+            }
         }
     }
 
@@ -1166,6 +2029,7 @@ namespace TABCoopMod.Determinism
             object userData,
             int? maxNodes)
         {
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             int safeCellSize = cellSize < 1 ? 1 : (cellSize > 3 ? 3 : cellSize);
             var req = new DXWorldGrid.PathFindingRequest(safeCellSize, p1, p2, mask, nearPath, onPathFound, userData, maxNodes, false);
             pfr = req;
@@ -1188,6 +2052,97 @@ namespace TABCoopMod.Determinism
             // If no path was found, #=zxg3EOEU9RJ22 clears #=ziMavkfK9ZJji; keep `out pfr` null as well.
             if (req.Path == null)
                 pfr = null;
+
+            System.Threading.Interlocked.Add(ref DeterministicSandboxPatches.DiagTickPathfindTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
+            System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagTickPathfindCalls);
+        }
+    }
+
+    /// <summary>
+    /// Immediately consumes synchronous pathfinding results inside CMovable.#=zUPt0E_k= instead
+    /// of leaving #=zdzxO_Le$3wwY unapplied until the next IsIAFrameModule(4) tick (+66.7ms).
+    /// Mirrors vanilla IsMultiplayer immediate re-entry right after storing #=zdzxO_Le$3wwY.
+    /// </summary>
+    [HarmonyPatch]
+    public static class CMovableImmediatePathConsumePatch
+    {
+        [ThreadStatic]
+        private static bool _inRecursiveConsume;
+        private static Type _tMovable;
+        private static FieldInfo _fNewPath;
+        private static MethodInfo _mUpdatePath;
+        private static Func<object, object> _fastGetNewPath;
+        private static Action<object, PointF, bool> _fastUpdatePath;
+        private static bool _compiled;
+
+        public static MethodBase TargetMethod()
+        {
+            _tMovable = GameBridge.GameAssembly?.GetType("ZX.Components.CMovable");
+            if (_tMovable == null) return null;
+            _fNewPath = AccessTools.Field(_tMovable, "#=zdzxO_Le$3wwY");
+            _mUpdatePath = AccessTools.Method(_tMovable, "#=zUPt0E_k=", new[] { typeof(PointF), typeof(bool) });
+            return _mUpdatePath;
+        }
+
+        private static void EnsureFastDelegates()
+        {
+            if (_compiled) return;
+            _compiled = true;
+            try
+            {
+                if (_tMovable == null || _fNewPath == null || _mUpdatePath == null) return;
+
+                var dmGet = new DynamicMethod("TABCoop_GetMovableNewPath", typeof(object), new[] { typeof(object) },
+                    typeof(CMovableImmediatePathConsumePatch).Module, skipVisibility: true);
+                var ilG = dmGet.GetILGenerator();
+                ilG.Emit(OpCodes.Ldarg_0);
+                ilG.Emit(OpCodes.Castclass, _tMovable);
+                ilG.Emit(OpCodes.Ldfld, _fNewPath);
+                ilG.Emit(OpCodes.Ret);
+                _fastGetNewPath = (Func<object, object>)dmGet.CreateDelegate(typeof(Func<object, object>));
+
+                var dmCall = new DynamicMethod("TABCoop_CallMovableUpdatePath", typeof(void),
+                    new[] { typeof(object), typeof(PointF), typeof(bool) },
+                    typeof(CMovableImmediatePathConsumePatch).Module, skipVisibility: true);
+                var ilC = dmCall.GetILGenerator();
+                ilC.Emit(OpCodes.Ldarg_0);
+                ilC.Emit(OpCodes.Castclass, _tMovable);
+                ilC.Emit(OpCodes.Ldarg_1);
+                ilC.Emit(OpCodes.Ldarg_2);
+                ilC.Emit(OpCodes.Call, _mUpdatePath);
+                ilC.Emit(OpCodes.Ret);
+                _fastUpdatePath = (Action<object, PointF, bool>)dmCall.CreateDelegate(typeof(Action<object, PointF, bool>));
+            }
+            catch (Exception ex)
+            {
+                _fastGetNewPath = null;
+                _fastUpdatePath = null;
+                ModLogger.Warn($"[Perf] CMovableImmediatePathConsume compile failed (using reflection): {ex.Message}");
+            }
+        }
+
+        [HarmonyPostfix]
+        public static void Postfix(object __instance, PointF __0, bool __1)
+        {
+            if (!LockstepClock.IsDeterministicModeActive || _inRecursiveConsume || __instance == null)
+                return;
+
+            EnsureFastDelegates();
+            object pending = _fastGetNewPath != null ? _fastGetNewPath(__instance) : _fNewPath?.GetValue(__instance);
+            if (pending == null) return;
+
+            _inRecursiveConsume = true;
+            try
+            {
+                if (_fastUpdatePath != null)
+                    _fastUpdatePath(__instance, __0, __1);
+                else
+                    _mUpdatePath?.Invoke(__instance, new object[] { __0, __1 });
+            }
+            finally
+            {
+                _inRecursiveConsume = false;
+            }
         }
     }
 
@@ -1231,7 +2186,12 @@ namespace TABCoopMod.Determinism
         public static void Prefix()
         {
             if (LockstepClock.IsDeterministicModeActive)
+            {
                 LockstepClock.EnsureBehaviourRandomOnCurrentThread();
+                var game = DXGame.Current;
+                if (game != null)
+                    LockstepClock.ReanchorSimulationRngForTick(game.IAIterationInt);
+            }
         }
     }
 
@@ -1391,6 +2351,9 @@ namespace TABCoopMod.Determinism
     /// CMovable logic/physics force computation. Vanilla only updates #=zbBN4HvXVWuDv inside
     /// UpdateSceneObjectParallel for entities visible in the local camera viewport, yet CMovable
     /// reads it for zombie gait acceleration and harpy jump timing on all entities.
+    ///
+    /// Uses a compiled DynamicMethod with skipVisibility so all 20k+ movables run with zero
+    /// reflection/boxing overhead and immediately early-return when neither jumping nor gait-moving.
     /// </summary>
     [HarmonyPatch]
     public static class CMovableSpriteProgressSyncPatch
@@ -1401,6 +2364,7 @@ namespace TABCoopMod.Determinism
         private static PropertyInfo _pTimeAnimStart;
         private static FieldInfo _fAnimProgress;
         private static MethodInfo _mAnimProgress;
+        private static Action<object, int> _fastSync;
 
         private static void EnsureMeta()
         {
@@ -1412,6 +2376,7 @@ namespace TABCoopMod.Determinism
             Type tEntity = GameBridge.TypeZXEntity;
             Type tSprite = asm.GetType("ZX.Components.CSprite");
             Type tSpriteAnim = asm.GetType("ZX.Components.SpriteAnimation");
+            Type tMovable = asm.GetType("ZX.Components.CMovable");
 
             if (tEntity != null)
                 _mGetSprite = AccessTools.Method(tEntity, "#=zbkLIvkCtqwewx0xa2A==", Type.EmptyTypes);
@@ -1424,6 +2389,107 @@ namespace TABCoopMod.Determinism
             }
             if (tSpriteAnim != null)
                 _mAnimProgress = AccessTools.Method(tSpriteAnim, "#=z_y5dBgkM5Q4t", new[] { typeof(int) });
+
+            _fastSync = TryCompileFastSync(tMovable, tEntity, tSprite, tSpriteAnim);
+        }
+
+        private static Action<object, int> TryCompileFastSync(Type tMovable, Type tEntity, Type tSprite, Type tSpriteAnim)
+        {
+            try
+            {
+                if (tMovable == null || tEntity == null || tSprite == null || tSpriteAnim == null) return null;
+                if (_mGetSprite == null || _fCurAnim == null || _pTimeAnimStart == null || _fAnimProgress == null || _mAnimProgress == null) return null;
+
+                const BindingFlags F = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                var fTargetPos = tMovable.GetField("#=zx1L3mWRqDcT7", F);
+                var fGaitFactor = tMovable.GetField("#=z0l82Y9z76YJp58yPhQ==", F);
+                var mGetJumpDestiny = tMovable.GetProperty("JumpDestiny", F)?.GetGetMethod(true);
+                var mGetEntity = typeof(DXComponent).GetProperty("Entity", F)?.GetGetMethod(true);
+                var mGetTimeAnimStart = _pTimeAnimStart.GetGetMethod(true);
+                var mPointFNullableHasValue = typeof(PointF?).GetProperty("HasValue")?.GetGetMethod();
+
+                if (fTargetPos == null || fGaitFactor == null || mGetJumpDestiny == null || mGetEntity == null ||
+                    mGetTimeAnimStart == null || mPointFNullableHasValue == null)
+                    return null;
+
+                var dm = new DynamicMethod("TABCoop_FastMovableSpriteSync", typeof(void), new[] { typeof(object), typeof(int) },
+                    typeof(CMovableSpriteProgressSyncPatch).Module, skipVisibility: true);
+                var il = dm.GetILGenerator();
+
+                var locMov = il.DeclareLocal(tMovable);
+                var locTargetOpt = il.DeclareLocal(typeof(PointF?));
+                var locJumpOpt = il.DeclareLocal(typeof(PointF?));
+                var locEnt = il.DeclareLocal(tEntity);
+                var locSprite = il.DeclareLocal(tSprite);
+
+                var lblCheckJump = il.DefineLabel();
+                var lblProceed = il.DefineLabel();
+                var lblRet = il.DefineLabel();
+
+                // mov = (CMovable)arg0;
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Castclass, tMovable);
+                il.Emit(OpCodes.Stloc, locMov);
+
+                // if (mov.#=z0l82Y9z76YJp58yPhQ== > 0f && mov.#=zx1L3mWRqDcT7.HasValue) goto proceed;
+                il.Emit(OpCodes.Ldloc, locMov);
+                il.Emit(OpCodes.Ldfld, fGaitFactor);
+                il.Emit(OpCodes.Ldc_R4, 0f);
+                il.Emit(OpCodes.Ble_Un_S, lblCheckJump);
+
+                il.Emit(OpCodes.Ldloc, locMov);
+                il.Emit(OpCodes.Ldflda, fTargetPos);
+                il.Emit(OpCodes.Call, mPointFNullableHasValue);
+                il.Emit(OpCodes.Brtrue_S, lblProceed);
+
+                // if (!mov.JumpDestiny.HasValue) return;
+                il.MarkLabel(lblCheckJump);
+                il.Emit(OpCodes.Ldloc, locMov);
+                il.Emit(OpCodes.Callvirt, mGetJumpDestiny);
+                il.Emit(OpCodes.Stloc, locJumpOpt);
+                il.Emit(OpCodes.Ldloca, locJumpOpt);
+                il.Emit(OpCodes.Call, mPointFNullableHasValue);
+                il.Emit(OpCodes.Brfalse_S, lblRet);
+
+                // ent = mov.Entity as ZXEntity; if (ent == null) return;
+                il.MarkLabel(lblProceed);
+                il.Emit(OpCodes.Ldloc, locMov);
+                il.Emit(OpCodes.Callvirt, mGetEntity);
+                il.Emit(OpCodes.Isinst, tEntity);
+                il.Emit(OpCodes.Stloc, locEnt);
+                il.Emit(OpCodes.Ldloc, locEnt);
+                il.Emit(OpCodes.Brfalse_S, lblRet);
+
+                // sprite = ent.#=zbkLIvkCtqwewx0xa2A==(); if (sprite == null) return;
+                il.Emit(OpCodes.Ldloc, locEnt);
+                il.Emit(OpCodes.Callvirt, _mGetSprite);
+                il.Emit(OpCodes.Stloc, locSprite);
+                il.Emit(OpCodes.Ldloc, locSprite);
+                il.Emit(OpCodes.Brfalse_S, lblRet);
+
+                // sprite.#=zbBN4HvXVWuDv = sprite.#=za7pUzvqbWjrs.#=z_y5dBgkM5Q4t(gameTimeInt - sprite.TimeAnimationStart);
+                il.Emit(OpCodes.Ldloc, locSprite);
+                il.Emit(OpCodes.Ldloc, locSprite);
+                il.Emit(OpCodes.Ldflda, _fCurAnim);
+                il.Emit(OpCodes.Ldarg_1);
+                il.Emit(OpCodes.Ldloc, locSprite);
+                il.Emit(OpCodes.Callvirt, mGetTimeAnimStart);
+                il.Emit(OpCodes.Sub);
+                il.Emit(OpCodes.Call, _mAnimProgress);
+                il.Emit(OpCodes.Stfld, _fAnimProgress);
+
+                il.MarkLabel(lblRet);
+                il.Emit(OpCodes.Ret);
+
+                var del = (Action<object, int>)dm.CreateDelegate(typeof(Action<object, int>));
+                ModLogger.Info("[Perf] Compiled DynamicMethod TABCoop_FastMovableSpriteSync.");
+                return del;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[Perf] TryCompileFastMovableSpriteSync failed (falling back to reflection): {ex.Message}");
+                return null;
+            }
         }
 
         public static IEnumerable<MethodBase> TargetMethods()
@@ -1432,37 +2498,55 @@ namespace TABCoopMod.Determinism
             Type tMovable = GameBridge.GameAssembly?.GetType("ZX.Components.CMovable");
             if (tMovable == null) yield break;
 
-            var mLogic = AccessTools.Method(tMovable, "#=z5GPRaBw=", Type.EmptyTypes);
-            if (mLogic != null) yield return mLogic;
+            // Only #=zMgpsCOScDEumTw2atg== (jumper height check inside #=z5GPRaBw=) and
+            // #=zi4HgedM=(PointF) (active gait speed modulation inside #=zkgQp3Dx6LolarfpKKQ==)
+            // actually read CSprite.#=zbBN4HvXVWuDv. Targeting them avoids ~21k Harmony
+            // trampolines/tick on stationary units.
+            var mJumpCheck = AccessTools.Method(tMovable, "#=zMgpsCOScDEumTw2atg==", Type.EmptyTypes);
+            if (mJumpCheck != null) yield return mJumpCheck;
 
-            var mPhysics = AccessTools.Method(tMovable, "#=zkgQp3Dx6LolarfpKKQ==", Type.EmptyTypes);
-            if (mPhysics != null) yield return mPhysics;
+            var mSteerTo = AccessTools.Method(tMovable, "#=zi4HgedM=", new[] { typeof(PointF) });
+            if (mSteerTo != null) yield return mSteerTo;
         }
 
         [HarmonyPrefix]
         public static void Prefix(DXComponent __instance)
         {
             if (!LockstepClock.IsDeterministicModeActive || __instance == null) return;
-            var entity = __instance.Entity;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             var game = DXGame.Current;
-            if (entity == null || game == null) return;
+            if (game == null) return;
 
             EnsureMeta();
-            if (_mGetSprite == null || _fCurAnim == null || _pTimeAnimStart == null || _fAnimProgress == null || _mAnimProgress == null)
-                return;
-            if (!_mGetSprite.DeclaringType.IsInstanceOfType(entity))
-                return;
+            int simTimeInt = DXGame.LastGameTimeIAUpdate > 0.0
+                ? (int)DXGame.LastGameTimeIAUpdate
+                : game.GameTimeInt;
+            if (_fastSync != null)
+            {
+                _fastSync(__instance, simTimeInt);
+            }
+            else
+            {
+                var entity = __instance.Entity;
+                if (entity == null || _mGetSprite == null || _fCurAnim == null || _pTimeAnimStart == null || _fAnimProgress == null || _mAnimProgress == null)
+                    return;
+                if (!_mGetSprite.DeclaringType.IsInstanceOfType(entity))
+                    return;
 
-            object csprite = _mGetSprite.Invoke(entity, null);
-            if (csprite == null) return;
+                object csprite = _mGetSprite.Invoke(entity, null);
+                if (csprite == null) return;
 
-            object animBox = _fCurAnim.GetValue(csprite);
-            if (animBox == null) return;
+                object animBox = _fCurAnim.GetValue(csprite);
+                if (animBox == null) return;
 
-            int animStart = (int)_pTimeAnimStart.GetValue(csprite);
-            int elapsed = game.GameTimeInt - animStart;
-            float progress = (float)_mAnimProgress.Invoke(animBox, new object[] { elapsed });
-            _fAnimProgress.SetValue(csprite, progress);
+                int animStart = (int)_pTimeAnimStart.GetValue(csprite);
+                int elapsed = simTimeInt - animStart;
+                float progress = (float)_mAnimProgress.Invoke(animBox, new object[] { elapsed });
+                _fAnimProgress.SetValue(csprite, progress);
+            }
+
+            System.Threading.Interlocked.Add(ref DeterministicSandboxPatches.DiagTickMovableSyncTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
+            System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagTickMovableSyncCalls);
         }
     }
 
@@ -1480,6 +2564,12 @@ namespace TABCoopMod.Determinism
         public static bool Prefix(DXRandom __instance, ref uint __result)
         {
             if (!LockstepClock.IsDeterministicModeActive) return true;
+            System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagRngGenCalls);
+            if (LockstepClock.TryNextEntityBehaviourRandomUInt(out uint entityRand))
+            {
+                __result = entityRand;
+                return false;
+            }
             if (!object.ReferenceEquals(__instance, _sceneGlobalSentinel)) return true;
 
             __result = LockstepClock.ShouldUseSyncedSceneRandom()
@@ -1688,11 +2778,9 @@ namespace TABCoopMod.Determinism
 
     /// <summary>
     /// Isolates camera-gated visual VFX helpers (#=zg10wm6mM9hhx: footsteps/dust puffs, blood
-    /// splatters, hit sparks, explosions, screen shake, bullet tracers) from the synced PRNG
-    /// and entity-ID streams. Callers like ZombieGiant.OnUpdate check CheckFastObjectVisibility()
-    /// / IsPixelAreaVisible / VisibleCells before invoking these helpers during UpdateGameLogic;
-    /// once Host and Client pan cameras independently, those RNG draws and transient DXEntities
-    /// would diverge immediately.
+    /// splatters, hit sparks, explosions, screen shake, bullet tracers), CShotEffect muzzle-flash
+    /// visuals (and its one-time static DXProjectLevel asset load), and auxiliary DXProjectLevel.OnLoadData
+    /// deserializations from the synced PRNG and entity-ID streams.
     /// </summary>
     [HarmonyPatch]
     public static class VisualVfxIsolationPatch
@@ -1700,13 +2788,30 @@ namespace TABCoopMod.Determinism
         public static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
         {
             var vfxType = AccessTools.TypeByName("#=zg10wm6mM9hhx");
-            if (vfxType == null) yield break;
-
-            foreach (var m in AccessTools.GetDeclaredMethods(vfxType))
+            if (vfxType != null)
             {
-                if (m != null && !m.IsAbstract && !m.ContainsGenericParameters)
-                    yield return m;
+                foreach (var m in AccessTools.GetDeclaredMethods(vfxType))
+                {
+                    if (m != null && !m.IsAbstract && !m.ContainsGenericParameters)
+                        yield return m;
+                }
             }
+
+            // CShotEffect lazily deserializes a static DXProjectLevel once per process in #=zcv694jLlBMdF()
+            // on first OnSceneAdded(), and allocates visual DXProjectObject_Sprite clips.
+            var shotType = AccessTools.TypeByName("ZX.Components.CShotEffect");
+            if (shotType != null)
+            {
+                foreach (var m in AccessTools.GetDeclaredMethods(shotType))
+                {
+                    if (m != null && !m.IsAbstract && !m.ContainsGenericParameters && !m.IsConstructor)
+                        yield return m;
+                }
+            }
+
+            var projLevelLoad = AccessTools.DeclaredMethod(typeof(DXProjectLevel), "OnLoadData");
+            if (projLevelLoad != null)
+                yield return projLevelLoad;
         }
 
         [HarmonyPrefix]
@@ -1727,17 +2832,84 @@ namespace TABCoopMod.Determinism
     public static class PostMethodInvokeContextPatch
     {
         [HarmonyPrefix]
-        public static void Prefix(ref Action method)
+        public static bool Prefix(DXPostMethodManager __instance, ref Action method)
         {
             if (method == null || !LockstepClock.IsDeterministicModeActive)
-                return;
+                return true;
             if (LockstepClock.LoadingLevel || LockstepClock.InAudioContext || LockstepClock.InVisualVfxContext)
-                return;
-            if (!LockstepClock.InDeterministicContext && !LockstepClock.LogicTickActive && !LockstepClock.InPhysicsContext)
-                return;
+                return true;
+
+            int main = LockstepClock.MainThreadId;
+            bool onMain = main != 0 && Thread.CurrentThread.ManagedThreadId == main;
+            bool isSimThread = LockstepClock.InDeterministicContext
+                || (LockstepClock.LogicTickActive && !onMain)
+                || LockstepClock.IsPhysicsThreadActive();
+            if (!isSimThread)
+                return true;
 
             Action orig = method;
+            System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagPostWrapCalls);
+
+            // When _TaskLogic runs concurrently with RenderFrame(), defer OnStartFrame/OnFinishFrame/
+            // OnSafeLogicAndDrawing callbacks enqueued from the worker thread until WaitForGameLogic
+            // finishes so render timing can never change which tick executes a simulation callback.
+            var game = DXGame.Current;
+            if (DeterministicSandboxPatches.IsAsyncTickInFlight && !onMain && game != null
+                && (object.ReferenceEquals(__instance, game.PostMethods_OnStartFrame)
+                    || object.ReferenceEquals(__instance, game.PostMethods_OnFinishFrame)
+                    || object.ReferenceEquals(__instance, game.PostMethods_OnSafeLogicAndDrawing)))
+            {
+                DeterministicSandboxPatches.EnqueueDeferredAsyncPostMethod(orig);
+                return false;
+            }
+
             method = () => LockstepClock.RunInDeterministicContext(orig);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Prevents DXGame.OnRender / FinishFrame from draining PostMethods_OnFinishFrame (or
+    /// StartFrame/SafeLogic) on the main thread while an async _TaskLogic tick is in flight,
+    /// e.g. callbacks queued synchronously by FlushDueTurnCommands just prior to launching _TaskLogic.
+    /// WaitForGameLogic_Postfix drains all three queues deterministically once the worker completes.
+    /// </summary>
+    [HarmonyPatch(typeof(DXPostMethodManager), nameof(DXPostMethodManager.ExecuteAll))]
+    public static class PostMethodExecuteAsyncGuardPatch
+    {
+        [HarmonyPrefix]
+        public static bool Prefix(DXPostMethodManager __instance)
+        {
+            if (!DeterministicSandboxPatches.IsAsyncTickInFlight)
+                return true;
+
+            var game = DXGame.Current;
+            if (game != null && (object.ReferenceEquals(__instance, game.PostMethods_OnStartFrame)
+                || object.ReferenceEquals(__instance, game.PostMethods_OnFinishFrame)
+                || object.ReferenceEquals(__instance, game.PostMethods_OnSafeLogicAndDrawing)))
+            {
+                return false;
+            }
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Marks LoadingLevel = true right when ZXGame.LoadGameAndEnter begins loading a .zxsav file,
+    /// allowing menu Co-op sessions to defer LoadingLevel until an actual save load occurs (so
+    /// New Survival map generation creates normal tracked entity IDs rather than 0x8000... UI IDs).
+    /// </summary>
+    [HarmonyPatch]
+    public static class LoadGameLoadingFlagPatch
+    {
+        private static MethodBase TargetMethod() =>
+            AccessTools.Method(GameBridge.TypeZXGame, ObfuscatedSymbols.Method_ZXGame_LoadGameAndEnter, new[] { typeof(string) });
+
+        [HarmonyPrefix]
+        public static void Prefix()
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                LockstepClock.LoadingLevel = true;
         }
     }
 
@@ -1753,8 +2925,14 @@ namespace TABCoopMod.Determinism
         private static Type _cspriteType;
         private static int _cspriteTypeId;
         private static MethodInfo _pullMethod;
+        private static MethodInfo _isPulledGetter;
         private static PropertyInfo _paramsProp;
         private static PropertyInfo _canBePulledProp;
+        private static Action<object> _fastPull;
+        private static Func<object, bool> _fastIsPulled;
+        private static bool _fastCompiled;
+        private static readonly HashSet<DXEntity> _activePullEntities = new HashSet<DXEntity>();
+        private static DXLevel _lastColdScanLevel;
         private static readonly System.Collections.Generic.Dictionary<Type, bool> _canPullCache =
             new System.Collections.Generic.Dictionary<Type, bool>();
 
@@ -1765,7 +2943,44 @@ namespace TABCoopMod.Determinism
             _cspriteTypeId = DXComponent.GetIDFromType(_cspriteType);
             _paramsProp = AccessTools.Property(_cspriteType, "Params");
             _pullMethod = AccessTools.Method(_cspriteType, "#=zykGuoNdyOv10tsMpy8FzNkE=");
+            _isPulledGetter = AccessTools.Property(_cspriteType, "IsPulled")?.GetGetMethod(true);
             return _pullMethod;
+        }
+
+        private static void EnsureFastDelegates()
+        {
+            if (_fastCompiled) return;
+            _fastCompiled = true;
+            try
+            {
+                if (_cspriteType == null || _pullMethod == null || _isPulledGetter == null) return;
+
+                var dmPull = new DynamicMethod("TABCoop_FastSpritePull", typeof(void), new[] { typeof(object) },
+                    typeof(CSpritePullIsolationPatch).Module, skipVisibility: true);
+                var ilP = dmPull.GetILGenerator();
+                ilP.Emit(OpCodes.Ldarg_0);
+                ilP.Emit(OpCodes.Castclass, _cspriteType);
+                ilP.Emit(OpCodes.Callvirt, _pullMethod);
+                ilP.Emit(OpCodes.Ret);
+                _fastPull = (Action<object>)dmPull.CreateDelegate(typeof(Action<object>));
+
+                var dmIs = new DynamicMethod("TABCoop_FastSpriteIsPulled", typeof(bool), new[] { typeof(object) },
+                    typeof(CSpritePullIsolationPatch).Module, skipVisibility: true);
+                var ilI = dmIs.GetILGenerator();
+                ilI.Emit(OpCodes.Ldarg_0);
+                ilI.Emit(OpCodes.Castclass, _cspriteType);
+                ilI.Emit(OpCodes.Callvirt, _isPulledGetter);
+                ilI.Emit(OpCodes.Ret);
+                _fastIsPulled = (Func<object, bool>)dmIs.CreateDelegate(typeof(Func<object, bool>));
+
+                ModLogger.Info("[Perf] Compiled DynamicMethods TABCoop_FastSpritePull / IsPulled.");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[Perf] FastSpritePull compile failed (falling back to reflection): {ex.Message}");
+                _fastPull = null;
+                _fastIsPulled = null;
+            }
         }
 
         [HarmonyPrefix]
@@ -1780,6 +2995,22 @@ namespace TABCoopMod.Determinism
             if (bodies == null || _pullMethod == null || _cspriteType == null)
                 return;
 
+            EnsureFastDelegates();
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            int calls = 0;
+
+            var curLevel = DXLevel.Current;
+            bool coldScan = !object.ReferenceEquals(_lastColdScanLevel, curLevel);
+            if (coldScan)
+            {
+                _lastColdScanLevel = curLevel;
+                _activePullEntities.Clear();
+            }
+            else if (_activePullEntities.Count > 0)
+            {
+                _activePullEntities.RemoveWhere(ent => ent == null || ent.Disposed);
+            }
+
             LockstepClock.AllowCSpritePullUpdate = true;
             try
             {
@@ -1790,6 +3021,13 @@ namespace TABCoopMod.Determinism
                     var e = body?.GameEntity;
                     if (e == null || e.Disposed || e.PhysicalType == DXBodyType.Static)
                         continue;
+
+                    if (!coldScan)
+                    {
+                        var v = body.Velocity;
+                        if (v.X * v.X + v.Y * v.Y <= 0.04f && !_activePullEntities.Contains(e))
+                            continue;
+                    }
 
                     Type entType = e.GetType();
                     bool knownCanPull;
@@ -1814,13 +3052,203 @@ namespace TABCoopMod.Determinism
                         if (!knownCanPull) continue;
                     }
 
-                    _pullMethod.Invoke(csprite, null);
+                    if (_fastPull != null)
+                        _fastPull(csprite);
+                    else
+                        _pullMethod.Invoke(csprite, null);
+
+                    bool nowPulled = _fastIsPulled != null
+                        ? _fastIsPulled(csprite)
+                        : (_isPulledGetter != null && (bool)_isPulledGetter.Invoke(csprite, null));
+                    if (nowPulled)
+                        _activePullEntities.Add(e);
+                    else
+                        _activePullEntities.Remove(e);
+
+                    calls++;
                 }
             }
             finally
             {
                 LockstepClock.AllowCSpritePullUpdate = false;
+                DeterministicSandboxPatches.DiagTickPullSyncTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+                DeterministicSandboxPatches.DiagTickPullSyncCalls += calls;
             }
+        }
+    }
+
+    /// <summary>
+    /// Prevents DXGame._TaskGameTime background thread from mutating DXGame._GameTime and
+    /// DXGame.GameTimeInt asynchronously while deterministic mode is active. Since .NET JIT
+    /// inlines DXGame.get_GameTimeInt() across assemblies, freezing the backing field itself
+    /// ensures CMovable, CSprite, and ZXEntity read identical tick timestamps across peers.
+    /// </summary>
+    [HarmonyPatch(typeof(DXGame), nameof(DXGame.GameTime), MethodType.Setter)]
+    public static class GameTimeIsolationPatch
+    {
+        [HarmonyPrefix]
+        public static bool Prefix()
+        {
+            if (!LockstepClock.IsDeterministicModeActive || LockstepClock.LoadingLevel)
+                return true;
+            return LockstepClock.AllowRawGameTimeSet;
+        }
+    }
+
+    /// <summary>
+    /// Recreates the native Chipmunk2D cpSpace inside DXPhysicWorld.Clear() when deterministic mode
+    /// is active. DXPhysicWorld.Init() normally runs only once per process, so cpSpace->shapeIDCounter,
+    /// cpBBTree leaf/node pools, and cached arbiters carry across reloads/Auto-resync and alter
+    /// cpBBTree query traversal and Gauss-Seidel arbiter ordering between Host and Client.
+    /// </summary>
+    [HarmonyPatch(typeof(DXPhysicWorld), nameof(DXPhysicWorld.Clear))]
+    public static class DXPhysicWorldClearPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            if (!LockstepClock.IsDeterministicModeActive || !DXPhysicWorld.Initialized)
+                return;
+
+            lock (DXPhysicWorld.Sync)
+            {
+                long prevIdCnt = DXPhysicWorld.Handle != IntPtr.Zero
+                    ? System.Runtime.InteropServices.Marshal.ReadInt64(DXPhysicWorld.Handle, 0x58)
+                    : -1;
+                DXPhysicWorld.Init(10);
+                DXPool.Clear();
+                ModLogger.Info($"[LockstepClock] DXPhysicWorld.Clear -> reset cpSpace and DXPool (prevPhysIdCnt={prevIdCnt}, newSpace=0x{DXPhysicWorld.Handle.ToInt64():X}).");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Ensures pooled DXEntity instances (such as Proyectile) acquire a fresh deterministic
+    /// DXGuid.New() on pool reuse just like newly constructed instances, eliminating
+    /// render-frame pool hit/miss divergence across reloads and differing client framerates.
+    /// </summary>
+    [HarmonyPatch(typeof(DXEntity), nameof(DXEntity.OnPoolNew))]
+    public static class DXEntityOnPoolNewPatch
+    {
+        [HarmonyPrefix]
+        public static void Prefix(DXEntity __instance)
+        {
+            if (LockstepClock.IsDeterministicModeActive && __instance != null)
+                __instance.ID = 0L;
+        }
+    }
+
+    /// <summary>
+    /// Scopes behaviour RNG draws inside ZXBehaviour.Run() to a stateless per-entity SplitMix64
+    /// sequence keyed by (SyncedRandomSeed, SimTick, Entity.ID, drawIndex). Because every entity
+    /// receives an independent RNG stream, an extra draw by one unit or zombie can never shift
+    /// the behaviour random numbers of any other entity within the same simulation tick.
+    /// </summary>
+    [HarmonyPatch]
+    public static class ZXBehaviourRunRngScopePatch
+    {
+        private static bool _metaInit;
+        private static Type _tBehaviour;
+        private static Type _tBData;
+        private static MethodInfo _mGetData;
+        private static MethodInfo _mGetOwner;
+        private static Func<object, ulong> _fastGetEntityId;
+
+        private static MethodBase TargetMethod()
+        {
+            var tBehav = AccessTools.TypeByName(Core.ObfuscatedSymbols.Type_ZXBehaviour);
+            if (tBehav == null) return null;
+            EnsureMeta();
+            return AccessTools.Method(tBehav, "Run", Type.EmptyTypes);
+        }
+
+        private static void EnsureMeta()
+        {
+            if (_metaInit) return;
+            _metaInit = true;
+            try
+            {
+                var asm = Core.GameBridge.GameAssembly;
+                if (asm == null) return;
+
+                _tBehaviour = AccessTools.TypeByName(Core.ObfuscatedSymbols.Type_ZXBehaviour);
+                _tBData = asm.GetType("ZX.Behaviours.BData");
+                if (_tBehaviour == null || _tBData == null) return;
+
+                _mGetData = _tBehaviour.GetProperty("Data", BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy)?.GetGetMethod(true);
+                FieldInfo fOwner = _tBData.GetField("#=zIuCqHApzmkOGXXyxMg==", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                _mGetOwner = AccessTools.Method(_tBData, Core.ObfuscatedSymbols.Method_BData_GetOwner, Type.EmptyTypes);
+                MethodInfo mGetEntityId = typeof(DXEntity).GetProperty("ID", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod(true);
+
+                if (_mGetData != null && fOwner != null && mGetEntityId != null)
+                {
+                    var dm = new DynamicMethod("TABCoop_GetBehavOwnerEntityId", typeof(ulong), new[] { typeof(object) },
+                        typeof(ZXBehaviourRunRngScopePatch).Module, skipVisibility: true);
+                    var il = dm.GetILGenerator();
+                    var locData = il.DeclareLocal(_tBData);
+                    var locOwner = il.DeclareLocal(typeof(DXEntity));
+                    var lblZero = il.DefineLabel();
+
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Brfalse_S, lblZero);
+
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Castclass, _tBehaviour);
+                    il.Emit(OpCodes.Callvirt, _mGetData);
+                    il.Emit(OpCodes.Stloc, locData);
+                    il.Emit(OpCodes.Ldloc, locData);
+                    il.Emit(OpCodes.Brfalse_S, lblZero);
+
+                    il.Emit(OpCodes.Ldloc, locData);
+                    il.Emit(OpCodes.Ldfld, fOwner);
+                    il.Emit(OpCodes.Stloc, locOwner);
+                    il.Emit(OpCodes.Ldloc, locOwner);
+                    il.Emit(OpCodes.Brfalse_S, lblZero);
+
+                    il.Emit(OpCodes.Ldloc, locOwner);
+                    il.Emit(OpCodes.Callvirt, mGetEntityId);
+                    il.Emit(OpCodes.Ret);
+
+                    il.MarkLabel(lblZero);
+                    il.Emit(OpCodes.Ldc_I4_0);
+                    il.Emit(OpCodes.Conv_I8);
+                    il.Emit(OpCodes.Ret);
+
+                    _fastGetEntityId = (Func<object, ulong>)dm.CreateDelegate(typeof(Func<object, ulong>));
+                    ModLogger.Info("[Perf] Compiled DynamicMethod TABCoop_GetBehavOwnerEntityId.");
+                }
+            }
+            catch (Exception ex)
+            {
+                _fastGetEntityId = null;
+                ModLogger.Warn($"[LockstepClock] ZXBehaviourRunRngScopePatch meta init failed (using reflection): {ex.Message}");
+            }
+        }
+
+        private static ulong ResolveEntityId(object behaviour)
+        {
+            if (behaviour == null) return 0UL;
+            if (!_metaInit) EnsureMeta();
+            if (_fastGetEntityId != null)
+                return _fastGetEntityId(behaviour);
+
+            object data = _mGetData?.Invoke(behaviour, null);
+            if (data == null) return 0UL;
+            var owner = _mGetOwner?.Invoke(data, null) as DXEntity;
+            return owner != null ? owner.ID : 0UL;
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix(object __instance)
+        {
+            if (!LockstepClock.IsDeterministicModeActive) return;
+            LockstepClock.EnterEntityBehaviourRngScope(ResolveEntityId(__instance));
+        }
+
+        [HarmonyFinalizer]
+        public static void Finalizer()
+        {
+            LockstepClock.ExitEntityBehaviourRngScope();
         }
     }
 }

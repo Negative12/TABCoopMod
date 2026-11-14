@@ -221,7 +221,12 @@ namespace TABCoopMod.Commands
                     case NetCommandType.MayorVoteOrSelect:
                         if (!string.IsNullOrEmpty(netCmd.MayorId) && GameBridge.ApplyMayor(netCmd.MayorId))
                         {
-                            GameBridge.ShowTopBanner($"Player {netCmd.PlayerId} selected a mayor", Color.Gold, 1500);
+                            string mayorName = GameBridge.GetMayorNameById(netCmd.MayorId);
+                            GameBridge.ShowTopBanner(
+                                string.IsNullOrEmpty(mayorName)
+                                    ? $"Player {netCmd.PlayerId} selected a mayor"
+                                    : $"Player {netCmd.PlayerId} selected mayor: {mayorName}",
+                                Color.Gold, 2500);
                         }
                         break;
                 }
@@ -263,7 +268,14 @@ namespace TABCoopMod.Commands
                 if (!IsLiveExecutableEntity(executor))
                     continue;
 
+                if (GameBridge.IsResourceSpendingCommand(cmd, executor) && !GameBridge.CanExecuteCommandOnEntity(cmd, executor))
+                {
+                    ModLogger.Info($"[CommandExecutor] Rejected {cmd.GetType().Name} on {entityId}: CanExecute=false.");
+                    continue;
+                }
+
                 GameBridge.ExecuteCommandOnEntity(cmd, executor, target);
+                GameBridge.NotifyUnitCommandExecuted(executor, cmd);
             }
         }
 
@@ -302,6 +314,7 @@ namespace TABCoopMod.Commands
                 if (unitTarget == null) continue;
 
                 GameBridge.ExecuteCommandOnEntity(cmd, entity, unitTarget);
+                GameBridge.NotifyUnitCommandExecuted(entity, cmd);
             }
         }
 
@@ -323,18 +336,36 @@ namespace TABCoopMod.Commands
 
             if (!IsLiveExecutableEntity(builder)) return;
 
-            object target = BuildCommandTarget(netCmd);
-
             // Mayor-reward buildings come from EntityBonusCreation, which internally calls
             // Build.PlaceBuilding(isBonus:true). Executing the Build command instead would charge
             // resources and produce a different structure, so replay it through PlaceBuilding.
             if (netCmd.IsBonusBuilding)
             {
-                GameBridge.PlaceBuilding(builder, target, buildingType, isBonus: true, instant: netCmd.InstantBuild, template: null);
+                if (!GameBridge.CanPlaceBuildingAtTarget(buildingType, netCmd.TargetPosition, netCmd.TargetSize, netCmd.TargetOrigin))
+                {
+                    ModLogger.Info($"[CommandExecutor] Rejected bonus PlaceBuilding {netCmd.BuildingTypeName}: target cells occupied or invalid.");
+                    return;
+                }
+                object bonusTarget = BuildCommandTarget(netCmd);
+                GameBridge.PlaceBuilding(builder, bonusTarget, buildingType, isBonus: true, instant: netCmd.InstantBuild, template: null);
+                GameBridge.FlushStartFramePostMethods();
                 return;
             }
 
             object buildCmd = GameBridge.GetBuildCommandForType(buildingType);
+            if (buildCmd != null && !GameBridge.CanExecuteCommandOnEntity(buildCmd, builder))
+            {
+                ModLogger.Info($"[CommandExecutor] Rejected PlaceBuilding {netCmd.BuildingTypeName}: CanExecute=false (insufficient resources or prerequisites).");
+                return;
+            }
+
+            if (!GameBridge.CanPlaceBuildingAtTarget(buildingType, netCmd.TargetPosition, netCmd.TargetSize, netCmd.TargetOrigin))
+            {
+                ModLogger.Info($"[CommandExecutor] Rejected PlaceBuilding {netCmd.BuildingTypeName} at ({netCmd.TargetPosition.X:F1},{netCmd.TargetPosition.Y:F1}): target cells occupied or invalid.");
+                return;
+            }
+
+            object target = BuildCommandTarget(netCmd);
             if (buildCmd != null)
             {
                 // Execute through Build.#=zfmgzkuw= so resource deduction and statistics are properly applied!
@@ -344,6 +375,9 @@ namespace TABCoopMod.Commands
             {
                 GameBridge.PlaceBuilding(builder, target, buildingType, netCmd.IsBonusBuilding, netCmd.InstantBuild, null);
             }
+            // Commit AddToScene() / replacement Destroy immediately so subsequent PlaceBuilding
+            // commands in the same tick see occupied cells on DXWorldGrid.
+            GameBridge.FlushStartFramePostMethods();
         }
 
         private static void ExecuteCancelCurrentOrder(NetCommand netCmd)

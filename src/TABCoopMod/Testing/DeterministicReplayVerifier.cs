@@ -43,6 +43,7 @@ namespace TABCoopMod.Testing
         private static int _shotDueCount = -1;
         private static int _armTick = -1;
         private static int _lastEntityCount = -1;
+        private static int _lastRecordedTick = -1;
         private static int _settleStreak;
         private const int SettleStreakTicks = 10;
         private const int SettleGiveUpTicks = 600;
@@ -120,6 +121,7 @@ namespace TABCoopMod.Testing
                 _driver = null;
                 _armTick = -1;
                 _lastEntityCount = -1;
+                _lastRecordedTick = -1;
                 _settleStreak = 0;
                 _reloadPending = false;
                 _shotDueCount = -1;
@@ -342,6 +344,10 @@ namespace TABCoopMod.Testing
 
             // Guarantee the logic Task has finished regardless of patch ordering vs the clock patch.
             try { AccessTools.Method(typeof(DXGame), "WaitForGameLogic")?.Invoke(DXGame.Current, null); } catch { }
+
+            int curTick = DXGame.Current?.IAIterationInt ?? tick;
+            if (curTick <= _lastRecordedTick) return;
+            _lastRecordedTick = curTick;
 
             try
             {

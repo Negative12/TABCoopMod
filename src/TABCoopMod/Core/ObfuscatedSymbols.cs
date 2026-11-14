@@ -214,5 +214,13 @@ namespace TABCoopMod.Core
         public const string Type_Zombie                      = "ZX.Entities.Zombie";
         public const string Method_ZXEntity_GetBehaviour     = "#=zrPViR3ZjTZsjVndIuu8$9io=";
         public const string Field_BData_TargetRef            = "#=zP9AEykk6714q";
+        public const string Method_ZXEntity_CanPlaceAtCell   = "#=z2IRuTX3OAzJgkAHNDKW65bN9UxnV";
+        public const string Method_ZXEntity_UpdateCellPosition = "#=zthu8vuk=";
+
+        // ====================================================================
+        // 14. Mayor Choosing State on ZX.ZXLevelState
+        // ====================================================================
+        public const string Method_ZXLevelState_IsChoosingMayor  = "#=zL2Yzn7nYwjqmjuOHNGOPtmw=";
+        public const string Method_ZXLevelState_SetChoosingMayor = "#=zNc5a0Zvt_w5ui5CfZqiEAkE=";
     }
 }

@@ -26,11 +26,18 @@ namespace TABCoopMod.Determinism
         private static Type _reservationStateType;
         private static bool _reflectionWarned;
 
+        private const byte FlagIgnore = 1;
+        private const byte FlagProjectile = 2;
+        private const byte FlagZombie = 4;
+        private static readonly Dictionary<Type, byte> _entityTypeFlags = new Dictionary<Type, byte>();
+
         public struct EntityPosSample
         {
             public ulong Id;
             public float X;
             public float Y;
+            public int Life;
+            public bool IsDynamic;
         }
 
         public struct LevelStateSnapshotDigest
@@ -126,9 +133,25 @@ namespace TABCoopMod.Determinism
                     _inEpoch = true;
                 }
 
-                if (game.Entities != null)
+                ulong targetSlot = (ulong)slot;
+                var fastEntities = GameBridge.GetEntitiesList(game);
+                if (fastEntities != null)
                 {
-                    ulong targetSlot = (ulong)slot;
+                    int n = fastEntities.Count;
+                    for (int i = 0; i < n; i++)
+                    {
+                        var entity = fastEntities[i];
+                        if (entity == null || entity.Disposed)
+                            continue;
+                        if ((entity.ID & 0x8000000000000000UL) != 0)
+                            continue;
+                        if ((entity.ID % (ulong)EpochTicks) != targetSlot)
+                            continue;
+                        AccumulateEntity(entity, _acc);
+                    }
+                }
+                else if (game.Entities != null)
+                {
                     foreach (var entity in game.Entities)
                     {
                         if (entity == null || entity.Disposed)
@@ -182,28 +205,44 @@ namespace TABCoopMod.Determinism
         {
             // Bare DXEntity instances (e.g. blood/hit sprites) and non-interactive ambient birds
             // (Raven) are purely visual/ambient and do not affect simulation state.
-            string typeName = entity.GetType().Name;
-            if (entity.GetType() == typeof(DXEntity) || string.Equals(typeName, "Raven", StringComparison.Ordinal))
+            Type entityType = entity.GetType();
+            if (!_entityTypeFlags.TryGetValue(entityType, out byte flags))
+            {
+                string typeName = entityType.Name;
+                if (entityType == typeof(DXEntity) || string.Equals(typeName, "Raven", StringComparison.Ordinal))
+                    flags = FlagIgnore;
+                else if (IsProjectileName(typeName))
+                    flags = FlagProjectile;
+                else if (GameBridge.IsZombieType(entityType))
+                    flags = FlagZombie;
+                _entityTypeFlags[entityType] = flags;
+            }
+            if ((flags & FlagIgnore) != 0)
                 return;
 
-            acc.EntityCount++;
             float px = entity.Position.X;
             float py = entity.Position.Y;
             long qx = (long)Math.Round(px * 100f);
             long qy = (long)Math.Round(py * 100f);
 
-            bool isProjectile = IsProjectileName(typeName);
             int lifeValue = GameBridge.GetLifeValue(entity);
 
-            if (isProjectile)
+            if ((flags & FlagProjectile) != 0)
             {
                 acc.ProjectileCount++;
                 acc.ProjectileChecksum += (long)entity.ID ^ (qx * 92837111L) ^ (qy * 689287499L) ^ (lifeValue * 283923481L);
                 return;
             }
 
-            if (acc.DynamicPositions != null && entity.PhysicalType == DXBodyType.Dynamic)
-                acc.DynamicPositions.Add(new EntityPosSample { Id = entity.ID, X = px, Y = py });
+            // Projectiles are transient combat effects and tracked strictly via ProjectileCount /
+            // ProjectileChecksum above so a +-1 arrow flight never triggers EntityCount divergence.
+            acc.EntityCount++;
+
+            bool isDynamic = entity.PhysicalType == DXBodyType.Dynamic;
+            // Dynamic bodies carry position + HP for async alignment; static entities with HP
+            // (walls/buildings) are sampled too so host-authoritative HP correction covers them.
+            if (acc.DynamicPositions != null && (isDynamic || lifeValue > 0))
+                acc.DynamicPositions.Add(new EntityPosSample { Id = entity.ID, X = px, Y = py, Life = lifeValue, IsDynamic = isDynamic });
 
             long posMix = (long)entity.ID ^ (qx * 73856093L) ^ (qy * 19349663L);
             acc.PosChecksum += posMix;
@@ -214,7 +253,7 @@ namespace TABCoopMod.Determinism
             acc.CoarsePosChecksum += (long)entity.ID ^ (cx * 73856093L) ^ (cy * 19349663L);
             acc.LifeChecksum += (long)entity.ID ^ (lifeValue * 83492791L);
 
-            if (entity.PhysicalType == DXBodyType.Dynamic)
+            if (isDynamic && (flags & FlagZombie) != 0)
             {
                 long aggroSig = GameBridge.GetZombieAggroSignature(entity, out bool isAlerted);
                 if (isAlerted)
@@ -224,7 +263,8 @@ namespace TABCoopMod.Determinism
                 }
             }
 
-            acc.QueuedOrderCount += MixQueue(entity, ref acc.ProductionChecksum);
+            if ((flags & FlagZombie) == 0)
+                acc.QueuedOrderCount += MixQueue(entity, ref acc.ProductionChecksum);
         }
 
         private static LevelStateSnapshotDigest FinalizeDigest(DXGame game, object ls, int simTick, DigestAccumulators acc)

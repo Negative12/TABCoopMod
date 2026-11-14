@@ -1,6 +1,7 @@
 using System;
 using System.Reflection;
 using DXVision;
+using DXVision.GUI;
 using HarmonyLib;
 using TABCoopMod.Commands;
 using TABCoopMod.Core;
@@ -21,6 +22,35 @@ namespace TABCoopMod.Patches
     {
         private static Type _mayorType;
         private static PropertyInfo _idProp;
+        private static DXObject _activeMayorModal;
+        private static int _lastDispatchedMayorLevel;
+        private static int _lastDispatchedMayorTick = -1;
+
+        internal static void SetActiveMayorWindow(DXObject modal)
+        {
+            _activeMayorModal = modal;
+        }
+
+        public static void CloseActiveMayorWindow()
+        {
+            var modal = _activeMayorModal;
+            _activeMayorModal = null;
+            if (modal == null || modal.Scene == null) return;
+
+            if (!GameBridge.CloseZXWindow(modal))
+            {
+                try { DXModalScreen.RemoveModal(modal); }
+                catch { }
+            }
+            ModLogger.Info("[MayorSync] Closed peer's open mayor selection modal after selection.");
+        }
+
+        internal static void ResetTracking()
+        {
+            _activeMayorModal = null;
+            _lastDispatchedMayorLevel = 0;
+            _lastDispatchedMayorTick = -1;
+        }
 
         public static MethodBase TargetMethod()
         {
@@ -35,7 +65,7 @@ namespace TABCoopMod.Patches
             if (!CommandInterceptor.IsInterceptionEnabled
                 || CommandExecutor.IsReplayingCommand
                 || LockstepClock.LoadingLevel
-                || LockstepClock.InDeterministicContext
+                || LockstepClock.IsSimulationThreadActive
                 || DXGame.Current == null
                 || DXGame.Current.IAIterationInt <= 0)
                 return true;
@@ -48,14 +78,69 @@ namespace TABCoopMod.Patches
             try { id = _idProp?.GetValue(__instance) as string; } catch { }
             if (string.IsNullOrEmpty(id)) return true;
 
+            int mayorLevel = GameBridge.GetMayorLevel(__instance);
+            int currentCount = GameBridge.GetLevelCollectionCount("MayorStates");
+            int curTick = DXGame.Current.IAIterationInt;
+
+            if ((mayorLevel > 0 && currentCount >= mayorLevel)
+                || (mayorLevel > 0 && _lastDispatchedMayorLevel == mayorLevel && curTick >= _lastDispatchedMayorTick && curTick - _lastDispatchedMayorTick < 30))
+            {
+                ModLogger.Info($"[MayorSync] Suppressed duplicate local mayor click '{id}' (level={mayorLevel}, currentCount={currentCount}).");
+                CloseActiveMayorWindow();
+                return false;
+            }
+
+            _lastDispatchedMayorLevel = mayorLevel;
+            _lastDispatchedMayorTick = curTick;
+            _activeMayorModal = null;
+
             CommandInterceptor.Dispatch(new NetCommand
             {
                 Type = NetCommandType.MayorVoteOrSelect,
                 PlayerId = CommandInterceptor.LocalPlayerId,
-                TargetSimTick = DXGame.Current.IAIterationInt,
+                TargetSimTick = curTick,
                 MayorId = id
             });
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Tracks the local mayor selection ZXWindow opened by ZXGame.ShowMayorSelection so that
+    /// when a peer's MayorVoteOrSelect executes first, any still-open mayor popup is closed.
+    /// Also suppresses stale delayed popups once IsChoosingMayor has been cleared by the peer's pick.
+    /// </summary>
+    [HarmonyPatch]
+    public static class MayorModalTrackerPatch
+    {
+        public static MethodBase TargetMethod() =>
+            AccessTools.Method(GameBridge.TypeZXGame, ObfuscatedSymbols.Method_ZXGame_ShowMayorSelection, Type.EmptyTypes);
+
+        [HarmonyPrefix]
+        public static bool Prefix(out bool __state)
+        {
+            __state = !DXModalScreen.IsInModal;
+            if (CommandInterceptor.IsInterceptionEnabled
+                && GameBridge.CurrentLevelState != null
+                && !GameBridge.IsChoosingMayor())
+            {
+                ModLogger.Info("[MayorSync] Suppressed stale ShowMayorSelection popup (already chosen).");
+                return false;
+            }
+            return true;
+        }
+
+        [HarmonyPostfix]
+        public static void Postfix(bool __state)
+        {
+            if (__state && DXModalScreen.IsInModal && GameBridge.IsChoosingMayor())
+            {
+                var modal = DXModalScreen.CurrentModalObject;
+                if (GameBridge.IsZXWindow(modal))
+                {
+                    MayorSyncPatch.SetActiveMayorWindow(modal);
+                }
+            }
         }
     }
 }

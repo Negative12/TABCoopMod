@@ -137,6 +137,7 @@ namespace TABCoopMod.Testing
         {
             while (_queue.TryDequeue(out var pending))
             {
+                Determinism.DeterministicSandboxPatches.FlushPendingAsyncTick(DXGame.Current);
                 try { pending.ResponseJson = HandleRequest(pending.RequestJson); }
                 catch (Exception ex)
                 {

@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Reflection;
+using System.Reflection.Emit;
 using DXVision;
 using DXVision.GUI;
 using HarmonyLib;
@@ -51,6 +52,13 @@ namespace TABCoopMod.Core
         private static MethodInfo _mCmdById;
         private static MethodInfo _mCmdByName;
         private static MethodInfo _mCmdExec;
+        private static MethodInfo _methodCanExecuteCmd;
+        private static MethodInfo _methodIsVisibleCmd;
+        private static MethodInfo _methodGetResourcesCost;
+        private static Type _typeCreateEntityCommand;
+        private static MethodInfo _methodGetTemplateFromEntityType;
+        private static MethodInfo _methodEntityCanPlaceAtCell;
+        private static MethodInfo _methodEntityUpdateCellPosition;
 
         private static MethodInfo _mGetEntityCmd;
         private static MethodInfo _mGetEntitySel;
@@ -66,6 +74,7 @@ namespace TABCoopMod.Core
         private static FieldInfo _fieldBDataTargetRef;
         private static PropertyInfo _propTargetRefId;
         private static PropertyInfo _propBDataLastEnemy;
+        private static FieldInfo _fieldMovableTargetPos;
         private static bool _zombieAggroReflectionInit;
 
         private static MethodInfo _mCurCmd;
@@ -164,13 +173,32 @@ namespace TABCoopMod.Core
                 _mCmdByName = AccessTools.Method(typeof(ZXCommand), ObfuscatedSymbols.Method_ZXCommand_GetByName, new[] { typeof(string) });
                 _mCmdExec = AccessTools.Method(typeof(ZXCommand), ObfuscatedSymbols.Method_ZXCommand_Execute,
                     new[] { typeof(ZXEntity), typeof(ZXCommandTarget) });
+                _methodCanExecuteCmd = AccessTools.Method(typeof(ZXCommand), ObfuscatedSymbols.Method_ZXCommand_CanExecute,
+                    new[] { typeof(ZXEntity) });
+                _methodIsVisibleCmd = AccessTools.Method(typeof(ZXCommand), ObfuscatedSymbols.Method_ZXCommand_IsVisible,
+                    new[] { typeof(ZXEntity) });
+                _methodGetResourcesCost = AccessTools.Method(typeof(ZXCommand), ObfuscatedSymbols.Method_ZXCommand_GetResourcesCost,
+                    new[] { typeof(ZXEntity) });
+                _typeCreateEntityCommand = GameAssembly.GetType("ZX.Commands.CreateEntityCommand");
                 _methodPlaceBuilding = AccessTools.Method(typeof(Build), ObfuscatedSymbols.Method_Build_PlaceBuilding,
                     new[] { typeof(ZXEntity), typeof(ZXCommandTarget), typeof(Type), typeof(bool), typeof(bool), typeof(DXEntityTemplate) });
+                _methodGetTemplateFromEntityType = AccessTools.Method(TypeZXGame, "GetTemplateFromEntityType", new[] { typeof(Type) });
+                _methodEntityCanPlaceAtCell = AccessTools.Method(typeof(ZXEntity), ObfuscatedSymbols.Method_ZXEntity_CanPlaceAtCell,
+                    new[] { typeof(int), typeof(int) });
+                _methodEntityUpdateCellPosition = AccessTools.Method(typeof(ZXEntity), ObfuscatedSymbols.Method_ZXEntity_UpdateCellPosition,
+                    Type.EmptyTypes);
 
                 Check(_mCmdById, "ZXCommand.GetById");
                 Check(_mCmdByName, "ZXCommand.GetByName");
                 Check(_mCmdExec, "ZXCommand.Execute");
+                Check(_methodCanExecuteCmd, "ZXCommand.CanExecute");
+                Check(_methodIsVisibleCmd, "ZXCommand.IsVisible");
+                Check(_methodGetResourcesCost, "ZXCommand.GetResourcesCost");
+                Check(_typeCreateEntityCommand, "Type ZX.Commands.CreateEntityCommand");
                 Check(_methodPlaceBuilding, "Build.PlaceBuilding");
+                Check(_methodGetTemplateFromEntityType, "ZXGame.GetTemplateFromEntityType");
+                Check(_methodEntityCanPlaceAtCell, "ZXEntity.CanPlaceAtCell");
+                Check(_methodEntityUpdateCellPosition, "ZXEntity.UpdateCellPosition");
 
                 // 6. Entity & Component Helpers
                 _mGetEntityCmd = AccessTools.Method(typeof(ZXEntity), ObfuscatedSymbols.Method_ZXEntity_GetCommandable, Type.EmptyTypes);
@@ -224,8 +252,18 @@ namespace TABCoopMod.Core
                 Check(_propWindowMsgTitle, "ZXWindowMessage.Title");
                 Check(_propWindowMsgText, "ZXWindowMessage.Text");
 
+                // 9. Mayor & Modal Window Helpers
+                EnsureMayorMeta();
+                Check(_typeZXMayor, "Type ZX.ZXMayor");
+                Check(_mayorApplyMethod, "ZXMayor.Apply");
+                Check(_levelStateIsChoosingMayorMethod, "ZXLevelState.IsChoosingMayor");
+                Check(_levelStateSetChoosingMayorMethod, "ZXLevelState.SetChoosingMayor");
+                Check(_typeZXWindow, "Type ZX.GUI.ZXWindow");
+                Check(_windowCloseMethod, "ZXWindow.Close");
+
                 if (missingCount == 0)
                 {
+                    TryCompileFastCommandDelegates();
                     ModLogger.Info("[GameBridge] ALL BINDINGS VERIFIED SUCCESSFULLY (0 missing).");
                     IsInitialized = true;
                     return true;
@@ -603,8 +641,171 @@ namespace TABCoopMod.Core
         public static object GetCommandById(int id) => _mCmdById.Invoke(null, new object[] { id });
         public static object GetCommandByName(string typeName) => _mCmdByName.Invoke(null, new object[] { typeName });
 
+        private static Action<object, object, object> _fastCmdExec;
+        private static Action<object, List<DXEntity>, object, PointF> _fastAssignGroupMove;
+        private static Func<object, object> _fastGetCmdable;
+        private static Type _fastGetCmdTargetDeclType;
+        private static Func<object, object> _fastGetCmdTarget;
+        private static Func<DXGame, List<DXEntity>> _fastGetGameEntities;
+        private static Func<object, object> _fastGetLifeObj;
+        private static Type _fastGetLifeIntDeclType;
+        private static Func<object, int> _fastGetLifeInt;
+        private static Type _fastGetOrdersQueuedDeclType;
+        private static Func<object, IList> _fastGetOrdersQueued;
+
+        private static void TryCompileFastCommandDelegates()
+        {
+            try
+            {
+                if (_mCmdExec != null)
+                {
+                    var dmExec = new DynamicMethod("TABCoop_FastCmdExec", typeof(void),
+                        new[] { typeof(object), typeof(object), typeof(object) }, typeof(GameBridge).Module, skipVisibility: true);
+                    var il = dmExec.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Castclass, typeof(ZXCommand));
+                    il.Emit(OpCodes.Ldarg_1);
+                    il.Emit(OpCodes.Castclass, typeof(ZXEntity));
+                    il.Emit(OpCodes.Ldarg_2);
+                    il.Emit(typeof(ZXCommandTarget).IsValueType ? OpCodes.Unbox_Any : OpCodes.Castclass, typeof(ZXCommandTarget));
+                    il.Emit(OpCodes.Callvirt, _mCmdExec);
+                    il.Emit(OpCodes.Ret);
+                    _fastCmdExec = (Action<object, object, object>)dmExec.CreateDelegate(typeof(Action<object, object, object>));
+                }
+
+                if (_methodAssignGroupMove != null && TypeZXSystemGameLevel != null)
+                {
+                    var dmGroup = new DynamicMethod("TABCoop_FastAssignGroupMove", typeof(void),
+                        new[] { typeof(object), typeof(List<DXEntity>), typeof(object), typeof(PointF) }, typeof(GameBridge).Module, skipVisibility: true);
+                    var il = dmGroup.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Castclass, TypeZXSystemGameLevel);
+                    il.Emit(OpCodes.Ldarg_1);
+                    il.Emit(OpCodes.Ldarg_2);
+                    il.Emit(OpCodes.Castclass, typeof(ZXCommand));
+                    il.Emit(OpCodes.Ldarg_3);
+                    il.Emit(OpCodes.Callvirt, _methodAssignGroupMove);
+                    il.Emit(OpCodes.Ret);
+                    _fastAssignGroupMove = (Action<object, List<DXEntity>, object, PointF>)dmGroup.CreateDelegate(
+                        typeof(Action<object, List<DXEntity>, object, PointF>));
+                }
+
+                if (_mGetEntityCmd != null)
+                {
+                    var dmCmdable = new DynamicMethod("TABCoop_FastGetCommandable", typeof(object),
+                        new[] { typeof(object) }, typeof(GameBridge).Module, skipVisibility: true);
+                    var il = dmCmdable.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Castclass, _mGetEntityCmd.DeclaringType);
+                    il.Emit(OpCodes.Callvirt, _mGetEntityCmd);
+                    il.Emit(OpCodes.Ret);
+                    _fastGetCmdable = (Func<object, object>)dmCmdable.CreateDelegate(typeof(Func<object, object>));
+                }
+
+                Type ccmd = TypeCCommandable;
+                var targetProp = ccmd?.GetProperty("Target", BindingFlags.Public | BindingFlags.Instance);
+                var targetGetter = targetProp?.GetGetMethod(true);
+                if (targetGetter != null)
+                {
+                    _fastGetCmdTargetDeclType = targetGetter.DeclaringType;
+                    var dmTarget = new DynamicMethod("TABCoop_FastGetCmdTarget", typeof(object),
+                        new[] { typeof(object) }, typeof(GameBridge).Module, skipVisibility: true);
+                    var il = dmTarget.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Castclass, _fastGetCmdTargetDeclType);
+                    il.Emit(OpCodes.Callvirt, targetGetter);
+                    if (targetGetter.ReturnType.IsValueType)
+                        il.Emit(OpCodes.Box, targetGetter.ReturnType);
+                    il.Emit(OpCodes.Ret);
+                    _fastGetCmdTarget = (Func<object, object>)dmTarget.CreateDelegate(typeof(Func<object, object>));
+                }
+
+                var fEnt = typeof(DXGame).GetField("_Entities", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (fEnt != null && fEnt.FieldType == typeof(List<DXEntity>))
+                {
+                    var dmEnt = new DynamicMethod("TABCoop_FastGetGameEntities", typeof(List<DXEntity>),
+                        new[] { typeof(DXGame) }, typeof(GameBridge).Module, skipVisibility: true);
+                    var il = dmEnt.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Ldfld, fEnt);
+                    il.Emit(OpCodes.Ret);
+                    _fastGetGameEntities = (Func<DXGame, List<DXEntity>>)dmEnt.CreateDelegate(typeof(Func<DXGame, List<DXEntity>>));
+                }
+
+                if (_mGetEntityLife != null)
+                {
+                    var dmLifeObj = new DynamicMethod("TABCoop_FastGetLifeObj", typeof(object),
+                        new[] { typeof(object) }, typeof(GameBridge).Module, skipVisibility: true);
+                    var il = dmLifeObj.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Castclass, _mGetEntityLife.DeclaringType);
+                    il.Emit(OpCodes.Callvirt, _mGetEntityLife);
+                    il.Emit(OpCodes.Ret);
+                    _fastGetLifeObj = (Func<object, object>)dmLifeObj.CreateDelegate(typeof(Func<object, object>));
+
+                    var lifeGetter = _mGetEntityLife.ReturnType?.GetProperty("Life", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod(true);
+                    if (lifeGetter != null && lifeGetter.ReturnType == typeof(int))
+                    {
+                        _fastGetLifeIntDeclType = lifeGetter.DeclaringType;
+                        var dmLifeInt = new DynamicMethod("TABCoop_FastGetLifeInt", typeof(int),
+                            new[] { typeof(object) }, typeof(GameBridge).Module, skipVisibility: true);
+                        var ilI = dmLifeInt.GetILGenerator();
+                        ilI.Emit(OpCodes.Ldarg_0);
+                        ilI.Emit(OpCodes.Castclass, _fastGetLifeIntDeclType);
+                        ilI.Emit(OpCodes.Callvirt, lifeGetter);
+                        ilI.Emit(OpCodes.Ret);
+                        _fastGetLifeInt = (Func<object, int>)dmLifeInt.CreateDelegate(typeof(Func<object, int>));
+                    }
+                }
+
+                var ordersGetter = ccmd?.GetProperty("OrdersQueued", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod(true);
+                if (ordersGetter != null && typeof(IList).IsAssignableFrom(ordersGetter.ReturnType))
+                {
+                    _fastGetOrdersQueuedDeclType = ordersGetter.DeclaringType;
+                    var dmOrders = new DynamicMethod("TABCoop_FastGetOrdersQueued", typeof(IList),
+                        new[] { typeof(object) }, typeof(GameBridge).Module, skipVisibility: true);
+                    var il = dmOrders.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Castclass, _fastGetOrdersQueuedDeclType);
+                    il.Emit(OpCodes.Callvirt, ordersGetter);
+                    il.Emit(OpCodes.Ret);
+                    _fastGetOrdersQueued = (Func<object, IList>)dmOrders.CreateDelegate(typeof(Func<object, IList>));
+                }
+
+                ModLogger.Info("[Perf] Compiled DynamicMethods for fast command replay & state hashing.");
+            }
+            catch (Exception ex)
+            {
+                _fastCmdExec = null;
+                _fastAssignGroupMove = null;
+                _fastGetCmdable = null;
+                _fastGetCmdTarget = null;
+                _fastGetCmdTargetDeclType = null;
+                _fastGetGameEntities = null;
+                _fastGetLifeObj = null;
+                _fastGetLifeIntDeclType = null;
+                _fastGetLifeInt = null;
+                _fastGetOrdersQueuedDeclType = null;
+                _fastGetOrdersQueued = null;
+                ModLogger.Warn($"[Perf] TryCompileFastCommandDelegates failed (falling back to reflection): {ex.Message}");
+            }
+        }
+
+        public static List<DXEntity> GetEntitiesList(DXGame game)
+        {
+            if (game == null || _fastGetGameEntities == null) return null;
+            try { return _fastGetGameEntities(game); } catch { return null; }
+        }
+
+        public static bool IsZombieType(Type type) => type != null && _typeZombie != null && _typeZombie.IsAssignableFrom(type);
+
         public static void ExecuteCommandOnEntity(object cmd, object executor, object target)
         {
+            if (_fastCmdExec != null)
+            {
+                _fastCmdExec(cmd, executor, target);
+                return;
+            }
             _mCmdExec.Invoke(cmd, new object[] { executor, target });
         }
 
@@ -613,6 +814,11 @@ namespace TABCoopMod.Core
             var levelSys = _mLevelSysCurrent.Invoke(null, null);
             if (levelSys != null)
             {
+                if (_fastAssignGroupMove != null)
+                {
+                    _fastAssignGroupMove(levelSys, entities, cmd, destination);
+                    return;
+                }
                 _methodAssignGroupMove.Invoke(levelSys, new object[] { entities, cmd, destination });
             }
         }
@@ -1052,6 +1258,10 @@ namespace TABCoopMod.Core
         {
             if (entity == null || _mGetEntityLife == null) return null;
             if (!_mGetEntityLife.DeclaringType.IsInstanceOfType(entity)) return null;
+            if (_fastGetLifeObj != null)
+            {
+                try { return _fastGetLifeObj(entity); } catch { return null; }
+            }
             try { return _mGetEntityLife.Invoke(entity, null); } catch { return null; }
         }
 
@@ -1059,6 +1269,10 @@ namespace TABCoopMod.Core
         {
             object life = GetLifeObject(entity);
             if (life == null) return 0;
+            if (_fastGetLifeInt != null && _fastGetLifeIntDeclType != null && _fastGetLifeIntDeclType.IsInstanceOfType(life))
+            {
+                try { return _fastGetLifeInt(life); } catch { return 0; }
+            }
             Type t = life.GetType();
             if (!_lifePropCache.TryGetValue(t, out PropertyInfo prop))
             {
@@ -1067,6 +1281,54 @@ namespace TABCoopMod.Core
             }
             if (prop == null) return 0;
             try { return Convert.ToInt32(prop.GetValue(life)); } catch { return 0; }
+        }
+
+        private static readonly Dictionary<Type, PropertyInfo> _isAlivePropCache = new Dictionary<Type, PropertyInfo>();
+        private static readonly Dictionary<Type, PropertyInfo> _deathProcessedPropCache = new Dictionary<Type, PropertyInfo>();
+
+        /// <summary>
+        /// Host-authoritative HP correction for async alignment. Applies lifeDelta to the current
+        /// CLife.Life (or forces 0 when forceKill) only while the entity is still alive locally; the
+        /// engine's own CLife update then runs normal death processing on the next tick.
+        /// </summary>
+        public static bool TryCorrectLife(object entity, int lifeDelta, bool forceKill)
+        {
+            object life = GetLifeObject(entity);
+            if (life == null) return false;
+            Type t = life.GetType();
+            try
+            {
+                if (!_lifePropCache.TryGetValue(t, out PropertyInfo lifeProp))
+                {
+                    lifeProp = t.GetProperty("Life", BindingFlags.Public | BindingFlags.Instance);
+                    _lifePropCache[t] = lifeProp;
+                }
+                if (lifeProp == null || !lifeProp.CanWrite) return false;
+
+                if (!_isAlivePropCache.TryGetValue(t, out PropertyInfo aliveProp))
+                {
+                    aliveProp = t.GetProperty("IsAlive", BindingFlags.Public | BindingFlags.Instance);
+                    _isAlivePropCache[t] = aliveProp;
+                }
+                if (!_deathProcessedPropCache.TryGetValue(t, out PropertyInfo deadProp))
+                {
+                    deadProp = t.GetProperty("DeathProccessed", BindingFlags.Public | BindingFlags.Instance);
+                    _deathProcessedPropCache[t] = deadProp;
+                }
+                if (aliveProp != null && !(bool)aliveProp.GetValue(life)) return false;
+                if (deadProp != null && (bool)deadProp.GetValue(life)) return false;
+
+                int cur = Convert.ToInt32(lifeProp.GetValue(life));
+                int next = forceKill ? 0 : cur + lifeDelta;
+                if (next < 0) next = 0;
+                if (next == cur) return false;
+                lifeProp.SetValue(life, next);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         /// <summary>
@@ -1165,16 +1427,98 @@ namespace TABCoopMod.Core
             }
         }
 
+        /// <summary>
+        /// Returns true if the entity has significant physics velocity or an active CMovable
+        /// movement target, so mid-march player units are not nudged unnecessarily on sub-threshold drift.
+        /// </summary>
+        public static bool IsEntityActivelyMoving(DXEntity entity)
+        {
+            if (entity == null || entity.Disposed) return false;
+            try
+            {
+                var body = entity.Body;
+                if (body != null && body.Handle != IntPtr.Zero)
+                {
+                    var v = body.Velocity;
+                    if (v.X * v.X + v.Y * v.Y > 0.04f)
+                        return true;
+                }
+
+                if (_mGetEntityMovable != null && _mGetEntityMovable.DeclaringType.IsInstanceOfType(entity))
+                {
+                    object movable = _mGetEntityMovable.Invoke(entity, null);
+                    if (movable != null)
+                    {
+                        if (_fieldMovableTargetPos == null)
+                            _fieldMovableTargetPos = movable.GetType().GetField("#=zx1L3mWRqDcT7", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (_fieldMovableTargetPos != null && _fieldMovableTargetPos.GetValue(movable) != null)
+                            return true;
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Returns the minimum positional drift (in cells) required before async correction snaps an
+        /// entity, along with the damping factor applied to sub-2.2-cell nudges.
+        /// </summary>
+        public static float GetEntityPositionSnapThreshold(DXEntity entity, out float dampingFactor)
+        {
+            if (entity == null)
+            {
+                dampingFactor = 0.65f;
+                return 1.0f;
+            }
+
+            if (IsPlayerEntity(entity))
+            {
+                if (IsEntityActivelyMoving(entity))
+                {
+                    dampingFactor = 0.60f;
+                    return 1.80f;
+                }
+                dampingFactor = 0.75f;
+                return 0.50f;
+            }
+
+            if (IsZombieType(entity.GetType()))
+            {
+                GetZombieAggroSignature(entity, out bool isAlerted);
+                if (isAlerted)
+                {
+                    dampingFactor = 0.70f;
+                    return IsEntityActivelyMoving(entity) ? 0.85f : 0.55f;
+                }
+                dampingFactor = 0.60f;
+                return 1.25f;
+            }
+
+            dampingFactor = 0.65f;
+            return 1.00f;
+        }
+
         public static object GetCommandableObject(object entity)
         {
             if (entity == null || _mGetEntityCmd == null) return null;
             if (!_mGetEntityCmd.DeclaringType.IsInstanceOfType(entity)) return null;
+            if (_fastGetCmdable != null)
+            {
+                try { return _fastGetCmdable(entity); } catch { return null; }
+            }
             try { return _mGetEntityCmd.Invoke(entity, null); } catch { return null; }
         }
 
         public static IList GetOrdersQueued(object cmdComp)
         {
             if (cmdComp == null) return null;
+            if (_fastGetOrdersQueued != null && _fastGetOrdersQueuedDeclType != null && _fastGetOrdersQueuedDeclType.IsInstanceOfType(cmdComp))
+            {
+                try { return _fastGetOrdersQueued(cmdComp); } catch { return null; }
+            }
             Type t = cmdComp.GetType();
             if (!_ordersPropCache.TryGetValue(t, out PropertyInfo prop))
             {
@@ -1319,6 +1663,140 @@ namespace TABCoopMod.Core
             return string.Equals(name, "Build", StringComparison.Ordinal);
         }
 
+        public static bool CanExecuteCommandOnEntity(object command, object executor)
+        {
+            if (command == null || executor == null) return true;
+            try
+            {
+                if (_methodIsVisibleCmd != null && !(bool)_methodIsVisibleCmd.Invoke(command, new[] { executor }))
+                    return false;
+                if (_methodCanExecuteCmd != null && !(bool)_methodCanExecuteCmd.Invoke(command, new[] { executor }))
+                    return false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] CanExecuteCommandOnEntity failed: {ex.Message}");
+                return true;
+            }
+        }
+
+        public static bool IsResourceSpendingCommand(object command, object executor)
+        {
+            if (command == null) return false;
+            if (_typeCreateEntityCommand != null && _typeCreateEntityCommand.IsInstanceOfType(command))
+                return true;
+            if (executor != null && _methodGetResourcesCost != null)
+            {
+                try
+                {
+                    if (_methodGetResourcesCost.Invoke(command, new[] { executor }) != null)
+                        return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        public static Rectangle ResolveBuildCellArea(DXEntity templateEntity, PointF targetPos, SizeF targetSize, PointF targetOrigin)
+        {
+            PointF effectivePos = targetPos != PointF.Empty ? targetPos : targetOrigin;
+            int tw = (int)Math.Round(targetSize.Width);
+            int th = (int)Math.Round(targetSize.Height);
+            if (tw <= 0 || th <= 0)
+            {
+                if (templateEntity == null) return Rectangle.Empty;
+                tw = Math.Max(1, templateEntity.CellArea.Width);
+                th = Math.Max(1, templateEntity.CellArea.Height);
+                int xFallback = (int)Math.Floor(effectivePos.X);
+                int yFallback = (int)Math.Floor(effectivePos.Y);
+                return new Rectangle(xFallback, yFallback, tw, th);
+            }
+
+            Rectangle targetRect = Rectangle.Truncate(new RectangleF(
+                effectivePos.X - targetSize.Width * 0.5f,
+                effectivePos.Y - targetSize.Height * 0.5f,
+                targetSize.Width,
+                targetSize.Height));
+
+            if (templateEntity != null)
+            {
+                int tmplArea = templateEntity.CellArea.Width * templateEntity.CellArea.Height;
+                int targetArea = targetRect.Width * targetRect.Height;
+                if (tmplArea != targetArea)
+                {
+                    return new Rectangle(
+                        targetRect.X,
+                        targetRect.Y,
+                        Math.Max(1, templateEntity.CellArea.Width),
+                        Math.Max(1, templateEntity.CellArea.Height));
+                }
+            }
+            return targetRect;
+        }
+
+        public static bool CanPlaceBuildingAtTarget(Type buildingType, PointF targetPos, SizeF targetSize, PointF targetOrigin)
+        {
+            if (buildingType == null) return false;
+            if (string.Equals(buildingType.Name, "TheGreatTelescope", StringComparison.Ordinal))
+                return true;
+
+            try
+            {
+                DXGame zxGame = ZXGameInstance;
+                if (zxGame == null || _methodGetTemplateFromEntityType == null || _methodEntityCanPlaceAtCell == null)
+                    return true;
+
+                var template = _methodGetTemplateFromEntityType.Invoke(zxGame, new object[] { buildingType }) as DXEntityTemplate;
+                DXEntity templateEntity = template?.Entity;
+                if (templateEntity == null) return true;
+
+                _methodEntityUpdateCellPosition?.Invoke(templateEntity, null);
+
+                Rectangle rect = ResolveBuildCellArea(templateEntity, targetPos, targetSize, targetOrigin);
+                if (rect.Width <= 0 || rect.Height <= 0)
+                    return true;
+
+                PointF origPos = templateEntity.Position;
+                SizeF origSize = templateEntity.Size;
+                try
+                {
+                    templateEntity.CellArea = rect;
+                    for (int x = rect.Left; x < rect.Right; x++)
+                    {
+                        for (int y = rect.Top; y < rect.Bottom; y++)
+                        {
+                            if (!(bool)_methodEntityCanPlaceAtCell.Invoke(templateEntity, new object[] { x, y }))
+                                return false;
+                        }
+                    }
+                    return true;
+                }
+                finally
+                {
+                    templateEntity.Size = origSize;
+                    templateEntity.Position = origPos;
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] CanPlaceBuildingAtTarget({buildingType.Name}) failed: {ex.Message}");
+                return true;
+            }
+        }
+
+        public static void FlushStartFramePostMethods()
+        {
+            try
+            {
+                DXGame.Current?.PostMethods_OnStartFrame?.ExecuteAll();
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] FlushStartFramePostMethods failed: {ex.Message}");
+            }
+        }
+
         public static void ShowGroundIndicatorForCommand(object command, PointF worldPos, float scale = 1f)
         {
             if (command == null || _methodShowGroundIndicator == null) return;
@@ -1363,6 +1841,10 @@ namespace TABCoopMod.Core
         public static object GetCommandableTargetObject(object commandable)
         {
             if (commandable == null) return null;
+            if (_fastGetCmdTarget != null && _fastGetCmdTargetDeclType != null && _fastGetCmdTargetDeclType.IsInstanceOfType(commandable))
+            {
+                try { return _fastGetCmdTarget(commandable); } catch { return null; }
+            }
             Type t = commandable.GetType();
             if (!_cmdableTargetPropCache.TryGetValue(t, out PropertyInfo prop))
             {
@@ -1485,27 +1967,44 @@ namespace TABCoopMod.Core
         private static FieldInfo _mayorRegistryField;
         private static PropertyInfo _mayorIdProp, _mayorNameProp, _mayorLevelProp;
         private static MethodInfo _mayorApplyMethod;
+        private static MethodInfo _levelStateIsChoosingMayorMethod;
+        private static MethodInfo _levelStateSetChoosingMayorMethod;
+        private static Type _typeZXWindow;
+        private static MethodInfo _windowCloseMethod;
 
         private static void EnsureMayorMeta()
         {
             if (_typeZXMayor != null) return;
             _typeZXMayor = GameAssembly?.GetType("ZX.ZXMayor");
-            if (_typeZXMayor == null) return;
-
-            const BindingFlags SF = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
-            const BindingFlags IF = BindingFlags.Public | BindingFlags.Instance;
-            _mayorRegistryField = _typeZXMayor.GetField(ObfuscatedSymbols.Field_ZXMayor_Registry, SF);
-            _mayorIdProp = _typeZXMayor.GetProperty("ID", IF);
-            _mayorNameProp = _typeZXMayor.GetProperty("Name", IF);
-            _mayorLevelProp = _typeZXMayor.GetProperty("Level", IF);
-            _mayorApplyMethod = AccessTools.Method(_typeZXMayor, ObfuscatedSymbols.Method_ZXMayor_Apply, new[] { LevelStateType });
-            if (_mayorApplyMethod == null)
+            if (_typeZXMayor != null)
             {
-                foreach (var m in AccessTools.GetDeclaredMethods(_typeZXMayor))
+                const BindingFlags SF = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+                const BindingFlags IF = BindingFlags.Public | BindingFlags.Instance;
+                _mayorRegistryField = _typeZXMayor.GetField(ObfuscatedSymbols.Field_ZXMayor_Registry, SF);
+                _mayorIdProp = _typeZXMayor.GetProperty("ID", IF);
+                _mayorNameProp = _typeZXMayor.GetProperty("Name", IF);
+                _mayorLevelProp = _typeZXMayor.GetProperty("Level", IF);
+                _mayorApplyMethod = AccessTools.Method(_typeZXMayor, ObfuscatedSymbols.Method_ZXMayor_Apply, new[] { LevelStateType });
+                if (_mayorApplyMethod == null)
                 {
-                    if (m.Name == ObfuscatedSymbols.Method_ZXMayor_Apply && m.GetParameters().Length == 1)
-                    { _mayorApplyMethod = m; break; }
+                    foreach (var m in AccessTools.GetDeclaredMethods(_typeZXMayor))
+                    {
+                        if (m.Name == ObfuscatedSymbols.Method_ZXMayor_Apply && m.GetParameters().Length == 1)
+                        { _mayorApplyMethod = m; break; }
+                    }
                 }
+            }
+
+            if (LevelStateType != null)
+            {
+                _levelStateIsChoosingMayorMethod = AccessTools.Method(LevelStateType, ObfuscatedSymbols.Method_ZXLevelState_IsChoosingMayor, Type.EmptyTypes);
+                _levelStateSetChoosingMayorMethod = AccessTools.Method(LevelStateType, ObfuscatedSymbols.Method_ZXLevelState_SetChoosingMayor, new[] { typeof(bool) });
+            }
+
+            _typeZXWindow = GameAssembly?.GetType("ZX.GUI.ZXWindow");
+            if (_typeZXWindow != null)
+            {
+                _windowCloseMethod = AccessTools.Method(_typeZXWindow, ObfuscatedSymbols.Method_ZXWindow_CloseWindow, new[] { typeof(Action) });
             }
         }
 
@@ -1531,6 +2030,64 @@ namespace TABCoopMod.Core
             return result;
         }
 
+        public static int GetMayorLevel(object mayorObj)
+        {
+            EnsureMayorMeta();
+            if (mayorObj == null || _mayorLevelProp == null) return 0;
+            try { return Convert.ToInt32(_mayorLevelProp.GetValue(mayorObj)); }
+            catch { return 0; }
+        }
+
+        public static string GetMayorNameById(string mayorId)
+        {
+            EnsureMayorMeta();
+            if (string.IsNullOrEmpty(mayorId) || _mayorNameProp == null) return null;
+            var dict = _mayorRegistryField?.GetValue(null) as IDictionary;
+            if (dict == null || !dict.Contains(mayorId)) return null;
+            try { return _mayorNameProp.GetValue(dict[mayorId]) as string; }
+            catch { return null; }
+        }
+
+        public static bool IsChoosingMayor()
+        {
+            EnsureMayorMeta();
+            object ls = CurrentLevelState;
+            if (ls == null || _levelStateIsChoosingMayorMethod == null) return false;
+            try { return (bool)_levelStateIsChoosingMayorMethod.Invoke(ls, null); }
+            catch { return false; }
+        }
+
+        public static void SetChoosingMayor(bool choosing)
+        {
+            EnsureMayorMeta();
+            object ls = CurrentLevelState;
+            if (ls == null || _levelStateSetChoosingMayorMethod == null) return;
+            try { _levelStateSetChoosingMayorMethod.Invoke(ls, new object[] { choosing }); }
+            catch (Exception ex) { ModLogger.Warn($"[GameBridge] SetChoosingMayor({choosing}) failed: {ex.Message}"); }
+        }
+
+        public static bool IsZXWindow(object obj)
+        {
+            EnsureMayorMeta();
+            return obj != null && _typeZXWindow != null && _typeZXWindow.IsInstanceOfType(obj);
+        }
+
+        public static bool CloseZXWindow(object window)
+        {
+            EnsureMayorMeta();
+            if (window == null || _windowCloseMethod == null) return false;
+            try
+            {
+                _windowCloseMethod.Invoke(window, new object[] { null });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] CloseZXWindow failed: {ex.Message}");
+                return false;
+            }
+        }
+
         public static bool ApplyMayor(string mayorId)
         {
             EnsureMayorMeta();
@@ -1540,8 +2097,29 @@ namespace TABCoopMod.Core
             object mayor = dict[mayorId];
             object ls = CurrentLevelState;
             if (mayor == null || ls == null) return false;
-            try { _mayorApplyMethod.Invoke(mayor, new[] { ls }); return true; }
-            catch (Exception ex) { ModLogger.Warn($"[GameBridge] ApplyMayor failed: {ex.Message}"); return false; }
+
+            int mayorLevel = GetMayorLevel(mayor);
+            int currentCount = GetLevelCollectionCount("MayorStates");
+            if (mayorLevel > 0 && currentCount >= mayorLevel)
+            {
+                ModLogger.Info($"[GameBridge] Ignored duplicate mayor selection '{mayorId}' (level={mayorLevel}, alreadySelected={currentCount}).");
+                SetChoosingMayor(false);
+                Patches.MayorSyncPatch.CloseActiveMayorWindow();
+                return false;
+            }
+
+            try
+            {
+                _mayorApplyMethod.Invoke(mayor, new[] { ls });
+                SetChoosingMayor(false);
+                Patches.MayorSyncPatch.CloseActiveMayorWindow();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] ApplyMayor failed: {ex.Message}");
+                return false;
+            }
         }
 
         public static int GetLevelCollectionCount(string name)
@@ -1557,6 +2135,210 @@ namespace TABCoopMod.Core
             }
             catch { }
             return 0;
+        }
+
+        // ====================================================================
+        // Right-click interaction, CCommandable snapshot & unit wake-up helpers
+        // ====================================================================
+
+        public struct CommandableSnapshot
+        {
+            public object Commandable;
+            public object Cmd;
+            public object Target;
+        }
+
+        private static bool _interactionMetaInit;
+        private static FieldInfo _fLevelPendingCmd;
+        private static FieldInfo _fLevelMouseEntity;
+        private static MethodInfo _mIsOppositeNature;
+        private static PropertyInfo _pCapsuleBroken;
+        private static FieldInfo _fCmdableCurCmd;
+        private static FieldInfo _fCmdableCurTarget;
+        private static MethodInfo _mBehavSetResetState;
+        private static MethodInfo _mBehavSetResetMem;
+        private static MethodInfo _mBehavTick;
+        private static MethodInfo _mMovableTick;
+
+        private static void EnsureInteractionMeta()
+        {
+            if (_interactionMetaInit) return;
+            _interactionMetaInit = true;
+            try
+            {
+                const BindingFlags F = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                _fLevelPendingCmd = TypeZXSystemGameLevel?.GetField(ObfuscatedSymbols.Field_LevelSys_PendingCommand, F);
+                _fLevelMouseEntity = TypeZXSystemGameLevel?.GetField(ObfuscatedSymbols.Field_LevelSys_MouseEntity, F);
+
+                Type zxEntity = TypeZXEntity;
+                if (zxEntity != null)
+                    _mIsOppositeNature = AccessTools.Method(zxEntity, "#=zyqIcAEeeAjQu", new[] { zxEntity });
+
+                Type tCapsule = GameAssembly?.GetType("ZX.Entities.InfectedCapsule");
+                if (tCapsule != null)
+                    _pCapsuleBroken = tCapsule.GetProperty("Broken", BindingFlags.Public | BindingFlags.Instance);
+
+                Type tCmdable = TypeCCommandable;
+                if (tCmdable != null)
+                {
+                    _fCmdableCurCmd = tCmdable.GetField("#=z8dbvOmM=", F);
+                    _fCmdableCurTarget = tCmdable.GetField("#=zyCiF7Lo=", F);
+                }
+
+                Type tCBehav = _mGetEntityBehaviour?.ReturnType ?? GameAssembly?.GetType("ZX.Components.CBehaviour");
+                if (tCBehav != null)
+                {
+                    _mBehavSetResetState = AccessTools.Method(tCBehav, "#=zhPQK_m4yjl9wB_DGFw==", new[] { typeof(bool) });
+                    _mBehavSetResetMem = AccessTools.Method(tCBehav, "#=zXeRMQqKCGSFidmsp4w==", new[] { typeof(bool) });
+                    _mBehavTick = AccessTools.Method(tCBehav, "#=z5GPRaBw=", Type.EmptyTypes);
+                }
+
+                Type tCMov = TypeCMovable;
+                if (tCMov != null)
+                    _mMovableTick = AccessTools.Method(tCMov, "#=z5GPRaBw=", Type.EmptyTypes);
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] EnsureInteractionMeta failed: {ex.Message}");
+            }
+        }
+
+        public static object GetPendingCommandOnLevelSys()
+        {
+            EnsureInteractionMeta();
+            object levelSys = LevelSystemInstance;
+            if (levelSys == null || _fLevelPendingCmd == null) return null;
+            try { return _fLevelPendingCmd.GetValue(levelSys); } catch { return null; }
+        }
+
+        public static DXEntity GetMouseEntityOnLevelSys()
+        {
+            EnsureInteractionMeta();
+            object levelSys = LevelSystemInstance;
+            if (levelSys == null || _fLevelMouseEntity == null) return null;
+            try { return _fLevelMouseEntity.GetValue(levelSys) as DXEntity; } catch { return null; }
+        }
+
+        public static object GetAttackCommandObject() => GetCommandByName("Attack");
+
+        public static bool IsEnemyOrAttackableCapsule(DXEntity targetEntity, DXEntity referencePlayerUnit)
+        {
+            if (targetEntity == null || targetEntity.Disposed || referencePlayerUnit == null)
+                return false;
+            EnsureInteractionMeta();
+            try
+            {
+                if (_mIsOppositeNature != null && (bool)_mIsOppositeNature.Invoke(targetEntity, new object[] { referencePlayerUnit }))
+                    return true;
+                if (string.Equals(targetEntity.GetType().Name, "InfectedCapsule", StringComparison.Ordinal))
+                    return _pCapsuleBroken == null || !(bool)_pCapsuleBroken.GetValue(targetEntity);
+            }
+            catch { }
+            return false;
+        }
+
+        public static List<CommandableSnapshot> SnapshotSelectedCommandables()
+        {
+            EnsureInteractionMeta();
+            if (_fCmdableCurCmd == null || _fCmdableCurTarget == null) return null;
+            var listObj = _fieldSelectedList?.GetValue(null) as IEnumerable;
+            if (listObj == null) return null;
+
+            List<CommandableSnapshot> snaps = null;
+            foreach (object item in listObj)
+            {
+                var ent = (item as DXComponent)?.Entity;
+                if (ent == null || ent.Disposed || !IsPlayerEntity(ent)) continue;
+                object cmdable = GetCommandableObject(ent);
+                if (cmdable == null) continue;
+                if (snaps == null) snaps = new List<CommandableSnapshot>();
+                snaps.Add(new CommandableSnapshot
+                {
+                    Commandable = cmdable,
+                    Cmd = _fCmdableCurCmd.GetValue(cmdable),
+                    Target = _fCmdableCurTarget.GetValue(cmdable)
+                });
+            }
+            return snaps;
+        }
+
+        public static void RestoreSelectedCommandables(List<CommandableSnapshot> snaps)
+        {
+            if (snaps == null || _fCmdableCurCmd == null || _fCmdableCurTarget == null) return;
+            for (int i = 0; i < snaps.Count; i++)
+            {
+                var s = snaps[i];
+                if (s.Commandable == null) continue;
+                try
+                {
+                    _fCmdableCurCmd.SetValue(s.Commandable, s.Cmd);
+                    _fCmdableCurTarget.SetValue(s.Commandable, s.Target);
+                }
+                catch { }
+            }
+        }
+
+        public static bool IsWeaponSubCommand(object cmdObj)
+        {
+            if (cmdObj == null) return false;
+            string name = cmdObj.GetType().Name;
+            if (string.Equals(name, "Attack", StringComparison.Ordinal))
+                return false;
+            return name.EndsWith("Attack", StringComparison.Ordinal)
+                || string.Equals(name, "ArtilleryManExplosive", StringComparison.Ordinal);
+        }
+
+        public static void NotifyUnitCommandExecuted(object executorObj, object cmdObj)
+        {
+            if (IsWeaponSubCommand(cmdObj)) return;
+            var ent = executorObj as DXEntity;
+            if (ent == null || ent.Disposed) return;
+            EnsureInteractionMeta();
+
+            object cbehav = null;
+            if (_mGetEntityBehaviour != null && _mGetEntityBehaviour.DeclaringType.IsInstanceOfType(ent))
+            {
+                try { cbehav = _mGetEntityBehaviour.Invoke(ent, null); } catch { cbehav = null; }
+            }
+
+            if (cbehav != null)
+            {
+                try
+                {
+                    _mBehavSetResetMem?.Invoke(cbehav, new object[] { true });
+                    string cmdName = cmdObj?.GetType().Name;
+                    if (string.Equals(cmdName, "Interact", StringComparison.Ordinal)
+                        || string.Equals(cmdName, "Travel", StringComparison.Ordinal))
+                    {
+                        _mBehavSetResetState?.Invoke(cbehav, new object[] { true });
+                    }
+                }
+                catch { }
+            }
+
+            // Wake odd-parity units on the exact command tick so an entire squad reacts together
+            // without waiting up to 33-100ms staggered across IsIAFrameModule(4) parity boundaries.
+            if (Determinism.LockstepClock.IsDeterministicModeActive
+                && !Determinism.LockstepClock.PausedBySession
+                && !ent.IsIAFrameModule(4))
+            {
+                int origHash = ent.HashCode;
+                ent.HashCode = origHash ^ 1;
+                try
+                {
+                    if (cbehav != null) _mBehavTick?.Invoke(cbehav, null);
+                    if (_mGetEntityMovable != null && _mGetEntityMovable.DeclaringType.IsInstanceOfType(ent))
+                    {
+                        object cmov = _mGetEntityMovable.Invoke(ent, null);
+                        if (cmov != null) _mMovableTick?.Invoke(cmov, null);
+                    }
+                }
+                catch { }
+                finally
+                {
+                    ent.HashCode = origHash;
+                }
+            }
         }
     }
 }
