@@ -74,9 +74,13 @@ namespace TABCoopMod.Core
         public const string Field_MainMenu_GridLayout          = "#=zUM4xl3ca4QS35TzMAg==";
         public const string Field_MainMenu_CategoryButtonsDict = "#=zyDj$brKr7icb";
         public const string Field_MainMenu_ReadyForInput       = "#=zBObIu5ds9WvT";
+        public const string Field_MainMenu_ContinueButton      = "#=zYxOmgpMMO3Yb";
         public const string Method_MainMenu_SwitchCategory     = "#=zp8c19tQ=";
         /// <summary>Main-thread completion callback of ZXSystemMainMenu (calls Scene.Clear/Scene.Init and sets ReadyForInput).</summary>
         public const string Method_MainMenu_OnLoadComplete     = "#=zwK_pUIeRBpbp";
+        public const string Method_MainMenu_OnContinueLoad     = "#=z90VC8V_3LX2x";
+        public const string Method_MainMenu_OnNewSurvival      = "#=zxd3DE94B60Abw_zkg7L488DfPg5s";
+        public const string Method_MainMenu_OnCustomMap        = "#=zDnLtRmxOqjXPh5h9_Q==";
         public const string NestedEnum_MainMenu_TMenuCategory  = "TMenuCategory";
 
         // ====================================================================
@@ -171,6 +175,11 @@ namespace TABCoopMod.Core
         public const string Method_ZXWindow_AddBottomButton    = "#=zJMx0W0Q=";
         public const string Method_ZXWindow_ShowWindow         = "#=zyruJg$0=";
         public const string Method_ZXWindow_CloseWindow        = "#=zePbLN$s=";
+        public const string Type_ZXFontCatalogFonts            = "#=zqZKzsA47yWa6+#=zrtNti8Q=";
+        public const string Method_Font_Heading                = "#=z135pFLu2OAFw";
+        public const string Method_Font_Secondary              = "#=zwi063I7$xiwT";
+        public const string Method_Font_Body                   = "#=zKEARtzqGim$i";
+        public const string Method_Font_Plain                  = "#=z1tQEbFB9gJlB";
         public const string Method_OMiniMap_PingCell           = "#=zvr$ku1Q=";
         public const string Method_SteamMgr_RunCallbacks       = "#=zVnIv8xS3EOZr";
 

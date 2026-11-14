@@ -261,6 +261,18 @@ namespace TABCoopMod.Core
                 Check(_typeZXWindow, "Type ZX.GUI.ZXWindow");
                 Check(_windowCloseMethod, "ZXWindow.Close");
 
+                // 10. Lobby Window & MainMenu Reuse Helpers
+                EnsureLobbyUiMeta();
+                Check(_typeZXButtonSteam, "Type ZX.GUI.ZXButtonSteam");
+                Check(_windowShowMethod, "ZXWindow.ShowWindow");
+                Check(_windowAddBottomBtnMethod, "ZXWindow.AddBottomButton");
+                Check(_methodReturnToMainMenu, "ZXGame.ReturnToMainMenu");
+                Check(_methodMainMenuLoadSave, "ZXSystemMainMenu.LoadSave");
+                Check(_methodMainMenuNewSurvival, "ZXSystemMainMenu.NewSurvival");
+                Check(_methodMainMenuCustomMap, "ZXSystemMainMenu.CustomMap");
+                Check(_fieldMainMenuContinueBtn, "ZXSystemMainMenu.ContinueButton");
+                Check(_typeZXFontCatalogFonts, "Type ZXFontCatalog.Fonts");
+
                 if (missingCount == 0)
                 {
                     TryCompileFastCommandDelegates();
@@ -2072,13 +2084,13 @@ namespace TABCoopMod.Core
             return obj != null && _typeZXWindow != null && _typeZXWindow.IsInstanceOfType(obj);
         }
 
-        public static bool CloseZXWindow(object window)
+        public static bool CloseZXWindow(object window, Action onClosed = null)
         {
             EnsureMayorMeta();
             if (window == null || _windowCloseMethod == null) return false;
             try
             {
-                _windowCloseMethod.Invoke(window, new object[] { null });
+                _windowCloseMethod.Invoke(window, new object[] { onClosed });
                 return true;
             }
             catch (Exception ex)
@@ -2086,6 +2098,267 @@ namespace TABCoopMod.Core
                 ModLogger.Warn($"[GameBridge] CloseZXWindow failed: {ex.Message}");
                 return false;
             }
+        }
+
+        // ====================================================================
+        // Lobby Window & MainMenu Reuse Reflection Bridges (Iron Law #3 Safe)
+        // ====================================================================
+        private static Type _typeZXButtonSteam;
+        private static Type _typeZXWindowTypeEnum;
+        private static Type _typeZXWindowBtnPosEnum;
+        private static Type _typeZXWindowAnimEnum;
+        private static Type _typeZXFontCatalogFonts;
+        private static PropertyInfo _windowContentProp;
+        private static PropertyInfo _windowTitleProp;
+        private static MethodInfo _windowShowMethod;
+        private static MethodInfo _windowAddBottomBtnMethod;
+        private static PropertyInfo _btnSteamTextProp;
+        private static PropertyInfo _btnSteamOBarProp;
+        private static PropertyInfo _btnSteamKeysProp;
+        private static PropertyInfo _btnSteamSmallFontProp;
+        private static FieldInfo _btnSteamLabelField;
+        private static ConstructorInfo _btnSteamTextCtor;
+        private static MethodInfo _methodReturnToMainMenu;
+        private static MethodInfo _methodMainMenuLoadSave;
+        private static MethodInfo _methodMainMenuNewSurvival;
+        private static MethodInfo _methodMainMenuCustomMap;
+        private static FieldInfo _fieldMainMenuContinueBtn;
+        private static FieldInfo _fieldMainMenuReadyForInput;
+
+        private static void EnsureLobbyUiMeta()
+        {
+            if (_typeZXButtonSteam != null) return;
+            EnsureMayorMeta();
+
+            _typeZXButtonSteam = GameAssembly?.GetType("ZX.GUI.ZXButtonSteam");
+            if (_typeZXButtonSteam != null)
+            {
+                _btnSteamTextProp = AccessTools.Property(_typeZXButtonSteam, "Text");
+                _btnSteamOBarProp = AccessTools.Property(_typeZXButtonSteam, "OBar");
+                _btnSteamKeysProp = AccessTools.Property(_typeZXButtonSteam, "Keys");
+                _btnSteamSmallFontProp = AccessTools.Property(_typeZXButtonSteam, "UseSmallFontStyle");
+                _btnSteamLabelField = AccessTools.Field(_typeZXButtonSteam, "#=zMUT$V2s=");
+                foreach (var c in _typeZXButtonSteam.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    var ps = c.GetParameters();
+                    if (ps.Length == 2 && ps[0].ParameterType == typeof(string))
+                    {
+                        _btnSteamTextCtor = c;
+                        break;
+                    }
+                }
+            }
+
+            if (_typeZXWindow != null)
+            {
+                _windowContentProp = AccessTools.Property(_typeZXWindow, "OContent");
+                _windowTitleProp = AccessTools.Property(_typeZXWindow, "Title");
+                _windowShowMethod = AccessTools.Method(_typeZXWindow, ObfuscatedSymbols.Method_ZXWindow_ShowWindow);
+                _windowAddBottomBtnMethod = AccessTools.Method(_typeZXWindow, ObfuscatedSymbols.Method_ZXWindow_AddBottomButton);
+                _typeZXWindowTypeEnum = _typeZXWindow.GetNestedType("TWindowType", BindingFlags.Public | BindingFlags.NonPublic);
+                _typeZXWindowBtnPosEnum = _typeZXWindow.GetNestedType("TButtonPosition", BindingFlags.Public | BindingFlags.NonPublic);
+                if (_windowShowMethod != null)
+                {
+                    var ps = _windowShowMethod.GetParameters();
+                    if (ps.Length >= 2) _typeZXWindowAnimEnum = ps[1].ParameterType;
+                }
+            }
+
+            if (TypeZXGame != null)
+            {
+                _methodReturnToMainMenu = AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_ZXGame_ReturnToMainMenu, new[] { typeof(Action), typeof(bool) });
+            }
+
+            if (TypeZXSystemMainMenu != null)
+            {
+                _methodMainMenuLoadSave = AccessTools.Method(TypeZXSystemMainMenu, ObfuscatedSymbols.Method_MainMenu_OnContinueLoad, new[] { typeof(DXButton) });
+                _methodMainMenuNewSurvival = AccessTools.Method(TypeZXSystemMainMenu, ObfuscatedSymbols.Method_MainMenu_OnNewSurvival, new[] { typeof(DXButton) });
+                _methodMainMenuCustomMap = AccessTools.Method(TypeZXSystemMainMenu, ObfuscatedSymbols.Method_MainMenu_OnCustomMap, new[] { typeof(DXButton) });
+                _fieldMainMenuContinueBtn = AccessTools.Field(TypeZXSystemMainMenu, ObfuscatedSymbols.Field_MainMenu_ContinueButton);
+                _fieldMainMenuReadyForInput = AccessTools.Field(TypeZXSystemMainMenu, ObfuscatedSymbols.Field_MainMenu_ReadyForInput);
+            }
+
+            _typeZXFontCatalogFonts = GameAssembly?.GetType(ObfuscatedSymbols.Type_ZXFontCatalogFonts);
+        }
+
+        public static bool IsOnMainMenu()
+        {
+            return MainMenuInstance != null;
+        }
+
+        public static bool IsAnyModalOpen()
+        {
+            try { return DXModalScreen.IsInModal; }
+            catch { return false; }
+        }
+
+        public static bool HasAnySaveGames()
+        {
+            EnsureLobbyUiMeta();
+            try
+            {
+                var menu = MainMenuInstance;
+                if (menu != null && _fieldMainMenuContinueBtn != null)
+                {
+                    var btn = _fieldMainMenuContinueBtn.GetValue(menu) as DXButton;
+                    if (btn != null) return btn.Enabled;
+                }
+                string savesDir = GetSavesDirectory();
+                return !string.IsNullOrEmpty(savesDir) && System.IO.Directory.Exists(savesDir) && System.IO.Directory.GetFiles(savesDir, "*.zxsav").Length > 0;
+            }
+            catch { return false; }
+        }
+
+        public static bool OpenMainMenuLoadSave()
+        {
+            return InvokeMainMenuAction(_methodMainMenuLoadSave, "OpenMainMenuLoadSave");
+        }
+
+        public static bool OpenMainMenuNewSurvival()
+        {
+            return InvokeMainMenuAction(_methodMainMenuNewSurvival, "OpenMainMenuNewSurvival");
+        }
+
+        public static bool OpenMainMenuCustomMap()
+        {
+            return InvokeMainMenuAction(_methodMainMenuCustomMap, "OpenMainMenuCustomMap");
+        }
+
+        private static bool InvokeMainMenuAction(MethodInfo method, string label)
+        {
+            EnsureLobbyUiMeta();
+            try
+            {
+                var menu = MainMenuInstance;
+                if (menu == null || method == null)
+                {
+                    ModLogger.Warn($"[GameBridge] {label}: menu or method unavailable.");
+                    return false;
+                }
+                if (_fieldMainMenuReadyForInput != null)
+                    _fieldMainMenuReadyForInput.SetValue(menu, true);
+                method.Invoke(menu, new object[] { null });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error($"[GameBridge] {label} failed", ex);
+                return false;
+            }
+        }
+
+        public static bool ReturnToMainMenu()
+        {
+            EnsureLobbyUiMeta();
+            try
+            {
+                var game = _mZXGameCurrent?.Invoke(null, null);
+                if (game == null || _methodReturnToMainMenu == null) return false;
+                _methodReturnToMainMenu.Invoke(game, new object[] { null, true });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error("[GameBridge] ReturnToMainMenu failed", ex);
+                return false;
+            }
+        }
+
+        public static DXGUIObject CreateZXWindow(string title, bool bigWindow = true)
+        {
+            EnsureLobbyUiMeta();
+            if (_typeZXWindow == null || _typeZXWindowTypeEnum == null) return null;
+            object wtype = Enum.ToObject(_typeZXWindowTypeEnum, bigWindow ? 0 : 1);
+            return Activator.CreateInstance(
+                _typeZXWindow,
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+                null,
+                new object[] { title ?? string.Empty, wtype },
+                null) as DXGUIObject;
+        }
+
+        public static DXObject GetZXWindowContent(DXGUIObject window)
+        {
+            EnsureLobbyUiMeta();
+            return window != null ? _windowContentProp?.GetValue(window) as DXObject : null;
+        }
+
+        public static void SetZXWindowTitle(DXGUIObject window, string title)
+        {
+            EnsureLobbyUiMeta();
+            if (window != null) _windowTitleProp?.SetValue(window, title ?? string.Empty);
+        }
+
+        public static DXButton AddZXWindowBottomButton(DXGUIObject window, int position, string text, DXKeys key = DXKeys.None, int hueRotation = 0)
+        {
+            EnsureLobbyUiMeta();
+            if (window == null || _windowAddBottomBtnMethod == null || _typeZXWindowBtnPosEnum == null) return null;
+            object posEnum = Enum.ToObject(_typeZXWindowBtnPosEnum, position);
+            return _windowAddBottomBtnMethod.Invoke(window, new object[] { posEnum, text ?? string.Empty, null, key, hueRotation }) as DXButton;
+        }
+
+        public static void ShowZXWindow(DXGUIObject window, Action onShown = null, int animType = 2)
+        {
+            EnsureLobbyUiMeta();
+            if (window == null || _windowShowMethod == null || _typeZXWindowAnimEnum == null) return;
+            object anim = Enum.ToObject(_typeZXWindowAnimEnum, animType);
+            _windowShowMethod.Invoke(window, new object[] { onShown, anim });
+        }
+
+        public static DXButton CreateZXButtonSteam(string text, DXKeys key = DXKeys.None, int hueRotation = 0, bool smallFont = false)
+        {
+            EnsureLobbyUiMeta();
+            if (_typeZXButtonSteam == null || _btnSteamTextCtor == null) return null;
+            var btn = _btnSteamTextCtor.Invoke(new object[] { text ?? string.Empty, null }) as DXButton;
+            if (btn == null) return null;
+            if (smallFont && _btnSteamSmallFontProp != null)
+                _btnSteamSmallFontProp.SetValue(btn, true);
+            if (key != DXKeys.None && _btnSteamKeysProp?.GetValue(btn) is IList<DXKeys> keys)
+                keys.Add(key);
+            if (hueRotation != 0)
+                SetZXButtonSteamHue(btn, hueRotation);
+            return btn;
+        }
+
+        public static void SetZXButtonSteamText(DXButton btn, string text)
+        {
+            EnsureLobbyUiMeta();
+            if (btn == null || _btnSteamTextProp == null) return;
+            string desired = text ?? string.Empty;
+            string current = _btnSteamTextProp.GetValue(btn) as string;
+            if (string.Equals(current, desired, StringComparison.Ordinal)) return;
+
+            // Dispose and clear cached DXTextObject GPU texture before text mutation
+            // so DXVision creates a fresh texture instead of ReLoadInGPU() (which skews on Direct3DEx).
+            if (_btnSteamLabelField?.GetValue(btn) is DXObject labelObj && labelObj.Image != null)
+            {
+                try { labelObj.Image.Dispose(); } catch { }
+                labelObj.Image = null;
+            }
+            _btnSteamTextProp.SetValue(btn, desired);
+        }
+
+        public static void SetZXButtonSteamHue(DXButton btn, int hueRotation)
+        {
+            EnsureLobbyUiMeta();
+            if (btn == null || _btnSteamOBarProp == null) return;
+            if (_btnSteamOBarProp.GetValue(btn) is DXObject obar)
+                obar.HueRotation = hueRotation;
+        }
+
+        public static DXTextRenderer GetFontRenderer(string fontMethodName)
+        {
+            EnsureLobbyUiMeta();
+            try
+            {
+                if (_typeZXFontCatalogFonts != null && !string.IsNullOrEmpty(fontMethodName))
+                {
+                    var m = AccessTools.Method(_typeZXFontCatalogFonts, fontMethodName, Type.EmptyTypes);
+                    if (m?.Invoke(null, null) is DXTextRenderer tr) return tr;
+                }
+            }
+            catch { }
+            return GetPlainTextRenderer();
         }
 
         public static bool ApplyMayor(string mayorId)

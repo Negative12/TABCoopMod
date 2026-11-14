@@ -19,6 +19,21 @@ using ZX.GUI;
 
 namespace TABCoopMod.Sync
 {
+    public enum LobbyRoomPhase : byte
+    {
+        Idle = 0,
+        InLobby = 1,
+        HostSelectingMenu = 2,
+        HostLoadingLevel = 3,
+        InGame = 4
+    }
+
+    public enum LobbyHostNoticeType : byte
+    {
+        PhaseChanged = 1,
+        ReturnToLobby = 2
+    }
+
     /// <summary>
     /// Orchestrates the Archon Mode Co-op Session:
     /// 1. Initial & Resync Save-Stream Transfer (.zxsav + .zxcheck chunked over Reliable channel)
@@ -34,6 +49,16 @@ namespace TABCoopMod.Sync
         public static INetworkTransport Transport { get; private set; }
         public static bool IsSessionActive => Transport != null && Transport.IsActive;
         public static bool IsInSyncedLevel { get; private set; }
+        public static int CurrentSessionSeed { get; private set; } = SyncSeed;
+        public static LobbyRoomPhase RoomPhase { get; private set; } = LobbyRoomPhase.Idle;
+        public static string HostActionHint { get; private set; } = string.Empty;
+        public static bool ShouldOpenLobbyOnMainMenu { get; set; }
+        private static volatile bool _pendingClientReturnToMainMenu;
+        private static volatile bool _suppressReturnNotice;
+        private static readonly List<PeerInfo> _lobbyRoster = new List<PeerInfo>();
+
+        public static IReadOnlyList<PeerInfo> LobbyRoster => _lobbyRoster;
+        public static event Action LobbyStateChanged;
 
         public static bool EnableAutoResync = true;
         // Host-authoritative async correction radius. Host positions are valid on the client because
@@ -237,35 +262,192 @@ namespace TABCoopMod.Sync
             while (_incomingPosAlignQueue.TryDequeue(out _)) { }
         }
 
+        public static int RollNewGameSeed()
+        {
+            if (TestHarnessConfig.Enabled)
+            {
+                CurrentSessionSeed = SyncSeed;
+                return CurrentSessionSeed;
+            }
+            int seed = unchecked((int)(DateTime.UtcNow.Ticks ^ Guid.NewGuid().GetHashCode()));
+            if (seed == 0 || seed == 1337) seed = 20261110;
+            CurrentSessionSeed = seed;
+            LockstepClock.EnableDeterministicSandbox(CurrentSessionSeed);
+            LockstepClock.RequestPostLoadCalibration(CurrentSessionSeed, markLoading: false);
+            LockstepClock.ResetBehaviourRandom(CurrentSessionSeed);
+            ModLogger.Info($"[CoopSessionManager] Rolled dynamic session seed: {CurrentSessionSeed}");
+            return CurrentSessionSeed;
+        }
+
+        public static bool HasJoinedClient
+        {
+            get
+            {
+                if (Transport == null) return false;
+                foreach (var p in GetEffectivePeers())
+                {
+                    if (p.PlayerId != 1) return true;
+                }
+                return false;
+            }
+        }
+
+        public static bool AreAllClientsReady
+        {
+            get
+            {
+                bool hasClient = false;
+                foreach (var p in GetEffectivePeers())
+                {
+                    if (p.PlayerId == 1) continue;
+                    hasClient = true;
+                    if (!p.IsReady) return false;
+                }
+                return hasClient;
+            }
+        }
+
+        public static bool CanHostStartGame =>
+            IsSessionActive && Transport.IsHost && AreAllClientsReady;
+
+        public static PeerInfo LocalPeer
+        {
+            get
+            {
+                if (Transport == null) return null;
+                foreach (var p in GetEffectivePeers())
+                {
+                    if (p.PlayerId == Transport.LocalPlayerId) return p;
+                }
+                return null;
+            }
+        }
+
+        public static IReadOnlyList<PeerInfo> GetEffectivePeers()
+        {
+            if (_lobbyRoster.Count > 0) return _lobbyRoster;
+            if (Transport?.ConnectedPeers != null) return Transport.ConnectedPeers;
+            return Array.Empty<PeerInfo>();
+        }
+
+        public static void SetLocalReady(bool ready)
+        {
+            if (!IsSessionActive || Transport.IsHost) return;
+            byte localId = Transport.LocalPlayerId;
+            if (localId == 0) return;
+
+            foreach (var p in _lobbyRoster)
+            {
+                if (p.PlayerId == localId)
+                {
+                    p.IsReady = ready;
+                    break;
+                }
+            }
+            Transport.SyncPeers(_lobbyRoster);
+            Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.ClientReadyState, w =>
+            {
+                w.Write(ready);
+            });
+            LobbyStateChanged?.Invoke();
+        }
+
+        public static void SetHostRoomPhase(LobbyRoomPhase phase, string hint = "")
+        {
+            if (!IsSessionActive || !Transport.IsHost) return;
+            RoomPhase = phase;
+            HostActionHint = hint ?? string.Empty;
+            BroadcastLobbyRoster();
+            LobbyStateChanged?.Invoke();
+        }
+
+        public static void BroadcastLobbyRoster()
+        {
+            if (!IsSessionActive || !Transport.IsHost) return;
+
+            if (_lobbyRoster.Count == 0 && Transport.ConnectedPeers != null)
+            {
+                foreach (var p in Transport.ConnectedPeers)
+                {
+                    _lobbyRoster.Add(new PeerInfo
+                    {
+                        PlayerId = p.PlayerId,
+                        PlayerName = p.PlayerName,
+                        SteamId64 = p.SteamId64,
+                        IsReady = p.PlayerId == 1 || p.IsReady
+                    });
+                }
+            }
+
+            Transport.SyncPeers(_lobbyRoster);
+            Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.LobbyRosterSync, w =>
+            {
+                w.Write((byte)RoomPhase);
+                w.Write(HostActionHint ?? string.Empty);
+                w.Write((byte)_lobbyRoster.Count);
+                foreach (var p in _lobbyRoster)
+                {
+                    w.Write(p.PlayerId);
+                    w.Write(p.PlayerName ?? string.Empty);
+                    w.Write(p.SteamId64);
+                    w.Write(p.IsReady);
+                }
+            });
+        }
+
         public static void StartHostSession(bool useLoopback)
         {
             StopSession();
-            LockstepClock.EnableDeterministicSandbox(SyncSeed);
-            LockstepClock.RequestPostLoadCalibration(SyncSeed, markLoading: false);
-            LockstepClock.ResetBehaviourRandom(SyncSeed);
+            int seed = RollNewGameSeed();
+            LockstepClock.EnableDeterministicSandbox(seed);
+            LockstepClock.RequestPostLoadCalibration(seed, markLoading: false);
+            LockstepClock.ResetBehaviourRandom(seed);
 
+            LocalTcpLoopbackTransport.HostRoomPhaseProvider = () => (byte)RoomPhase;
             Transport = CreateTransport(useLoopback);
             BindTransportEvents();
             Transport.StartHost(3);
 
+            _lobbyRoster.Clear();
+            if (Transport.ConnectedPeers != null)
+            {
+                foreach (var p in Transport.ConnectedPeers)
+                {
+                    _lobbyRoster.Add(new PeerInfo
+                    {
+                        PlayerId = p.PlayerId,
+                        PlayerName = p.PlayerName,
+                        SteamId64 = p.SteamId64,
+                        IsReady = true
+                    });
+                }
+            }
+            RoomPhase = LobbyRoomPhase.InLobby;
+            HostActionHint = string.Empty;
+
             CommandInterceptor.LocalPlayerId = 1;
             CommandInterceptor.OnLocalCommandCaptured = OnLocalCommandCaptured;
-            ModLogger.Info($"[CoopSessionManager] Started Host Session (Mode={(useLoopback ? "LocalLoopback" : "SteamP2P")}).");
+            ModLogger.Info($"[CoopSessionManager] Started Host Session (Mode={(useLoopback ? "LocalLoopback" : "SteamP2P")}, seed={seed}).");
+            LobbyStateChanged?.Invoke();
         }
 
         public static void JoinSession(bool useLoopback, string targetAddressOrSteamId)
         {
             StopSession();
-            LockstepClock.EnableDeterministicSandbox(SyncSeed);
-            LockstepClock.RequestPostLoadCalibration(SyncSeed, markLoading: false);
-            LockstepClock.ResetBehaviourRandom(SyncSeed);
+            CurrentSessionSeed = SyncSeed;
+            LockstepClock.EnableDeterministicSandbox(CurrentSessionSeed);
+            LockstepClock.RequestPostLoadCalibration(CurrentSessionSeed, markLoading: false);
+            LockstepClock.ResetBehaviourRandom(CurrentSessionSeed);
 
             Transport = CreateTransport(useLoopback);
             BindTransportEvents();
             Transport.ConnectToHost(targetAddressOrSteamId);
 
+            RoomPhase = LobbyRoomPhase.InLobby;
+            HostActionHint = string.Empty;
             CommandInterceptor.OnLocalCommandCaptured = OnLocalCommandCaptured;
             ModLogger.Info($"[CoopSessionManager] Joining Session at '{targetAddressOrSteamId}' (Mode={(useLoopback ? "LocalLoopback" : "SteamP2P")}).");
+            LobbyStateChanged?.Invoke();
         }
 
         public static void StopSession()
@@ -276,6 +458,13 @@ namespace TABCoopMod.Sync
             CommandInterceptor.InQueueAutoAdvance = false;
             CommandExecutor.IsReplayingCommand = false;
             IsInSyncedLevel = false;
+            RoomPhase = LobbyRoomPhase.Idle;
+            HostActionHint = string.Empty;
+            ShouldOpenLobbyOnMainMenu = false;
+            _pendingClientReturnToMainMenu = false;
+            _suppressReturnNotice = false;
+            _lobbyRoster.Clear();
+            LocalTcpLoopbackTransport.HostRoomPhaseProvider = null;
             ResetSyncTrackingState();
             LockstepClock.DisableDeterministicSandbox();
             AllyStates.Clear();
@@ -310,6 +499,92 @@ namespace TABCoopMod.Sync
                 Transport.Dispose();
                 Transport = null;
             }
+            LobbyStateChanged?.Invoke();
+        }
+
+        public static void OnReturningToMainMenu()
+        {
+            if (!IsSessionActive) return;
+
+            bool isHost = Transport.IsHost;
+            bool suppressBroadcast = _suppressReturnNotice;
+            _suppressReturnNotice = false;
+
+            IsInSyncedLevel = false;
+            CommandInterceptor.IsInterceptionEnabled = false;
+            CommandInterceptor.SuppressIndividualMoveExecution = false;
+            CommandInterceptor.InQueueAutoAdvance = false;
+            CommandExecutor.IsReplayingCommand = false;
+            PauseSyncController.CancelCountdown();
+            LockstepClock.SetSessionPause(false);
+
+            ResetSyncTrackingState();
+            AllyStates.Clear();
+            _localOutgoingQueue.Clear();
+            _hostTurnBuffer.Clear();
+            _pendingTurnCommands.Clear();
+            _hostLastBroadcastSimTick = -1;
+            _gateLastObservedTick = -1;
+            _gateWaitStartTicks = -1.0;
+            _awaitingSnapshotLoad = false;
+            _awaitingClientSnapshotAck = false;
+            _awaitingClientAckStartTicks = -1.0;
+            _hostSnapshotReloadPending = false;
+            _hostWaitingOwnReload = false;
+            _clientSnapshotAckReceived = false;
+            _pendingHostSnapshotExport = false;
+            _pendingClientSnapshotLoadPath = null;
+            _pendingBroadcastSavBytes = null;
+            _pendingBroadcastChkText = null;
+            _kickingLoadFade = false;
+            _loadFadeKickStartTicks = -1.0;
+            _incomingChunks.Clear();
+            _expectedChunks = 0;
+            _networkGate = new TurnInputTickGate();
+            LockstepClock.TickGate = null;
+
+            ShouldOpenLobbyOnMainMenu = true;
+
+            if (isHost)
+            {
+                foreach (var p in _lobbyRoster)
+                {
+                    if (p.PlayerId != 1) p.IsReady = false;
+                }
+                RoomPhase = LobbyRoomPhase.InLobby;
+                HostActionHint = string.Empty;
+                RollNewGameSeed();
+
+                if (!suppressBroadcast)
+                {
+                    Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.LobbyHostNotice, w =>
+                    {
+                        w.Write((byte)LobbyHostNoticeType.ReturnToLobby);
+                    });
+                }
+                BroadcastLobbyRoster();
+                ModLogger.Info("[CoopSessionManager] Host returning to Main Menu -> preserved connection and returned room to Lobby.");
+            }
+            else
+            {
+                if (!suppressBroadcast)
+                {
+                    SetLocalReady(false);
+                    ModLogger.Info("[CoopSessionManager] Client returning to Main Menu -> preserved connection and notified Host Unready.");
+                }
+                else
+                {
+                    foreach (var p in _lobbyRoster)
+                    {
+                        if (p.PlayerId != 1) p.IsReady = false;
+                    }
+                    RoomPhase = LobbyRoomPhase.InLobby;
+                    HostActionHint = string.Empty;
+                    Transport.SyncPeers(_lobbyRoster);
+                    ModLogger.Info("[CoopSessionManager] Client followed Host back to Lobby.");
+                }
+            }
+            LobbyStateChanged?.Invoke();
         }
 
         private static INetworkTransport CreateTransport(bool useLoopback)
@@ -334,23 +609,74 @@ namespace TABCoopMod.Sync
                 ModLogger.Info($"[CoopSessionManager] Peer connected: {peer?.PlayerName} (PlayerId={peer?.PlayerId}, LocalId={Transport.LocalPlayerId})");
                 GameBridge.ShowTopBanner($"Co-op Peer Connected: {peer?.PlayerName}", Color.SpringGreen, 3000);
 
-                // If Host is already inside a level when a peer connects, push snapshot immediately!
-                if (Transport.IsHost && GameBridge.CurrentLevelState != null && !_hostSnapshotReloadPending)
+                if (Transport.IsHost)
                 {
-                    RequestSnapshotBroadcast();
+                    if (peer != null)
+                    {
+                        _lobbyRoster.RemoveAll(p => p.PlayerId == peer.PlayerId);
+                        _lobbyRoster.Add(new PeerInfo
+                        {
+                            PlayerId = peer.PlayerId,
+                            PlayerName = peer.PlayerName,
+                            SteamId64 = peer.SteamId64,
+                            IsReady = peer.PlayerId == 1 || peer.IsReady
+                        });
+                        _lobbyRoster.Sort((a, b) => a.PlayerId.CompareTo(b.PlayerId));
+                    }
+                    BroadcastLobbyRoster();
+
+                    // If Host is already inside a level when a peer connects, push snapshot immediately!
+                    if (GameBridge.CurrentLevelState != null && !_hostSnapshotReloadPending)
+                    {
+                        RequestSnapshotBroadcast();
+                    }
                 }
+                else
+                {
+                    if (Transport.ConnectedPeers != null && Transport.ConnectedPeers.Count > 0)
+                    {
+                        _lobbyRoster.Clear();
+                        foreach (var p in Transport.ConnectedPeers)
+                        {
+                            _lobbyRoster.Add(new PeerInfo
+                            {
+                                PlayerId = p.PlayerId,
+                                PlayerName = p.PlayerName,
+                                SteamId64 = p.SteamId64,
+                                IsReady = p.IsReady
+                            });
+                        }
+                    }
+                }
+                LobbyStateChanged?.Invoke();
             };
 
             Transport.OnPeerDisconnected += playerId =>
             {
                 AllyStates.Remove(playerId);
-                // Never leave the turn gate permanently blocked because a peer vanished.
-                if (Transport != null && !Transport.IsHost)
+                _lobbyRoster.RemoveAll(p => p.PlayerId == playerId);
+
+                if (Transport != null && Transport.IsHost)
+                {
+                    BroadcastLobbyRoster();
+                    GameBridge.ShowTopBanner($"Player {playerId} Disconnected", Color.OrangeRed, 3000);
+                    LobbyStateChanged?.Invoke();
+                }
+                else if (Transport != null && !Transport.IsHost)
                 {
                     _networkGate.MarkReady(int.MaxValue);
                     IsInSyncedLevel = false;
+                    if (playerId == 1)
+                    {
+                        GameBridge.ShowTopBanner("Host disconnected / Room disbanded", Color.OrangeRed, 3500);
+                        StopSession();
+                    }
+                    else
+                    {
+                        GameBridge.ShowTopBanner($"Player {playerId} Disconnected", Color.OrangeRed, 3000);
+                        LobbyStateChanged?.Invoke();
+                    }
                 }
-                GameBridge.ShowTopBanner($"Player {playerId} Disconnected", Color.OrangeRed, 3000);
             };
 
             Transport.OnPacketReceived += OnPacketReceived;
@@ -392,7 +718,7 @@ namespace TABCoopMod.Sync
 
                 byte[] savBytes = File.ReadAllBytes(savPath);
                 string chkText = File.Exists(chkPath) ? File.ReadAllText(chkPath) : string.Empty;
-                int syncSeed = SyncSeed;
+                int syncSeed = CurrentSessionSeed;
                 long idCounter = LockstepClock.CurrentSyncedEntityIdCounter;
 
                 _hostTickDigests.Clear();
@@ -488,10 +814,10 @@ namespace TABCoopMod.Sync
             Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.SessionStart, w =>
             {
                 w.Write(startTick);
-                w.Write(SyncSeed);
+                w.Write(CurrentSessionSeed);
                 w.Write(idCounter);
             });
-            ModLogger.Info($"[CoopSessionManager] Host+Client barrier satisfied; entered synced level and sent SessionStart at tick={startTick}!");
+            ModLogger.Info($"[CoopSessionManager] Host+Client barrier satisfied; entered synced level and sent SessionStart at tick={startTick}, seed={CurrentSessionSeed}!");
         }
 
         private static void OnLocalCommandCaptured(NetCommand cmd)
@@ -577,6 +903,11 @@ namespace TABCoopMod.Sync
             _hostLastBroadcastSimTick = cur;
             IsInSyncedLevel = true;
             CommandInterceptor.IsInterceptionEnabled = true;
+            RoomPhase = LobbyRoomPhase.InGame;
+            HostActionHint = string.Empty;
+            if (Transport.IsHost)
+                BroadcastLobbyRoster();
+            LobbyStateChanged?.Invoke();
 
             // The save loader leaves DXGame.Paused/GameSpeed at 0; clear it so engine animations and
             // the fixed-step clock start running. Session pauses are tracked separately.
@@ -711,6 +1042,7 @@ namespace TABCoopMod.Sync
                 }
                 if (!IsInSyncedLevel && !_hostSnapshotReloadPending)
                 {
+                    SetHostRoomPhase(LobbyRoomPhase.HostLoadingLevel, "正在同步关卡...");
                     RequestSnapshotBroadcast();
                 }
                 return;
@@ -737,8 +1069,51 @@ namespace TABCoopMod.Sync
             LockstepClock.RequestPostLoadCalibration(seed, entityIdCounter);
         }
 
+        private static void TryHandlePendingSteamInvite()
+        {
+            if (GameBridge.CurrentLevelState != null || GameBridge.IsGameLoading()) return;
+            string inviteLobbyId = SteamP2PTransport.ConsumePendingInviteLobbyId();
+            if (string.IsNullOrEmpty(inviteLobbyId)) return;
+
+            ModLogger.Info($"[CoopSessionManager] Auto-joining invited Steam Lobby {inviteLobbyId} on Main Menu...");
+            try
+            {
+                JoinSession(false, inviteLobbyId);
+                ShouldOpenLobbyOnMainMenu = true;
+                CoopLobbyWindow.ShowLobbyWindow();
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error($"[CoopSessionManager] Failed to auto-join invited Steam Lobby {inviteLobbyId}", ex);
+                StopSession();
+            }
+        }
+
         public static void OnFrameTick()
         {
+            if (!TestHarnessConfig.Enabled && !TestHarnessConfig.ControlEnabled)
+            {
+                SteamP2PTransport.PumpSteamCallbacksIfNeeded(Transport);
+                TryHandlePendingSteamInvite();
+            }
+
+            if (_pendingClientReturnToMainMenu)
+            {
+                _pendingClientReturnToMainMenu = false;
+                if (GameBridge.CurrentLevelState != null)
+                {
+                    ModLogger.Info("[CoopSessionManager] Host returned to lobby -> returning Client to Main Menu...");
+                    _suppressReturnNotice = true;
+                    IsInSyncedLevel = false;
+                    CommandInterceptor.IsInterceptionEnabled = false;
+                    LockstepClock.SetSessionPause(false);
+                    GameBridge.ReturnToMainMenu();
+                    return;
+                }
+            }
+
+            CoopLobbyWindow.Tick();
+
             if (!IsSessionActive) return;
 
             // Deferred, top-of-frame (shallow stack) work: export never runs inside the loader
@@ -1050,6 +1425,70 @@ namespace TABCoopMod.Sync
         {
             switch (pktType)
             {
+                case PacketType.LobbyRosterSync:
+                {
+                    if (Transport.IsHost) break;
+                    var phase = (LobbyRoomPhase)r.ReadByte();
+                    string hint = r.ReadString();
+                    byte count = r.ReadByte();
+                    _lobbyRoster.Clear();
+                    for (int i = 0; i < count; i++)
+                    {
+                        _lobbyRoster.Add(new PeerInfo
+                        {
+                            PlayerId = r.ReadByte(),
+                            PlayerName = r.ReadString(),
+                            SteamId64 = r.ReadUInt64(),
+                            IsReady = r.ReadBoolean()
+                        });
+                    }
+                    RoomPhase = phase;
+                    HostActionHint = hint;
+                    Transport.SyncPeers(_lobbyRoster);
+                    LobbyStateChanged?.Invoke();
+                    break;
+                }
+
+                case PacketType.ClientReadyState:
+                {
+                    if (!Transport.IsHost) break;
+                    bool ready = r.ReadBoolean();
+                    foreach (var p in _lobbyRoster)
+                    {
+                        if (p.PlayerId == senderId)
+                        {
+                            p.IsReady = ready;
+                            break;
+                        }
+                    }
+                    BroadcastLobbyRoster();
+                    LobbyStateChanged?.Invoke();
+                    break;
+                }
+
+                case PacketType.LobbyHostNotice:
+                {
+                    if (Transport.IsHost) break;
+                    var noticeType = (LobbyHostNoticeType)r.ReadByte();
+                    if (noticeType == LobbyHostNoticeType.ReturnToLobby)
+                    {
+                        foreach (var p in _lobbyRoster)
+                        {
+                            if (p.PlayerId != 1) p.IsReady = false;
+                        }
+                        RoomPhase = LobbyRoomPhase.InLobby;
+                        HostActionHint = string.Empty;
+                        ShouldOpenLobbyOnMainMenu = true;
+                        Transport.SyncPeers(_lobbyRoster);
+                        if (GameBridge.CurrentLevelState != null)
+                        {
+                            _pendingClientReturnToMainMenu = true;
+                        }
+                        LobbyStateChanged?.Invoke();
+                    }
+                    break;
+                }
+
                 case PacketType.SnapshotBegin:
                 {
                     _expectedSaveBytes = r.ReadInt32();

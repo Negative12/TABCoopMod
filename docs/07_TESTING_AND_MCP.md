@@ -136,3 +136,4 @@ powershell -ExecutionPolicy Bypass -File scripts/run_chaos_two_instance.ps1 `
 | `levelLoaded=false` | 仍在主菜单或加载中；使用 `-SavePath` 自动读档并等待加载完成。 |
 | 操作后画面无变化 | 存档处于暂停态（先 `set_paused{paused:false}`），或建造坐标/资源不合法被游戏拒绝。 |
 | 协议细节（ControlServer） | 仅监听 `127.0.0.1` 换行 JSON，单请求 10s 超时（示例：`{"id":1,"tool":"game_state","args":{}}`）。 |
+| 等候大厅端到端测试（[`verify_lobby_flow.ps1`](../scripts/verify_lobby_flow.ps1)） | 双开无 `TABCOOP_TEST`（控制端口 `27901`/`27902`），验证 `open_lobby`、`lobby_state`、`lobby_action`（`probe`/`host_loopback`/`join_loopback`/`toggle_ready`/`open_new_survival`/`close_top_modal`/`load_save`/`return_to_menu`）、动态随机种子滚动、读档同步与方案 A 退回大厅全流程并保存截图。 |

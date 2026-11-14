@@ -63,11 +63,12 @@
 
 ## 3. 大厅、开局与热同步流程（Lobby & Session Flow）
 
-### 3.1 主菜单入口与联机大厅
-1. 在主菜单 `TMenuCategory.Main` 注入 **`CO-OP MULTIPLAYER`** 按钮。
-2. 点击打开 `CoopLobbyWindow` 弹窗，提供：
-   - Steam 房间创建（`SteamMatchmaking.CreateLobby`）、好友邀请、加入房间；
-   - 本地环回测试入口（`Start Host on 127.0.0.1:27099` / `Join Local Host`），供开发与自动化测试快速双开。
+### 3.1 主菜单入口与传统 RTS 等候房间
+1. 在主菜单 `TMenuCategory.Main` 注入 **`CO-OP MULTIPLAYER`** 按钮，并随游戏生命周期挂载全局 Steam 邀请监听（`GameLobbyJoinRequested_t` 与 `+connect_lobby` 启动参数）。
+2. 点击打开基于原版 `ZXWindow(BigWindow)` 与 `ZXButtonSteam` 构建的传统 RTS 等候房间（`CoopLobbyWindow`），包含双态视图：
+   - **入口视图（未加入房间）**：左侧提供 **创建 Steam 好友房间**（`SteamMatchmaking.CreateLobby`）与 **创建本地测试房间**（`127.0.0.1:27099`）；右侧通过非侵入式 `LobbyProbe`/`LobbyProbeAck` 自动探测本地已有主机并展示房主名、人数与阶段，探测就绪后方可 **加入本地房间**。
+   - **等候房间视图（已连接）**：左侧展示 3 个执政官彩色席位（`P1` 蓝、`P2` 绿、`P3` 橙）与 `★ 房主` / `✓ 已准备` / `○ 未准备` 状态徽章；右侧客机切换 **进入准备状态 / 取消准备**（支持中途加入断线重连）；**至少 1 名客机入房且全员已准备** 后，房主方可选择 **从存档加载...**、**新建生存游戏...** 或 **自定义地图...**（直接复用单人模式原生界面，取消菜单会自动重开等候大厅）。
+3. **动态随机换图与退局回大厅（方案 A）**：非固定测试模式下每次建房或新开局都会生成动态随机 `SyncSeed` 下发同步；房主或对局通过 `ReturnToMainMenu` 返回主菜单时，保留双端网络连接并重置客机准备状态，自动回到等候房间。
 
 ### 3.2 零地图生成差异的“内存存档流直传”开局流程
 1. **房主导出快照**：房主进入关卡完成（`OnLevelLoadComplete`）后，在浅调用栈顶层调用 `WriteSaveFile` 导出临时 `.zxsav` + `.zxcheck`（统一文件名 `coop_host_snapshot.zxsav/.zxcheck`），切分为 `32 KB` `SnapshotChunk` 广播。

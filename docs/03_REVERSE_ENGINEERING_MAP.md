@@ -96,8 +96,12 @@
 | `#=zUM4xl3ca4QS35TzMAg==` | `DXGridLayout` (Field) | 主菜单垂直按钮容器 |
 | `#=zyDj$brKr7icb` | `Dictionary<TMenuCategory, List<ZXButtonLink>>` | 主菜单分类按钮字典（`TMenuCategory`: `Main`, `New`, `More`） |
 | `#=zBObIu5ds9WvT` | `bool` (Field) | `ReadyForInput`（主菜单初始化就绪标志） |
+| `#=zYxOmgpMMO3Yb` | `ZXButtonLink` (Field) | 主菜单「继续 / 读档」按钮 |
 | `#=zp8c19tQ=` | `void (TMenuCategory)` | 切换菜单分类 |
-| `#=zwK_pUIeRBpbp` | `void ()` | **主线程加载完成回调**（执行 `Scene.Clear` / `Scene.Init` 并置 `ReadyForInput = true`，自动读档钩子必须挂于此而非异步 `OnLoad`） |
+| `#=zwK_pUIeRBpbp` | `void ()` | **主线程加载完成回调**（执行 `Scene.Clear` / `Scene.Init` 并置 `ReadyForInput = true`，自动读档钩子与返回主菜单大厅恢复触发点） |
+| `#=z90VC8V_3LX2x` | `void (DXButton)` | 「继续/从存档加载」入口，供联机房主复用单人读档列表 |
+| `#=zxd3DE94B60Abw_zkg7L488DfPg5s` | `void (DXButton)` | 「新生存游戏」入口，供联机房主复用单人新局向导 |
+| `#=zDnLtRmxOqjXPh5h9_Q==` | `void (DXButton)` | 「自定义地图」入口，供联机房主复用单人自定义地图列表 |
 
 ### 4.3 `ZXSystemGameLevel` (`#=zxRcpu6e7NYzT7tGWqPjpOkc=`)
 

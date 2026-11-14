@@ -136,6 +136,8 @@ namespace TABCoopMod.Networking
             DeliverDue();
         }
 
+        public void SyncPeers(IEnumerable<PeerInfo> peers) => _inner.SyncPeers(peers);
+
         private void OnInnerPacketReceived(byte senderId, PacketType type, BinaryReader reader)
         {
             // Outbound chaos (latency/jitter/retransmit/disconnect) is already applied by the

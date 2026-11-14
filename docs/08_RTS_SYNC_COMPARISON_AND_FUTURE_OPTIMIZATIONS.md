@@ -34,7 +34,7 @@
 | **单位无法完成攻击动作** | 攻击前摇与冷却严格绑定逻辑 tick | 后台线程 `_TaskGameTime` 异步修改 `GameTime`，且单位动作读写渲染精灵 `CSprite` 帧进度 | `GameTimeIsolationPatch` 冻结非授权时间修改，`CSpritePullIsolationPatch` 与 `CMovableSpriteProgressSyncPatch` 将精灵进度对齐逻辑时钟。 |
 | **连点重叠建造、无视资源透支** | UI 本地挂起占位 + 执行期二次校验 | 单机认为点击即落盘，且实际加入 `DXWorldGrid` 延迟到帧队列 `PostMethods` 执行，导致延迟窗口连点在真正生成时未相互阻塞 | ① 拦截层 `Patch_ZXCommand_Execute` 校验 `CanExecuteCommandOnEntity`/`CanPlaceBuildingAtTarget`，并用 `_recentLocalBuilds`（`350ms` / `8 ticks`）去重重叠面积；<br>② 回放层 `CommandExecutor.ExecutePlaceBuilding` 执行前复验资源与占格，建造后立即调用 `FlushStartFramePostMethods()` 刷新网格占位。 |
 | **双人同领市长双倍奖励** | 共享状态带版本守卫，首达胜出 | 原版 `ZXMayor.Apply` 单机无已领幂等校对，双方先后点出两份奖励 | `MayorSyncPatch` + `MayorModalTrackerPatch` 结合 `mayorLevel` / `MayorStates` 幂等拦截，首个玩家生效后自动关闭对端弹窗。 |
-| **联机新建游戏总是同一张图** | 新局生成独立对局种子后下发客机 | 并非强退引起。`CoopSessionManager.SyncSeed` 当前固定为常量 `20261109`，`StartHostSession` 启用沙盒且每次 `InitLevel` 前调用 `ResetSyncedRandomStreamsForInitLevel()` 与 `DXRandomCtorPatch.ResetCounter()` | 仅属当前固定测试种子的行为；会话协议 `SnapshotBegin`/`SessionStart` 本身已支持传递 `SyncSeed`，后续对非测试局放开动态生成种子即可解决。 |
+| **联机新建游戏总是同一张图** | 新局生成独立对局种子后下发客机 | 并非强退引起。旧版固定 `SyncSeed = 20261109`，`StartHostSession` 与 `InitLevel` 前按固定种子重置 RNG | **✅ 已解决**：新增 `CoopSessionManager.RollNewGameSeed()`，非 `TABCOOP_TEST=1` 会话在建房、选新生存/自定义地图及退回大厅时生成动态种子并随快照/`HostSyncBarrier` 下发客机（仅自动化回放测试固定 `20261109`）。 |
 
 ---
 
@@ -54,8 +54,8 @@
 
 ### 梯度一：轻量高性价比改造（约 50 ~ 300 行，0.5 ~ 1.5 天）
 完全停留在现有会话层与拦截/UI 覆盖层内，风险极低：
-1. **非测试模式新建游戏动态种子握手**（约 `20~30 行`）：
-   - 在 `!TestHarnessConfig.Enabled` 时，为每次新开局生成随机 `SyncSeed` 并在现有 `SnapshotBegin`/`SessionStart` 流程下发客机，解决“联机新开永远同一张图”。
+1. ~~**非测试模式新建游戏动态种子握手**~~（✅ **已完成**）：
+   - 已接入 `CoopSessionManager.RollNewGameSeed()`：非 `TABCOOP_TEST=1` 会话下每次建房/开新图动态滚动 `CurrentSessionSeed`，已在双开测试实测相邻两次新开得到不同种子并正确同步。
 2. **本地待建幽灵虚影与窗口期资源预扣累计**（约 `150~250 行`）：
    - 在现有 `_recentLocalBuilds`（[CommandInterceptorPatch.cs](../src/TABCoopMod/Patches/CommandInterceptorPatch.cs)）基础上叠加窗口内资源预扣统计，并借助 [AllyOverlayRenderer.cs](../src/TABCoopMod/UI/AllyOverlayRenderer.cs) 在地面即时绘制半透明占位框，提升 Shift 连建反馈。
 3. **0ms 本地单位语音即时确认**（约 `80~150 行`）：

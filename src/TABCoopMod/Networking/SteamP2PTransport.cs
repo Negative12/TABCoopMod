@@ -12,11 +12,76 @@ namespace TABCoopMod.Networking
     /// </summary>
     public sealed class SteamP2PTransport : INetworkTransport
     {
+        private static Callback<GameLobbyJoinRequested_t> _globalCbLobbyJoinRequested;
+        private static Action<string> _globalInviteHandler;
+        private static bool _startupLobbyChecked;
+        private static string _pendingInviteLobbyId;
+
         private Callback<LobbyCreated_t> _cbLobbyCreated;
         private Callback<LobbyEnter_t> _cbLobbyEnter;
-        private Callback<GameLobbyJoinRequested_t> _cbLobbyJoinRequested;
+        private Callback<LobbyChatUpdate_t> _cbLobbyChatUpdate;
         private Callback<P2PSessionRequest_t> _cbP2PSessionRequest;
         private Callback<P2PSessionConnectFail_t> _cbP2PConnectFail;
+
+        public static void RegisterGlobalInviteListener(Action<string> onInviteAccepted)
+        {
+            _globalInviteHandler = onInviteAccepted;
+            try
+            {
+                if (_globalCbLobbyJoinRequested == null)
+                {
+                    _globalCbLobbyJoinRequested = Callback<GameLobbyJoinRequested_t>.Create(param =>
+                    {
+                        string lobbyId = param.m_steamIDLobby.m_SteamID.ToString();
+                        ModLogger.Info($"[SteamP2PTransport] Global Steam Invite accepted! LobbyID={lobbyId}");
+                        _pendingInviteLobbyId = lobbyId;
+                        _globalInviteHandler?.Invoke(lobbyId);
+                    });
+                    ModLogger.Info("[SteamP2PTransport] Global GameLobbyJoinRequested_t listener registered.");
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[SteamP2PTransport] Failed to register global invite listener: {ex.Message}");
+            }
+
+            if (!_startupLobbyChecked)
+            {
+                _startupLobbyChecked = true;
+                try
+                {
+                    string[] args = Environment.GetCommandLineArgs();
+                    for (int i = 0; i < args.Length - 1; i++)
+                    {
+                        if (string.Equals(args[i], "+connect_lobby", StringComparison.OrdinalIgnoreCase) &&
+                            ulong.TryParse(args[i + 1], out ulong lobbyId) && lobbyId != 0)
+                        {
+                            ModLogger.Info($"[SteamP2PTransport] Detected startup +connect_lobby {lobbyId}");
+                            _pendingInviteLobbyId = lobbyId.ToString();
+                            break;
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        public static string ConsumePendingInviteLobbyId()
+        {
+            string id = _pendingInviteLobbyId;
+            _pendingInviteLobbyId = null;
+            return id;
+        }
+
+        public static void PumpSteamCallbacksIfNeeded(INetworkTransport activeTransport)
+        {
+            if (activeTransport is SteamP2PTransport) return;
+            try
+            {
+                SteamAPI.RunCallbacks();
+            }
+            catch { }
+        }
 
         private CSteamID _currentLobbyId = CSteamID.Nil;
         private CSteamID _hostSteamId = CSteamID.Nil;
@@ -40,7 +105,7 @@ namespace TABCoopMod.Networking
 
             _cbLobbyCreated = Callback<LobbyCreated_t>.Create(OnLobbyCreated);
             _cbLobbyEnter = Callback<LobbyEnter_t>.Create(OnLobbyEntered);
-            _cbLobbyJoinRequested = Callback<GameLobbyJoinRequested_t>.Create(OnGameLobbyJoinRequested);
+            _cbLobbyChatUpdate = Callback<LobbyChatUpdate_t>.Create(OnLobbyChatUpdate);
             _cbP2PSessionRequest = Callback<P2PSessionRequest_t>.Create(OnP2PSessionRequest);
             _cbP2PConnectFail = Callback<P2PSessionConnectFail_t>.Create(OnP2PConnectFail);
         }
@@ -115,12 +180,6 @@ namespace TABCoopMod.Networking
             ModLogger.Info($"[SteamP2PTransport] Steam Lobby created! LobbyID={_currentLobbyId.m_SteamID}");
         }
 
-        private void OnGameLobbyJoinRequested(GameLobbyJoinRequested_t param)
-        {
-            ModLogger.Info($"[SteamP2PTransport] Shift+Tab Friend Invite accepted! Joining Lobby {param.m_steamIDLobby.m_SteamID}...");
-            ConnectToHost(param.m_steamIDLobby.m_SteamID.ToString());
-        }
-
         private void OnLobbyEntered(LobbyEnter_t param)
         {
             _currentLobbyId = new CSteamID(param.m_ulSteamIDLobby);
@@ -131,6 +190,36 @@ namespace TABCoopMod.Networking
             _playerToSteamId[1] = ownerId;
             ModLogger.Info($"[SteamP2PTransport] Entered Lobby {_currentLobbyId.m_SteamID}, Host SteamID={ownerId.m_SteamID}. Sending Handshake...");
             SendHandshakeToHost();
+        }
+
+        private void OnLobbyChatUpdate(LobbyChatUpdate_t param)
+        {
+            if (!_currentLobbyId.IsValid() || param.m_ulSteamIDLobby != _currentLobbyId.m_SteamID) return;
+            uint change = param.m_rgfChatMemberStateChange;
+            uint leftFlags = (uint)(EChatMemberStateChange.k_EChatMemberStateChangeLeft |
+                                    EChatMemberStateChange.k_EChatMemberStateChangeDisconnected |
+                                    EChatMemberStateChange.k_EChatMemberStateChangeKicked |
+                                    EChatMemberStateChange.k_EChatMemberStateChangeBanned);
+            if ((change & leftFlags) == 0) return;
+
+            var leftSteamId = new CSteamID(param.m_ulSteamIDUserChanged);
+            byte disconnectedPlayerId = 0;
+            foreach (var kv in _playerToSteamId)
+            {
+                if (kv.Value == leftSteamId)
+                {
+                    disconnectedPlayerId = kv.Key;
+                    break;
+                }
+            }
+
+            if (disconnectedPlayerId != 0)
+            {
+                _playerToSteamId.Remove(disconnectedPlayerId);
+                _peers.RemoveAll(p => p.PlayerId == disconnectedPlayerId);
+                ModLogger.Info($"[SteamP2PTransport] Steam lobby member left: SteamID={leftSteamId.m_SteamID} -> PlayerId={disconnectedPlayerId}");
+                OnPeerDisconnected?.Invoke(disconnectedPlayerId);
+            }
         }
 
         private void SendHandshakeToHost()
@@ -250,7 +339,7 @@ namespace TABCoopMod.Networking
                     PlayerId = assignedId,
                     PlayerName = clientName,
                     SteamId64 = remoteSteamId.m_SteamID,
-                    IsReady = true
+                    IsReady = false
                 };
                 _peers.RemoveAll(p => p.PlayerId == assignedId);
                 _peers.Add(peer);
@@ -264,6 +353,7 @@ namespace TABCoopMod.Networking
                         w.Write(p.PlayerId);
                         w.Write(p.PlayerName);
                         w.Write(p.SteamId64);
+                        w.Write(p.IsReady);
                     }
                 });
 
@@ -284,7 +374,7 @@ namespace TABCoopMod.Networking
                         PlayerId = reader.ReadByte(),
                         PlayerName = reader.ReadString(),
                         SteamId64 = reader.ReadUInt64(),
-                        IsReady = true
+                        IsReady = reader.ReadBoolean()
                     };
                     _peers.Add(p);
                     if (p.SteamId64 != 0)
@@ -296,6 +386,25 @@ namespace TABCoopMod.Networking
             }
 
             OnPacketReceived?.Invoke(senderId, pktType, reader);
+        }
+
+        public void SyncPeers(IEnumerable<PeerInfo> peers)
+        {
+            _peers.Clear();
+            if (peers == null) return;
+            foreach (var p in peers)
+            {
+                if (p == null) continue;
+                _peers.Add(new PeerInfo
+                {
+                    PlayerId = p.PlayerId,
+                    PlayerName = p.PlayerName ?? string.Empty,
+                    SteamId64 = p.SteamId64,
+                    IsReady = p.IsReady
+                });
+                if (p.SteamId64 != 0)
+                    _playerToSteamId[p.PlayerId] = new CSteamID(p.SteamId64);
+            }
         }
 
         public void Dispose()

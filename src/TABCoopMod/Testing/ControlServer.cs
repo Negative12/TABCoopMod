@@ -203,6 +203,10 @@ namespace TABCoopMod.Testing
                 case "open_lobby":
                     CoopLobbyWindow.ShowLobbyWindow();
                     return new Dictionary<string, object> { ["opened"] = true };
+                case "lobby_state":
+                    return GetLobbyState();
+                case "lobby_action":
+                    return RunLobbyAction(args);
                 default: throw new InvalidOperationException($"unknown tool '{tool}'");
             }
         }
@@ -622,6 +626,73 @@ namespace TABCoopMod.Testing
                     return true;
                 default:
                     return false;
+            }
+        }
+
+        private static object GetLobbyState()
+        {
+            var peers = new List<Dictionary<string, object>>();
+            foreach (var p in Sync.CoopSessionManager.GetEffectivePeers())
+            {
+                peers.Add(new Dictionary<string, object>
+                {
+                    ["id"] = p.PlayerId,
+                    ["name"] = p.PlayerName,
+                    ["ready"] = p.IsReady
+                });
+            }
+
+            return new Dictionary<string, object>
+            {
+                ["onMainMenu"] = GameBridge.IsOnMainMenu(),
+                ["mainMenuReady"] = GameBridge.IsMainMenuReadyForInput(),
+                ["inLevel"] = GameBridge.CurrentLevelState != null,
+                ["loading"] = GameBridge.IsGameLoading(),
+                ["anyModalOpen"] = GameBridge.IsAnyModalOpen(),
+                ["lobbyWindowOpen"] = CoopLobbyWindow.IsOpen,
+                ["sessionActive"] = Sync.CoopSessionManager.IsSessionActive,
+                ["isHost"] = Sync.CoopSessionManager.Transport?.IsHost ?? false,
+                ["localPlayerId"] = Sync.CoopSessionManager.Transport?.LocalPlayerId ?? 0,
+                ["roomPhase"] = Sync.CoopSessionManager.RoomPhase.ToString(),
+                ["canStart"] = Sync.CoopSessionManager.CanHostStartGame,
+                ["sessionSeed"] = Sync.CoopSessionManager.CurrentSessionSeed,
+                ["peers"] = peers
+            };
+        }
+
+        private static object RunLobbyAction(Dictionary<string, object> args)
+        {
+            string act = GetStr(args, "action") ?? "";
+            switch (act.ToLowerInvariant())
+            {
+                case "close_top_modal":
+                    var modal = DXVision.GUI.DXModalScreen.CurrentModalObject;
+                    if (modal != null) GameBridge.CloseZXWindow(modal);
+                    return new Dictionary<string, object> { ["ok"] = modal != null };
+                case "return_to_menu":
+                    bool r = GameBridge.ReturnToMainMenu();
+                    return new Dictionary<string, object> { ["ok"] = r };
+                case "load_save":
+                    if (!Sync.CoopSessionManager.CanHostStartGame)
+                        return new Dictionary<string, object> { ["ok"] = false, ["error"] = "cannot start before clients are ready" };
+                    string save = GetStr(args, "save") ?? "1_Backup";
+                    CoopLobbyWindow.ForceHideWithoutStopping();
+                    Sync.CoopSessionManager.SetHostRoomPhase(Sync.LobbyRoomPhase.HostLoadingLevel, "房主正在加载存档...");
+                    GameBridge.LoadSaveFileAndEnter(save);
+                    return new Dictionary<string, object> { ["ok"] = true, ["save"] = save };
+                case "probe":
+                    var res = Networking.LocalTcpLoopbackTransport.ProbeLocalHost();
+                    return new Dictionary<string, object>
+                    {
+                        ["online"] = res.IsOnline,
+                        ["players"] = res.PlayerCount,
+                        ["max"] = res.MaxPlayers,
+                        ["phase"] = res.RoomPhase,
+                        ["hostName"] = res.HostName
+                    };
+                default:
+                    bool ok = CoopLobbyWindow.InvokeTestAction(act);
+                    return new Dictionary<string, object> { ["ok"] = ok, ["action"] = act };
             }
         }
 

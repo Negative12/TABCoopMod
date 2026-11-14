@@ -6,6 +6,9 @@ using DXVision;
 using DXVision.GUI;
 using HarmonyLib;
 using TABCoopMod.Core;
+using TABCoopMod.Networking;
+using TABCoopMod.Sync;
+using TABCoopMod.Testing;
 using TABCoopMod.UI;
 using ZX.GUI;
 
@@ -104,6 +107,63 @@ namespace TABCoopMod.Patches
             catch (Exception ex)
             {
                 ModLogger.Error("[MainMenuPatch] Exception in OnLoad_Postfix", ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Hooks ZXSystemMainMenu.OnLoadComplete (#=zwK_pUIeRBpbp) to initialize Steam invite listener
+    /// and automatically reopen the RTS Waiting Room when returning to Main Menu from an active session.
+    /// </summary>
+    [HarmonyPatch]
+    public static class MainMenuOnLoadCompletePatch
+    {
+        public static MethodBase TargetMethod()
+        {
+            return AccessTools.Method(GameBridge.TypeZXSystemMainMenu, ObfuscatedSymbols.Method_MainMenu_OnLoadComplete, Type.EmptyTypes);
+        }
+
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            try
+            {
+                if (!TestHarnessConfig.Enabled && !TestHarnessConfig.ControlEnabled)
+                {
+                    SteamP2PTransport.RegisterGlobalInviteListener(CoopLobbyWindow.HandleSteamInviteAccepted);
+                }
+                CoopLobbyWindow.OnMainMenuLoadComplete();
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error("[MainMenuOnLoadCompletePatch] Exception in Postfix", ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Hooks ZXGame.ReturnToMainMenu (#=zqF2tlklT$8RE) so exiting a match preserves the Co-op
+    /// connection and returns players back into the RTS Waiting Room instead of destroying the session.
+    /// </summary>
+    [HarmonyPatch]
+    public static class ReturnToMainMenuPatch
+    {
+        public static MethodBase TargetMethod()
+        {
+            return AccessTools.Method(GameBridge.TypeZXGame, ObfuscatedSymbols.Method_ZXGame_ReturnToMainMenu, new[] { typeof(Action), typeof(bool) });
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix()
+        {
+            try
+            {
+                CoopLobbyWindow.ForceHideWithoutStopping();
+                CoopSessionManager.OnReturningToMainMenu();
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error("[ReturnToMainMenuPatch] Exception in Prefix", ex);
             }
         }
     }

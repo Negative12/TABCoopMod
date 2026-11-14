@@ -1,7 +1,7 @@
 # 06 — 当前项目状态、门禁验收报告与下一步计划 (Project Status)
 
-> **最后更新**: 2026-11-14（真人实机缺陷修复、`async_align` 客机低频平滑纠偏与双端并发指令实测完成）
-> **构建基线**: `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=54, failed-tolerant=0`**（含异步单 tick 流水线、视觉插值/平滑相机、`ZXBehaviour` 无状态行为随机作用域、输入去重建造保护与市长单次生效拦截）。
+> **最后更新**: 2026-11-14（传统 RTS 等候房间改造、客机准备门控、单人菜单复用、动态随机地图种子与方案 A 退局保留房间全流程实测通过）
+> **构建基线**: `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=56, failed-tolerant=0`**（新增主菜单加载完成与返回主菜单追踪补丁、大厅等候窗口及本地/Steam 控制协议）。
 > **历史过程记录**: 早期排查过程与会话 1~6 演进流水已归档至 [`docs/archive/`](archive/SESSION_CHANGELOG_S1_TO_S6.md)。
 
 ---
@@ -21,6 +21,7 @@
 | **真人联机缺陷修复** | 双开实机反馈修复与代码闭环 | ① 修复视角卡顿与逻辑阻塞（异步单 tick 流水线 + `RenderVisualInterpolationPatch` 视觉插值 + `SmoothCameraPanPatch`）；② 修复单位无法完成攻击动作（`GameTimeIsolationPatch` / `CSpritePullIsolationPatch` / `CMovableSpriteProgressSyncPatch` 隔离渲染时间污染）；③ 修复重叠放置建筑与无视资源不足（`Patch_ZXCommand_Execute` 预检 + `_recentLocalBuilds` 同面积去重，`CommandExecutor.ExecutePlaceBuilding` 校对 `CanExecuteCommandOnEntity` / `CanPlaceBuildingAtTarget` 并调用 `FlushStartFramePostMethods()`）；④ 修复双端各自选市长领双倍奖励（`MayorModalTrackerPatch` + `MayorSyncPatch` 按 `mayorLevel` / `MayorStates` 幂等去重并自动关闭对端弹窗） | ✅ 已修复 |
 | **客机平滑与频次优化** | `1_Backup.zxsav`（120 tick）+ `900survival.zxsav`（`async_align`） | 新增 `ZXBehaviourRunRngScopePatch`（`DynamicMethod TABCoop_GetBehavOwnerEntityId`）按实体 ID + Tick 的无状态 SplitMix64 行为随机流，消除游荡僵尸消耗共享 RNG 引发的级联漂移；`CoopSessionManager` 解耦高频血量/击杀同步（`2s`）与低频软位置对齐（`8s` + 单实体 `180 tick` 冷却去抖），分级阈值 `MinAsyncPosSnapCells = 0.50f` + 移动中单位速度阻尼 + `600ms / τ=180ms` 视觉平滑衰减；`1_Backup` 回放 `120 ticks identical` | ✅ 通过 |
 | **并发冲突与建造实测** | `900survival.zxsav`（18,074 实体 / 双端 ControlServer 同时发令） | 同批 3 单位同时反向 `move_units` 按确定性顺序收敛至同一目标（`Host/Client` 均抵达 `(132.89, 114.81)`）；同格 `(120.5, 134.5)` 并发 `ZX.Entities.WallWood` 仅建 **1 座**（`WallWoodDelta Host=1 Client=1`，木材 `20→17` / 金币 `799` 一致，双端同报 `Rejected PlaceBuilding`）；不同格 `(122.5, 132.5)` 与 `(122.5, 134.5)` 并发均建 **2 座**（`WallWoodDelta Host=2 Client=2`，木材 `14→8` / 金币 `769`）；两轮共 28/28 + 22/22 次 `StateChecksum` 全部 `MATCH`，`0 ERROR`，`0 AsyncPosAlign` 强制瞬移 | ✅ 通过 |
+| **RTS 等候房间与全流程** | `verify_lobby_flow.ps1` + `1_Backup.zxsav` 双开实测 + `run_replay_verify.ps1` | 主菜单入口/探测本地主机（`1/3`、`InLobby`）/加入初态未准备与房主 `canStart=False` 门控/客机切换就绪解锁开局/复用单人[新建生存游戏]并验证每次滚动动态种子（`-1880374752` vs `859584069`）/取消自动回房间/读档进入同步对局（`3018` 实体对齐）/房主 `ReturnToMainMenu` 双端退回主菜单且保留网络、重置客机为未准备并重开大厅；12 张实机截图无斜切撕裂或换行，双进程回放 `120 ticks identical`、`0 ERROR` | ✅ 通过 |
 
 ---
 
@@ -33,8 +34,8 @@
    - 裸 `DXVision.DXEntity`（受击飙血/弹花贴图）与 `Raven`（环境飞鸟）仅作用于视觉表现，在 `StateHasher` 与 `DeterministicReplayVerifier.DumpPositions` 中已明确跳过。
 3. **同进程重载 (`inproc`) 仅用于崩溃/资源清理校验**：
    - `PrepareForProgrammaticLoad()` 已彻底消除关卡内二次读档 `CShadow` NRE，但 `inproc` 模式下引擎仍存在跨局静态残留实体总数偏差；确定性比对统一以**双进程模式**为准。
-4. **新建游戏地图种子当前固定**：
-   - 房主创建联机房间时即启用确定性沙盒并固定使用常量 `CoopSessionManager.SyncSeed = 20261109`，且每次 `ZXSystemGameLevel.InitLevel` 前会执行 `ResetSyncedRandomStreamsForInitLevel()` 与 `DXRandomCtorPatch` 重置；因此在为非自动化测试会话接入动态 `SyncSeed` 随机化之前，房主在联机状态下多次点选“新游戏”都会生成同一张地图（与正常退出还是强退无关）。
+4. **新开局动态随机地图种子（已接入）**：
+   - `CoopSessionManager.RollNewGameSeed()` 在正式联机会话（非 `TABCOOP_TEST=1`）下会在建房、点选[新建生存游戏]/[自定义地图]及重返大厅时动态滚动 `CurrentSessionSeed`，使联机新开局每次随机换图，并通过快照/`HostSyncBarrier` 将同一种子精确同步给所有客机；自动化回放与固定种子校验（`TestHarnessConfig.Enabled`）仍保留 `SyncSeed = 20261109`。
 5. **未实机覆盖项（需人工桌面/双账号参与，不可假设已完成）**：
    - **真人键鼠操作全链路扩展**：大波尸潮混战下客机位置平滑体感、Shift 连续建造与全部建筑/部队热键组合的长期稳定性；
    - **Steam Lobby P2P 跨机联机**：`SteamP2PTransport`（内嵌 Steamworks.NET v10）需要双 Steam 账号或跨机实测。

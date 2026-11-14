@@ -32,14 +32,15 @@ namespace TABCoopMod.Networking
         void ConnectToHost(string targetAddressOrSteamId); // SteamId64 或 "127.0.0.1:27099"
         void SendToPeer(byte targetPlayerId, SendChannel channel, PacketType type, Action<BinaryWriter> writePayload);
         void Broadcast(SendChannel channel, PacketType type, Action<BinaryWriter> writePayload);
+        void SyncPeers(IReadOnlyList<PeerInfo> peers); // 房主全量同步成员与准备状态
         void PollEvents(); // 每渲染帧由主线程调用
     }
 }
 ```
 
 ### 1.1 实现类说明
-- **`SteamP2PTransport`**：复用内嵌 `Steamworks.NET` v10（`SteamMatchmaking` + `SteamNetworking`），`Channel 0` 走 `k_EP2PSendReliable`，`Channel 1` 走 `k_EP2PSendUnreliableNoDelay`，并在每次 `PollEvents()` 驱动 `SteamAPI.RunCallbacks()`。
-- **`LocalTcpLoopbackTransport`**：Host 监听 `127.0.0.1:27099`（TCP `NoDelay = true`），用于双开与自动化回归。
+- **`SteamP2PTransport`**：复用内嵌 `Steamworks.NET` v10（`SteamMatchmaking` + `SteamNetworking`），`Channel 0` 走 `k_EP2PSendReliable`，`Channel 1` 走 `k_EP2PSendUnreliableNoDelay`，在主菜单/大厅与对局期间通过 `RegisterGlobalInviteListener()` + `PumpSteamCallbacksIfNeeded()` / `PollEvents()` 驱动 `SteamAPI.RunCallbacks()` 响应好友邀请与成员退房。
+- **`LocalTcpLoopbackTransport`**：Host 监听 `127.0.0.1:27099`（TCP `NoDelay = true`），提供非侵入式 `ProbeLocalHost()`（在连接握手前用独立预握手状态返还 `LocalProbeResult`）与空闲断线检测（`IsSocketDisconnected`），用于双开与自动化回归。
 - **`ChaosTransport`**：可配置的故障注入装饰器（延迟 / 抖动 / 丢包 / 断连窗口，带确定性 `seed`），包裹任意 `INetworkTransport`。
 
 ---
@@ -62,7 +63,12 @@ namespace TABCoopMod.Networking
 | 值 | 枚举名 | 通道 | 方向 | 说明 |
 | :-: | :--- | :---: | :---: | :--- |
 | `0x01` | `HandshakeRequest` | Reliable | C -> H | 客机请求加入，携带玩家名与 Mod 版本号 |
-| `0x02` | `HandshakeAccept` | Reliable | H -> All | 房主分配 `PlayerId (1..3)` 并同步成员列表 |
+| `0x02` | `HandshakeAccept` | Reliable | H -> All | 房主分配 `PlayerId (1..3)` 并同步成员列表（含 `IsReady`） |
+| `0x06` | `LobbyProbe` | TCP Pre-Handshake | C -> H | 客机探测本地主机是否在线（触发新连接预握手通道，不加入成员列表） |
+| `0x07` | `LobbyProbeAck` | TCP Pre-Handshake | H -> C | 返回协议版本、在线玩家数、上限、当前 `LobbyRoomPhase` 与房主名 |
+| `0x08` | `LobbyRosterSync` | Reliable | H -> All | 房主广播房间列表与每名成员 `IsReady` 状态，同时刷新当前 `LobbyRoomPhase` 与提示文案 |
+| `0x09` | `ClientReadyState` | Reliable | C -> H | 客机切换准备 / 取消准备状态 |
+| `0x0A` | `LobbyHostNotice` | Reliable | H -> All | 房主操作通知（选图中 / 加载中 / `ReturnToLobby` 召回客机退回主菜单重开大厅 / 房主退房） |
 | `0x10` | `SnapshotBegin` | Reliable | H -> All | 宣告开始传输 `.zxsav` 快照（总字节数、分片数、`.zxcheck` 内容、初始随机种子、`SyncedEntityIdCounter` 等） |
 | `0x11` | `SnapshotChunk` | Reliable | H -> All | 存档字节流分片（每片最大 `32,768` Bytes，按索引乱序缓冲组装） |
 | `0x12` | `SnapshotLoadedAck` | Reliable | C -> H | 客机完成读档并上报初始状态就绪 |

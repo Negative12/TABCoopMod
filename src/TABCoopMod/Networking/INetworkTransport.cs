@@ -20,6 +20,11 @@ namespace TABCoopMod.Networking
     {
         HandshakeRequest = 0x01,
         HandshakeAccept = 0x02,
+        LobbyProbe = 0x06,
+        LobbyProbeAck = 0x07,
+        LobbyRosterSync = 0x08,
+        ClientReadyState = 0x09,
+        LobbyHostNotice = 0x0A,
         SnapshotBegin = 0x10,
         SnapshotChunk = 0x11,
         SnapshotLoadedAck = 0x12,
@@ -42,6 +47,15 @@ namespace TABCoopMod.Networking
         public bool IsReady { get; set; }
     }
 
+    public sealed class LocalProbeResult
+    {
+        public bool IsOnline { get; set; }
+        public int PlayerCount { get; set; }
+        public int MaxPlayers { get; set; }
+        public byte RoomPhase { get; set; }
+        public string HostName { get; set; } = string.Empty;
+    }
+
     public interface INetworkTransport : IDisposable
     {
         bool IsActive { get; }
@@ -58,6 +72,7 @@ namespace TABCoopMod.Networking
         void SendToPeer(byte targetPlayerId, SendChannel channel, PacketType type, Action<BinaryWriter> writePayload);
         void Broadcast(SendChannel channel, PacketType type, Action<BinaryWriter> writePayload);
         void PollEvents();
+        void SyncPeers(IEnumerable<PeerInfo> peers);
     }
 
     /// <summary>
@@ -69,11 +84,18 @@ namespace TABCoopMod.Networking
         public const int DefaultPort = 27099;
 
         private TcpListener _listener;
+        private readonly List<(TcpClient Client, NetworkStream Stream, long AcceptedAtTicks)> _pendingAccepts = new List<(TcpClient, NetworkStream, long)>();
         private readonly List<(byte PlayerId, TcpClient Client, NetworkStream Stream)> _clients = new List<(byte, TcpClient, NetworkStream)>();
         private TcpClient _clientToHost;
         private NetworkStream _streamToHost;
         private readonly List<PeerInfo> _peers = new List<PeerInfo>();
         private byte _nextPlayerId = 2;
+        private int _maxPlayers = 3;
+
+        /// <summary>
+        /// Optional callback returning current Host lobby phase byte for non-intrusive LobbyProbeAck replies.
+        /// </summary>
+        public static Func<byte> HostRoomPhaseProvider { get; set; }
 
         public bool IsActive { get; private set; }
         public bool IsHost { get; private set; }
@@ -90,6 +112,7 @@ namespace TABCoopMod.Networking
             IsHost = true;
             LocalPlayerId = 1;
             _nextPlayerId = 2;
+            _maxPlayers = Math.Max(2, maxPlayers);
             _peers.Clear();
             _peers.Add(new PeerInfo { PlayerId = 1, PlayerName = "HostPlayer", IsReady = true });
 
@@ -180,26 +203,93 @@ namespace TABCoopMod.Networking
                     {
                         var tcp = _listener.AcceptTcpClient();
                         tcp.NoDelay = true;
-                        byte assignedId = _nextPlayerId++;
-                        var stream = tcp.GetStream();
-                        _clients.Add((assignedId, tcp, stream));
-                        ModLogger.Info($"[LocalTcpLoopbackTransport] Accepted client connection -> Assigned PlayerId={assignedId}");
+                        _pendingAccepts.Add((tcp, tcp.GetStream(), DateTime.UtcNow.Ticks));
+                    }
+
+                    long nowTicks = DateTime.UtcNow.Ticks;
+                    for (int i = _pendingAccepts.Count - 1; i >= 0; i--)
+                    {
+                        var pending = _pendingAccepts[i];
+                        if (pending.Client == null || pending.Client.Client == null || !pending.Client.Connected)
+                        {
+                            ClosePending(i);
+                            continue;
+                        }
+
+                        if (!pending.Stream.DataAvailable)
+                        {
+                            if (nowTicks - pending.AcceptedAtTicks > TimeSpan.FromSeconds(3).Ticks || IsSocketDisconnected(pending.Client))
+                                ClosePending(i);
+                            continue;
+                        }
+
+                        if (!TryReadSingleFrame(pending.Stream, out var pktType, out byte senderId, out byte[] payload))
+                        {
+                            ClosePending(i);
+                            continue;
+                        }
+
+                        if (pktType == PacketType.LobbyProbe)
+                        {
+                            byte phase = HostRoomPhaseProvider != null ? HostRoomPhaseProvider() : (byte)1;
+                            string hostName = _peers.Count > 0 ? (_peers[0].PlayerName ?? "HostPlayer") : "HostPlayer";
+                            byte[] ack = BuildFrame(1, PacketType.LobbyProbeAck, w =>
+                            {
+                                w.Write((byte)_peers.Count);
+                                w.Write((byte)_maxPlayers);
+                                w.Write(phase);
+                                w.Write(hostName);
+                            });
+                            TryWriteFrame(pending.Stream, ack);
+                            ClosePending(i);
+                            continue;
+                        }
+
+                        if (pktType == PacketType.HandshakeRequest)
+                        {
+                            if (_peers.Count >= _maxPlayers)
+                            {
+                                ClosePending(i);
+                                continue;
+                            }
+
+                            byte assignedId = _nextPlayerId++;
+                            _pendingAccepts.RemoveAt(i);
+                            _clients.Add((assignedId, pending.Client, pending.Stream));
+                            ModLogger.Info($"[LocalTcpLoopbackTransport] Accepted client connection -> Assigned PlayerId={assignedId}");
+
+                            using (var ms = new MemoryStream(payload, false))
+                            using (var reader = new BinaryReader(ms))
+                            {
+                                HandleInternalOrDispatch(assignedId, pktType, reader);
+                            }
+
+                            if (!ReadAvailableFrames(pending.Stream, assignedId))
+                            {
+                                RemoveClientById(assignedId);
+                            }
+                            continue;
+                        }
+
+                        ClosePending(i);
                     }
 
                     for (int i = _clients.Count - 1; i >= 0; i--)
                     {
                         var entry = _clients[i];
-                        if (!ReadAvailableFrames(entry.Stream, entry.PlayerId))
+                        if (!ReadAvailableFrames(entry.Stream, entry.PlayerId) || IsSocketDisconnected(entry.Client))
                         {
+                            byte deadId = entry.PlayerId;
+                            try { entry.Stream?.Close(); entry.Client?.Close(); } catch { }
                             _clients.RemoveAt(i);
-                            _peers.RemoveAll(p => p.PlayerId == entry.PlayerId);
-                            OnPeerDisconnected?.Invoke(entry.PlayerId);
+                            _peers.RemoveAll(p => p.PlayerId == deadId);
+                            OnPeerDisconnected?.Invoke(deadId);
                         }
                     }
                 }
                 else if (_streamToHost != null)
                 {
-                    if (!ReadAvailableFrames(_streamToHost, 1))
+                    if (!ReadAvailableFrames(_streamToHost, 1) || IsSocketDisconnected(_clientToHost))
                     {
                         ModLogger.Warn("[LocalTcpLoopbackTransport] Disconnected from Host.");
                         Dispose();
@@ -210,6 +300,122 @@ namespace TABCoopMod.Networking
             catch (Exception ex)
             {
                 ModLogger.Error("[LocalTcpLoopbackTransport] Exception in PollEvents", ex);
+            }
+        }
+
+        private void ClosePending(int index)
+        {
+            var p = _pendingAccepts[index];
+            _pendingAccepts.RemoveAt(index);
+            try { p.Stream?.Close(); p.Client?.Close(); } catch { }
+        }
+
+        private void RemoveClientById(byte playerId)
+        {
+            for (int i = _clients.Count - 1; i >= 0; i--)
+            {
+                if (_clients[i].PlayerId == playerId)
+                {
+                    var entry = _clients[i];
+                    try { entry.Stream?.Close(); entry.Client?.Close(); } catch { }
+                    _clients.RemoveAt(i);
+                }
+            }
+            _peers.RemoveAll(p => p.PlayerId == playerId);
+            OnPeerDisconnected?.Invoke(playerId);
+        }
+
+        private static bool IsSocketDisconnected(TcpClient client)
+        {
+            try
+            {
+                if (client == null || client.Client == null || !client.Connected) return true;
+                return client.Client.Poll(0, SelectMode.SelectRead) && client.Client.Available == 0;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        public static LocalProbeResult ProbeLocalHost(string host = "127.0.0.1", int port = DefaultPort, int timeoutMs = 250)
+        {
+            var result = new LocalProbeResult { IsOnline = false };
+            TcpClient tcp = null;
+            try
+            {
+                tcp = new TcpClient { NoDelay = true, ReceiveTimeout = timeoutMs, SendTimeout = timeoutMs };
+                var iar = tcp.BeginConnect(host, port, null, null);
+                if (!iar.AsyncWaitHandle.WaitOne(timeoutMs))
+                    return result;
+                tcp.EndConnect(iar);
+
+                using (var stream = tcp.GetStream())
+                {
+                    stream.ReadTimeout = timeoutMs;
+                    stream.WriteTimeout = timeoutMs;
+                    byte[] probe = BuildFrame(0, PacketType.LobbyProbe, null);
+                    stream.Write(probe, 0, probe.Length);
+                    stream.Flush();
+
+                    if (TryReadSingleFrame(stream, out var pktType, out _, out byte[] payload) && pktType == PacketType.LobbyProbeAck)
+                    {
+                        using (var ms = new MemoryStream(payload, false))
+                        using (var reader = new BinaryReader(ms))
+                        {
+                            result.IsOnline = true;
+                            result.PlayerCount = reader.ReadByte();
+                            result.MaxPlayers = reader.ReadByte();
+                            result.RoomPhase = reader.ReadByte();
+                            result.HostName = reader.ReadString();
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Host not listening or timed out; keep IsOnline = false quietly.
+            }
+            finally
+            {
+                try { tcp?.Close(); } catch { }
+            }
+            return result;
+        }
+
+        private static bool TryReadSingleFrame(NetworkStream stream, out PacketType pktType, out byte senderId, out byte[] payload)
+        {
+            pktType = 0;
+            senderId = 0;
+            payload = null;
+            try
+            {
+                byte[] header = new byte[8];
+                int read = 0;
+                while (read < 8)
+                {
+                    int n = stream.Read(header, read, 8 - read);
+                    if (n <= 0) return false;
+                    read += n;
+                }
+                if (header[0] != 0x54 || header[1] != 0x42) return false;
+                pktType = (PacketType)header[2];
+                senderId = header[3];
+                int payloadLen = BitConverter.ToInt32(header, 4);
+                if (payloadLen < 0 || payloadLen > 4 * 1024 * 1024) return false;
+                payload = new byte[payloadLen];
+                int offset = 0;
+                while (offset < payloadLen)
+                {
+                    int n = stream.Read(payload, offset, payloadLen - offset);
+                    if (n <= 0) return false;
+                    offset += n;
+                }
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -267,7 +473,7 @@ namespace TABCoopMod.Networking
             {
                 string clientName = reader.ReadString();
                 string version = reader.ReadString();
-                var peer = new PeerInfo { PlayerId = senderId, PlayerName = $"{clientName}#{senderId}", IsReady = true };
+                var peer = new PeerInfo { PlayerId = senderId, PlayerName = $"{clientName}#{senderId}", IsReady = false };
                 _peers.RemoveAll(p => p.PlayerId == senderId);
                 _peers.Add(peer);
 
@@ -279,6 +485,7 @@ namespace TABCoopMod.Networking
                     {
                         w.Write(p.PlayerId);
                         w.Write(p.PlayerName);
+                        w.Write(p.IsReady);
                     }
                 });
 
@@ -297,7 +504,7 @@ namespace TABCoopMod.Networking
                     {
                         PlayerId = reader.ReadByte(),
                         PlayerName = reader.ReadString(),
-                        IsReady = true
+                        IsReady = reader.ReadBoolean()
                     });
                 }
                 ModLogger.Info($"[LocalTcpLoopbackTransport] HandshakeAccepted! LocalPlayerId={LocalPlayerId}, Peers={_peers.Count}");
@@ -306,6 +513,23 @@ namespace TABCoopMod.Networking
             }
 
             OnPacketReceived?.Invoke(senderId, pktType, reader);
+        }
+
+        public void SyncPeers(IEnumerable<PeerInfo> peers)
+        {
+            _peers.Clear();
+            if (peers == null) return;
+            foreach (var p in peers)
+            {
+                if (p == null) continue;
+                _peers.Add(new PeerInfo
+                {
+                    PlayerId = p.PlayerId,
+                    PlayerName = p.PlayerName ?? string.Empty,
+                    SteamId64 = p.SteamId64,
+                    IsReady = p.IsReady
+                });
+            }
         }
 
         internal static byte[] BuildFrame(byte senderId, PacketType type, Action<BinaryWriter> writePayload)
@@ -349,6 +573,12 @@ namespace TABCoopMod.Networking
             IsActive = false;
             try { _listener?.Stop(); } catch { }
             _listener = null;
+
+            foreach (var p in _pendingAccepts)
+            {
+                try { p.Stream?.Close(); p.Client?.Close(); } catch { }
+            }
+            _pendingAccepts.Clear();
 
             foreach (var c in _clients)
             {

@@ -57,7 +57,7 @@
 由于 `TheyAreBillions.exe` 内置 Eazfuscator 完整性与 `StackTrace.GetFrame(3)` 校验，Mod 保持主程序磁盘字节 100% 不变，仅通过 `TheyAreBillions.exe.config` 注入 `ModAppDomainManager`：
 1. 在 `InitializeNewDomain` 初始化日志与全局异常监听，订阅 `AppDomain.CurrentDomain.AssemblyLoad`。
 2. 当 `TheyAreBillions` 加载完成时，先执行 `RuntimeHelpers.RunModuleConstructor(loaded.ManifestModule.ModuleHandle)` 注册内置资源解密器（`DXVision` / `Steamworks.NET` / `DXPlatform_Desktop`）。
-3. 调用 `ModEntry.Initialize()` → `GameBridge.InitializeAndValidate()`（启动自检必须 `0 missing`）→ 逐类 `PatchClassProcessor.Patch()` 包 `try/catch` 应用全部 Harmony 补丁（实机 `Classes OK=54, failed-tolerant=0`）。
+3. 调用 `ModEntry.Initialize()` → `GameBridge.InitializeAndValidate()`（启动自检必须 `0 missing`）→ 逐类 `PatchClassProcessor.Patch()` 包 `try/catch` 应用全部 Harmony 补丁（实机 `Classes OK=56, failed-tolerant=0`）。
 
 ### 2.2 虚拟显示器 `Direct3DEx` 回退（`Patch_DXRender_VirtualDisplayFallback`）
 在无物理显示器的虚拟显示环境（如远程虚拟屏适配器报错 `D3DERR_NOTAVAILABLE`）下，对纯 C# 封装类 `DXPlatform_Desktop.DXRender_SlimDX` 的 9 个方法应用 IL Transpiler：当 `Direct3D.GetDeviceCaps` 失败时自动回退至 `SlimDX.Direct3D9.Direct3DEx`，并将 `Pool.Managed` 纹理替换为 `Pool.Default | Usage.Dynamic`（避开直接补丁 C++/CLI 混合程序集 `SlimDX.dll` 导致的 `InvalidProgramException`）。
@@ -129,6 +129,6 @@
 
 ## 6. 协同 UX 渲染（`UI/`）
 
-- **联机大厅（`CoopLobbyWindow.cs`）**：通过 `MainMenuPatch` 在主菜单注入 `CO-OP MULTIPLAYER` 按钮，调用原版列表弹窗提供 Steam Lobby 与 Loopback 测试入口。
+- **联机等候大厅与菜单生命周期（`CoopLobbyWindow.cs` & `MainMenuPatch.cs`）**：在主菜单注入 `CO-OP MULTIPLAYER` 按钮、`MainMenuOnLoadCompletePatch` 与 `ReturnToMainMenuPatch`，基于原版 `ZXWindow(BigWindow)` 与 `ZXButtonSteam` 构建入口探测视图与 3 槽位等候房间（切换文本/颜色前先清理 `DXTextObject.Image` 避免 `Direct3DEx` 下 `ReLoadInGPU()` 纹理斜切），并在客机全员就绪后通过反射复用单人模式的读档/新建生存/自定义地图弹窗，取消选图或从局内返回主菜单时保留网络连接自动重开大厅。
 - **小地图队友视野框（`AllyOverlayRenderer.cs` → `AllyMiniMapOverlayPatch`）**：Hook `OMiniMap.OnRender` Postfix，为队友创建带 `DXImage.FromColor(Color.Transparent)`、`Z = 1001`、`PixelAligned = true` 与 `2px` 边框的 `DXObject`，通过 `DXHelper_Rectangle.ChangeCoordinates(ally.CameraWorldArea, PlayableArea, miniMap.InnerArea)` 实时更新。
 - **暂停提示与 3 秒恢复倒计时（`PauseSyncController.cs`）**：暂停横幅使用 `durationMs = 0` 确保暂停帧立即 100% 不透明显示；恢复倒计时在 `DXIsometricGridObject.Current` 上挂载顶居中固定像素 `DXTextObject`（`Resume in 3/2/1...`），解冻时立即移除。
