@@ -52,6 +52,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install_mod.ps1
 | [`docs/05_DEVELOPMENT_ROADMAP.md`](docs/05_DEVELOPMENT_ROADMAP.md) | 路线图 | **分阶段开发路线图与门禁**：Phase 0 ~ Phase 4 完成度、实际源码交付物与待验收项。 |
 | [`docs/06_PROJECT_STATUS.md`](docs/06_PROJECT_STATUS.md) | 实时状态 | **当前项目状态与门禁验收报告**：Gate A1/A2/B1/B2/C/D 实测结果、工程边界与下一步优先级。 |
 | [`docs/07_TESTING_AND_MCP.md`](docs/07_TESTING_AND_MCP.md) | 测试工具 | **自动化测试台与 MCP 操作指南**：17 个 MCP 工具、双进程回放验证、Loopback/Chaos 联机脚本与存档库。 |
+| [`docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md`](docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md) | 专题备忘 | **经典 RTS 同步机制对比与后续可复用优化评估**：引擎底层差异复盘与三梯度改造工程量评估。 |
 | [`docs/archive/`](docs/archive/ROOT_CAUSE_POSTMORTEMS.md) | 历史归档 | **疑难根因复盘与会话演进日志**：已解决的技术难题深挖档案（`ROOT_CAUSE_POSTMORTEMS.md`）与 S1~S6 里程碑记录。 |
 
 ---
