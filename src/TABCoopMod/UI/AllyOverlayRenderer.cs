@@ -21,6 +21,79 @@ namespace TABCoopMod.UI
     {
         private static FieldInfo _miniMapField;
         private static MethodInfo _pingCellMethod;
+        private static readonly Dictionary<long, DXObject> _pendingBuildGhosts = new Dictionary<long, DXObject>();
+        private static readonly object _ghostsSync = new object();
+
+        public static void SetPendingBuildGhost(long ghostId, Rectangle footprint, byte playerId)
+        {
+            if (ghostId <= 0 || footprint.Width <= 0 || footprint.Height <= 0) return;
+
+            try
+            {
+                var middle = DXIsometricGridObject.Current?.IsometricMiddle;
+                if (middle == null) return;
+
+                Color color = GetPlayerColor(playerId);
+                lock (_ghostsSync)
+                {
+                    if (_pendingBuildGhosts.TryGetValue(ghostId, out var existing) && existing != null)
+                    {
+                        try { existing.RemoveFromScene(); } catch { }
+                    }
+
+                    var ghost = new DXObject($"CoopPendingBuild_{ghostId}", DXImage.FromColor(Color.FromArgb(88, color)))
+                    {
+                        Area = new RectangleF(footprint.X, footprint.Y, footprint.Width, footprint.Height),
+                        Z = 150,
+                        InheritImageAttributes = false,
+                        MouseClickInteractionEnabled = false,
+                        Border = new DXShaderEffect_Border(
+                            color,
+                            3,
+                            DXShaderEffect_Border.TBorderUnit.InPixels,
+                            DXShaderEffect_Border.TBorderType.Frame)
+                    };
+                    _pendingBuildGhosts[ghostId] = ghost;
+                    middle.AddObject(ghost);
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[AllyOverlayRenderer] SetPendingBuildGhost failed: {ex.Message}");
+            }
+        }
+
+        public static void RemovePendingBuildGhost(long ghostId)
+        {
+            if (ghostId <= 0) return;
+
+            lock (_ghostsSync)
+            {
+                if (_pendingBuildGhosts.TryGetValue(ghostId, out var ghost))
+                {
+                    _pendingBuildGhosts.Remove(ghostId);
+                    if (ghost != null)
+                    {
+                        try { ghost.RemoveFromScene(); } catch { }
+                    }
+                }
+            }
+        }
+
+        public static void ClearPendingBuildGhosts()
+        {
+            lock (_ghostsSync)
+            {
+                foreach (var ghost in _pendingBuildGhosts.Values)
+                {
+                    if (ghost != null)
+                    {
+                        try { ghost.RemoveFromScene(); } catch { }
+                    }
+                }
+                _pendingBuildGhosts.Clear();
+            }
+        }
 
         public static Color GetPlayerColor(byte playerId)
         {

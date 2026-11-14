@@ -160,6 +160,9 @@ namespace TABCoopMod.Core
         public const string Method_ZXLevelState_ConsumeRes     = "#=z5YtS5bwlM1kX";
         public const string Method_ZXLevelState_RefundRes      = "#=zG0slAM4=";
         public const string Method_ZXLevelState_CanAffordRes   = "#=zh4x6WKNtqKnr";
+        public const string Method_ZXLevelState_AvailFood      = "#=z7SWdP68KoEfdgSB1Ww==";
+        public const string Method_ZXLevelState_AvailWorkers   = "#=z1GVm3ppkkMeC";
+        public const string Method_ZXLevelState_AvailEnergy    = "#=zkqSYgCu1efoDkViT0w==";
         public const string Method_ZXLevelState_GetDXLevel     = "#=zOHDY2QTzgRSB";
 
         // ====================================================================
@@ -186,6 +189,7 @@ namespace TABCoopMod.Core
         // ====================================================================
         // 10. ZXSystemAudio (#=zJYbPa4gP2VI16zEh5y2Zxew=) Synchronous Sound Playback
         // ====================================================================
+        public const string Field_Audio_Current              = "#=zQFWYIvs=";
         public const string Method_Audio_PickFromList        = "#=zas_QVHmVp4jw4ljVfQ==";
         public const string Method_Audio_PickWeightedVoice   = "#=zGKbBBAxDUE94EUjCrw==";
         public const string Method_Audio_StartAmbient        = "#=zbJZeOtklBmAP9GRRRA==";

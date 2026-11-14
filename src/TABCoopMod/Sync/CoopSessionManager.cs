@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.IO.Compression;
@@ -106,14 +107,27 @@ namespace TABCoopMod.Sync
         private static readonly List<NetCommand> _localOutgoingQueue = new List<NetCommand>();
         private static readonly List<NetCommand> _hostTurnBuffer = new List<NetCommand>();
 
-        // True network lockstep: Host stamps every command with TargetSimTick = simTick + InputDelay
+        // True network lockstep: Host stamps every command with TargetSimTick = simTick + InputDelayTicks
         // and broadcasts a heartbeat for EVERY tick (even empty), so all peers execute the same
-        // commands on the same tick regardless of network latency.
-        public const int InputDelayTicks = 1;
+        // commands on the same tick regardless of network latency. InputDelayTicks adapts cleanly
+        // between 1..4 ticks based on smoothed peer RTT.
+        public const int MinInputDelayTicks = 1;
+        public const int MaxInputDelayTicks = 4;
+        public static int InputDelayTicks { get; private set; } = 1;
+        public static double CurrentSmoothedRttMs { get; private set; }
         private static readonly SortedDictionary<int, List<NetCommand>> _pendingTurnCommands =
             new SortedDictionary<int, List<NetCommand>>();
         private static TurnInputTickGate _networkGate = new TurnInputTickGate();
         private static int _hostLastBroadcastSimTick = -1;
+        private static int _hostLastBroadcastTargetTick = -1;
+        private static uint _rttPingSeq;
+        private static double _lastRttProbeTicks = -100000.0;
+        private static double _lastDelayAdjustTicks = -100000.0;
+        private static readonly Dictionary<byte, double> _peerSmoothedRttMs = new Dictionary<byte, double>();
+        private static readonly Dictionary<byte, double> _peerRttSampleTicks = new Dictionary<byte, double>();
+        private const double RttProbeIntervalMs = 500.0;
+        private const double RttStalePeerMs = 5000.0;
+        private const double DelayAdjustCooldownMs = 1500.0;
         private static int _gateLastObservedTick = -1;
         private static double _gateWaitStartTicks = -1.0;
         private static double _gateLastWarnTicks = -1.0;
@@ -260,6 +274,7 @@ namespace TABCoopMod.Sync
             _posSyncIncoming.Clear();
             while (_outgoingPosSyncQueue.TryDequeue(out _)) { }
             while (_incomingPosAlignQueue.TryDequeue(out _)) { }
+            CommandInterceptor.ClearPendingLocalBuilds();
         }
 
         public static int RollNewGameSeed()
@@ -472,6 +487,13 @@ namespace TABCoopMod.Sync
             _hostTurnBuffer.Clear();
             _pendingTurnCommands.Clear();
             _hostLastBroadcastSimTick = -1;
+            _hostLastBroadcastTargetTick = -1;
+            InputDelayTicks = MinInputDelayTicks;
+            CurrentSmoothedRttMs = 0.0;
+            _lastRttProbeTicks = -100000.0;
+            _lastDelayAdjustTicks = -100000.0;
+            _peerSmoothedRttMs.Clear();
+            _peerRttSampleTicks.Clear();
             _gateLastObservedTick = -1;
             _gateWaitStartTicks = -1.0;
             _awaitingSnapshotLoad = false;
@@ -524,6 +546,13 @@ namespace TABCoopMod.Sync
             _hostTurnBuffer.Clear();
             _pendingTurnCommands.Clear();
             _hostLastBroadcastSimTick = -1;
+            _hostLastBroadcastTargetTick = -1;
+            InputDelayTicks = MinInputDelayTicks;
+            CurrentSmoothedRttMs = 0.0;
+            _lastRttProbeTicks = -100000.0;
+            _lastDelayAdjustTicks = -100000.0;
+            _peerSmoothedRttMs.Clear();
+            _peerRttSampleTicks.Clear();
             _gateLastObservedTick = -1;
             _gateWaitStartTicks = -1.0;
             _awaitingSnapshotLoad = false;
@@ -654,7 +683,11 @@ namespace TABCoopMod.Sync
             Transport.OnPeerDisconnected += playerId =>
             {
                 AllyStates.Remove(playerId);
+                _peerSmoothedRttMs.Remove(playerId);
+                _peerRttSampleTicks.Remove(playerId);
                 _lobbyRoster.RemoveAll(p => p.PlayerId == playerId);
+                if (Transport != null && Transport.IsHost)
+                    UpdateAdaptiveInputDelay();
 
                 if (Transport != null && Transport.IsHost)
                 {
@@ -816,8 +849,9 @@ namespace TABCoopMod.Sync
                 w.Write(startTick);
                 w.Write(CurrentSessionSeed);
                 w.Write(idCounter);
+                w.Write((byte)InputDelayTicks);
             });
-            ModLogger.Info($"[CoopSessionManager] Host+Client barrier satisfied; entered synced level and sent SessionStart at tick={startTick}, seed={CurrentSessionSeed}!");
+            ModLogger.Info($"[CoopSessionManager] Host+Client barrier satisfied; entered synced level and sent SessionStart at tick={startTick}, seed={CurrentSessionSeed}, inputDelay={InputDelayTicks}!");
         }
 
         private static void OnLocalCommandCaptured(NetCommand cmd)
@@ -891,7 +925,9 @@ namespace TABCoopMod.Sync
             if (!IsSessionActive) return;
 
             _pendingTurnCommands.Clear();
+            CommandInterceptor.ClearPendingLocalBuilds();
             _hostLastBroadcastSimTick = -1;
+            _hostLastBroadcastTargetTick = -1;
             _gateWaitStartTicks = -1.0;
             _desyncDumped = false;
             _firstChecksumPosDumped = false;
@@ -899,8 +935,10 @@ namespace TABCoopMod.Sync
             LockstepClock.TickGate = _networkGate;
 
             int cur = DXGame.Current?.IAIterationInt ?? 0;
-            _networkGate.MarkReady(cur + InputDelayTicks);
+            int initialDelay = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, InputDelayTicks));
+            _networkGate.MarkReady(cur + initialDelay);
             _hostLastBroadcastSimTick = cur;
+            _hostLastBroadcastTargetTick = cur + initialDelay;
             IsInSyncedLevel = true;
             CommandInterceptor.IsInterceptionEnabled = true;
             RoomPhase = LobbyRoomPhase.InGame;
@@ -1106,6 +1144,7 @@ namespace TABCoopMod.Sync
                     _suppressReturnNotice = true;
                     IsInSyncedLevel = false;
                     CommandInterceptor.IsInterceptionEnabled = false;
+                    CommandInterceptor.ClearPendingLocalBuilds();
                     LockstepClock.SetSessionPause(false);
                     GameBridge.ReturnToMainMenu();
                     return;
@@ -1134,6 +1173,7 @@ namespace TABCoopMod.Sync
             }
 
             Transport.PollEvents();
+            ProbeNetworkRtt();
 
             // Keep the engine's loader fades advancing while the Client waits to enter the level.
             TickLoadingFade();
@@ -1227,6 +1267,7 @@ namespace TABCoopMod.Sync
             if (!Transport.IsHost)
                 FlushOutgoingClientCommands();
             Transport.PollEvents();
+            ProbeNetworkRtt();
         }
 
         /// <summary>
@@ -1288,19 +1329,52 @@ namespace TABCoopMod.Sync
             bool paused = LockstepClock.PausedBySession;
             bool hasTurn = false;
             lock (_hostTurnBuffer) hasTurn = _hostTurnBuffer.Count > 0;
-            bool shouldBroadcast = paused ? hasTurn : cur > _hostLastBroadcastSimTick;
-            if (!shouldBroadcast) return;
-
-            if (cur > _hostLastBroadcastSimTick) _hostLastBroadcastSimTick = cur;
-            int targetTick = paused ? cur : cur + InputDelayTicks;
-
-            List<NetCommand> turnCmds = null;
-            lock (_hostTurnBuffer)
+            if (paused)
             {
-                if (_hostTurnBuffer.Count > 0)
+                if (!hasTurn) return;
+                BroadcastHostTurn(cur, drainBuffer: true);
+                return;
+            }
+
+            if (cur <= _hostLastBroadcastSimTick && !hasTurn)
+                return;
+            if (cur > _hostLastBroadcastSimTick)
+                _hostLastBroadcastSimTick = cur;
+
+            int delay = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, InputDelayTicks));
+            int desiredTarget = cur + delay;
+            if (!hasTurn && desiredTarget <= _hostLastBroadcastTargetTick)
+                return;
+
+            int targetTick = desiredTarget > _hostLastBroadcastTargetTick
+                ? desiredTarget
+                : _hostLastBroadcastTargetTick + 1;
+
+            if (_hostLastBroadcastTargetTick >= 0)
+            {
+                for (int fillTick = _hostLastBroadcastTargetTick + 1; fillTick < targetTick; fillTick++)
                 {
-                    turnCmds = new List<NetCommand>(_hostTurnBuffer);
-                    _hostTurnBuffer.Clear();
+                    BroadcastHostTurn(fillTick, drainBuffer: false);
+                }
+            }
+            if (targetTick > _hostLastBroadcastTargetTick)
+                _hostLastBroadcastTargetTick = targetTick;
+
+            BroadcastHostTurn(targetTick, drainBuffer: true);
+        }
+
+        private static void BroadcastHostTurn(int targetTick, bool drainBuffer)
+        {
+            List<NetCommand> turnCmds = null;
+            if (drainBuffer)
+            {
+                lock (_hostTurnBuffer)
+                {
+                    if (_hostTurnBuffer.Count > 0)
+                    {
+                        turnCmds = new List<NetCommand>(_hostTurnBuffer);
+                        _hostTurnBuffer.Clear();
+                    }
                 }
             }
 
@@ -1324,6 +1398,68 @@ namespace TABCoopMod.Sync
                 if (turnCmds != null)
                     foreach (var c in turnCmds) c.WriteTo(w);
             });
+        }
+
+        private static void ProbeNetworkRtt()
+        {
+            if (Transport == null || !Transport.IsHost || !HasJoinedClient) return;
+            if (!IsInSyncedLevel || LockstepClock.LoadingLevel || GameBridge.CurrentLevelState == null) return;
+
+            double now = DXHelper_Environment.Ticks;
+            if (now - _lastRttProbeTicks < RttProbeIntervalMs && now >= _lastRttProbeTicks)
+                return;
+
+            _lastRttProbeTicks = now;
+            uint seq = ++_rttPingSeq;
+            long timestamp = Stopwatch.GetTimestamp();
+            Transport.Broadcast(SendChannel.UnreliableSequenced, PacketType.RttPing, w =>
+            {
+                w.Write(seq);
+                w.Write(timestamp);
+            });
+        }
+
+        private static void UpdateAdaptiveInputDelay()
+        {
+            if (Transport == null || !Transport.IsHost) return;
+
+            double now = DXHelper_Environment.Ticks;
+            double maxRtt = -1.0;
+            foreach (var p in GetEffectivePeers())
+            {
+                if (p.PlayerId == 1) continue;
+                if (_peerSmoothedRttMs.TryGetValue(p.PlayerId, out double rtt)
+                    && _peerRttSampleTicks.TryGetValue(p.PlayerId, out double sampleTs)
+                    && (now - sampleTs <= RttStalePeerMs || now < sampleTs))
+                {
+                    if (rtt > maxRtt) maxRtt = rtt;
+                }
+            }
+
+            if (maxRtt < 0.0)
+            {
+                CurrentSmoothedRttMs = 0.0;
+                return;
+            }
+
+            CurrentSmoothedRttMs = maxRtt;
+
+            int cur = InputDelayTicks;
+            int desired = cur;
+            if (maxRtt > 130.0) desired = 4;
+            else if (maxRtt > 88.0) desired = (cur == 4 && maxRtt >= 110.0) ? 4 : 3;
+            else if (maxRtt > 48.0) desired = (cur >= 3 && maxRtt >= 70.0) ? 3 : 2;
+            else if (maxRtt >= 32.0) desired = Math.Min(cur, 2);
+            else desired = 1;
+
+            desired = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, desired));
+            if (desired == cur) return;
+            if (now - _lastDelayAdjustTicks < DelayAdjustCooldownMs && now >= _lastDelayAdjustTicks)
+                return;
+
+            _lastDelayAdjustTicks = now;
+            InputDelayTicks = desired;
+            ModLogger.Info($"[AdaptiveDelay] InputDelayTicks {cur} -> {desired} (smoothedRtt={maxRtt:F1}ms)");
         }
 
         private static void RunEpochHashAndChecksum(int curTick)
@@ -1531,9 +1667,11 @@ namespace TABCoopMod.Sync
                     int startTick = r.ReadInt32();
                     int seed = r.ReadInt32();
                     long idCounter = r.ReadInt64();
+                    byte hostDelay = r.BaseStream.Position < r.BaseStream.Length ? r.ReadByte() : (byte)MinInputDelayTicks;
                     ResetSyncTrackingState();
+                    InputDelayTicks = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, (int)hostDelay));
                     EnterSyncedLevel();
-                    ModLogger.Info($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
+                    ModLogger.Info($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, inputDelay={InputDelayTicks}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
                     break;
                 }
 
@@ -1706,6 +1844,39 @@ namespace TABCoopMod.Sync
                             w.Write(label);
                         });
                     }
+                    break;
+                }
+
+                case PacketType.RttPing:
+                {
+                    if (Transport == null || Transport.IsHost) break;
+                    uint seq = r.ReadUInt32();
+                    long hostTs = r.ReadInt64();
+                    Transport.SendToPeer(1, SendChannel.UnreliableSequenced, PacketType.RttPong, w =>
+                    {
+                        w.Write(seq);
+                        w.Write(hostTs);
+                    });
+                    break;
+                }
+
+                case PacketType.RttPong:
+                {
+                    if (Transport == null || !Transport.IsHost) break;
+                    uint seq = r.ReadUInt32();
+                    long hostTs = r.ReadInt64();
+                    double rttMs = (Stopwatch.GetTimestamp() - hostTs) * 1000.0 / Stopwatch.Frequency;
+                    if (rttMs < 0.0 || rttMs > 2000.0 || double.IsNaN(rttMs) || double.IsInfinity(rttMs))
+                        break;
+
+                    double sample = Math.Min(rttMs, 400.0);
+                    if (_peerSmoothedRttMs.TryGetValue(senderId, out double prev))
+                        _peerSmoothedRttMs[senderId] = 0.70 * prev + 0.30 * sample;
+                    else
+                        _peerSmoothedRttMs[senderId] = sample;
+
+                    _peerRttSampleTicks[senderId] = DXHelper_Environment.Ticks;
+                    UpdateAdaptiveInputDelay();
                     break;
                 }
             }

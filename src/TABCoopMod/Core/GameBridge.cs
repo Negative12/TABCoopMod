@@ -32,6 +32,7 @@ namespace TABCoopMod.Core
         public static Type TypeZXMessageBoxHelper { get; private set; }
         public static Type TypeZXWindowMessage { get; private set; }
         public static Type TypeZXSteamManager { get; private set; }
+        public static Type TypeZXSystemAudio { get; private set; }
 
         // Cached Reflection Handles
         private static MethodInfo _mZXGameCurrent;
@@ -39,6 +40,9 @@ namespace TABCoopMod.Core
         private static MethodInfo _mMainMenuCurrent;
         private static MethodInfo _mGameStateCurrent;
         private static MethodInfo _mLevelStateCurrent;
+        private static MethodInfo _methodLevelStateAvailFood;
+        private static MethodInfo _methodLevelStateAvailWorkers;
+        private static MethodInfo _methodLevelStateAvailEnergy;
 
         private static MethodInfo _mLocalize;
         private static MethodInfo _mGetSavesDir;
@@ -65,6 +69,14 @@ namespace TABCoopMod.Core
         private static MethodInfo _mGetEntityLife;
         private static MethodInfo _mGetEntityBehaviour;
         private static MethodInfo _mGetEntityMovable;
+        private static MethodInfo _methodEntityGetDefaultParams;
+        private static Type _typeUnit;
+
+        private static FieldInfo _fieldAudioCurrent;
+        private static MethodInfo _methodAudioPickWeightedVoice;
+        private static MethodInfo _methodAudioPlayUniqueList;
+        private static PropertyInfo _propDefParamsSoundsGeneric;
+        private static PropertyInfo _propDefParamsSoundsAttack;
 
         private static Type _typeZombie;
         private static PropertyInfo _propZombieAttackCC;
@@ -272,6 +284,33 @@ namespace TABCoopMod.Core
                 Check(_methodMainMenuCustomMap, "ZXSystemMainMenu.CustomMap");
                 Check(_fieldMainMenuContinueBtn, "ZXSystemMainMenu.ContinueButton");
                 Check(_typeZXFontCatalogFonts, "Type ZXFontCatalog.Fonts");
+
+                // 11. Pending Build Cost & Immediate Unit Voice Helpers
+                TypeZXSystemAudio = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXSystemAudio);
+                _typeUnit = GameAssembly.GetType("ZX.Entities.Unit");
+                _methodEntityGetDefaultParams = AccessTools.Method(typeof(ZXEntity), ObfuscatedSymbols.Method_ZXEntity_GetDefaultParams, Type.EmptyTypes);
+                _fieldAudioCurrent = TypeZXSystemAudio != null ? AccessTools.Field(TypeZXSystemAudio, ObfuscatedSymbols.Field_Audio_Current) : null;
+                _methodAudioPickWeightedVoice = TypeZXSystemAudio != null
+                    ? AccessTools.Method(TypeZXSystemAudio, ObfuscatedSymbols.Method_Audio_PickWeightedVoice, new[] { typeof(List<string>) })
+                    : null;
+                _methodAudioPlayUniqueList = TypeZXSystemAudio != null
+                    ? AccessTools.Method(TypeZXSystemAudio, ObfuscatedSymbols.Method_Audio_PlayUnique,
+                        new[] { typeof(ZXSoundCategory), typeof(ZXUniqueSoundType), typeof(List<string>) })
+                    : null;
+
+                _methodLevelStateAvailFood = AccessTools.Method(typeof(ZXLevelState), ObfuscatedSymbols.Method_ZXLevelState_AvailFood, Type.EmptyTypes);
+                _methodLevelStateAvailWorkers = AccessTools.Method(typeof(ZXLevelState), ObfuscatedSymbols.Method_ZXLevelState_AvailWorkers, Type.EmptyTypes);
+                _methodLevelStateAvailEnergy = AccessTools.Method(typeof(ZXLevelState), ObfuscatedSymbols.Method_ZXLevelState_AvailEnergy, Type.EmptyTypes);
+
+                Check(TypeZXSystemAudio, $"Type ZXSystemAudio ({ObfuscatedSymbols.Type_ZXSystemAudio})");
+                Check(_typeUnit, "Type ZX.Entities.Unit");
+                Check(_methodEntityGetDefaultParams, "ZXEntity.GetDefaultParams");
+                Check(_fieldAudioCurrent, "ZXSystemAudio.Current");
+                Check(_methodAudioPickWeightedVoice, "ZXSystemAudio.PickWeightedVoice");
+                Check(_methodAudioPlayUniqueList, "ZXSystemAudio.PlayUnique(List)");
+                Check(_methodLevelStateAvailFood, "ZXLevelState.AvailFood");
+                Check(_methodLevelStateAvailWorkers, "ZXLevelState.AvailWorkers");
+                Check(_methodLevelStateAvailEnergy, "ZXLevelState.AvailEnergy");
 
                 if (missingCount == 0)
                 {
@@ -2559,6 +2598,170 @@ namespace TABCoopMod.Core
                 return false;
             return name.EndsWith("Attack", StringComparison.Ordinal)
                 || string.Equals(name, "ArtilleryManExplosive", StringComparison.Ordinal);
+        }
+
+        public struct PendingResourceCost
+        {
+            public int Gold;
+            public int Wood;
+            public int Stone;
+            public int Iron;
+            public int Oil;
+            public int Energy;
+            public int Food;
+            public int Workers;
+
+            public static PendingResourceCost operator +(PendingResourceCost a, PendingResourceCost b)
+            {
+                return new PendingResourceCost
+                {
+                    Gold = a.Gold + b.Gold,
+                    Wood = a.Wood + b.Wood,
+                    Stone = a.Stone + b.Stone,
+                    Iron = a.Iron + b.Iron,
+                    Oil = a.Oil + b.Oil,
+                    Energy = a.Energy + b.Energy,
+                    Food = a.Food + b.Food,
+                    Workers = a.Workers + b.Workers
+                };
+            }
+        }
+
+        private static bool _costPropsInit;
+        private static PropertyInfo _propCostGold, _propCostWood, _propCostStone, _propCostIron, _propCostOil, _propCostEnergy, _propCostFood, _propCostWorkers;
+
+        public static bool TryGetCommandResourceCost(object command, object executor, out PendingResourceCost cost)
+        {
+            cost = default;
+            if (command == null || executor == null || _methodGetResourcesCost == null)
+                return false;
+
+            try
+            {
+                object boxedCost = _methodGetResourcesCost.Invoke(command, new[] { executor });
+                if (boxedCost == null)
+                    return false;
+
+                if (!_costPropsInit)
+                {
+                    Type tCost = boxedCost.GetType();
+                    _propCostGold = tCost.GetProperty("Gold", BindingFlags.Public | BindingFlags.Instance);
+                    _propCostWood = tCost.GetProperty("Wood", BindingFlags.Public | BindingFlags.Instance);
+                    _propCostStone = tCost.GetProperty("Stone", BindingFlags.Public | BindingFlags.Instance);
+                    _propCostIron = tCost.GetProperty("Iron", BindingFlags.Public | BindingFlags.Instance);
+                    _propCostOil = tCost.GetProperty("Oil", BindingFlags.Public | BindingFlags.Instance);
+                    _propCostEnergy = tCost.GetProperty("Energy", BindingFlags.Public | BindingFlags.Instance);
+                    _propCostFood = tCost.GetProperty("Food", BindingFlags.Public | BindingFlags.Instance);
+                    _propCostWorkers = tCost.GetProperty("Workers", BindingFlags.Public | BindingFlags.Instance);
+                    _costPropsInit = true;
+                }
+
+                int ReadPosInt(PropertyInfo p) => p != null ? Math.Max(0, Convert.ToInt32(p.GetValue(boxedCost, null))) : 0;
+                cost = new PendingResourceCost
+                {
+                    Gold = ReadPosInt(_propCostGold),
+                    Wood = ReadPosInt(_propCostWood),
+                    Stone = ReadPosInt(_propCostStone),
+                    Iron = ReadPosInt(_propCostIron),
+                    Oil = ReadPosInt(_propCostOil),
+                    Energy = ReadPosInt(_propCostEnergy),
+                    Food = ReadPosInt(_propCostFood),
+                    Workers = ReadPosInt(_propCostWorkers)
+                };
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool CanAffordWithPending(PendingResourceCost candidate, PendingResourceCost pendingTotal)
+        {
+            object ls = CurrentLevelState;
+            if (ls == null) return true;
+
+            PendingResourceCost total = candidate + pendingTotal;
+            try
+            {
+                if (total.Gold > 0 && GetLevelInt("Gold") < total.Gold) return false;
+                if (total.Wood > 0 && GetLevelInt("Wood") < total.Wood) return false;
+                if (total.Stone > 0 && GetLevelInt("Stone") < total.Stone) return false;
+                if (total.Iron > 0 && GetLevelInt("Iron") < total.Iron) return false;
+                if (total.Oil > 0 && GetLevelInt("Oil") < total.Oil) return false;
+
+                if (total.Energy > 0 && _methodLevelStateAvailEnergy != null
+                    && Convert.ToInt32(_methodLevelStateAvailEnergy.Invoke(ls, null)) < total.Energy)
+                    return false;
+                if (total.Food > 0 && _methodLevelStateAvailFood != null
+                    && Convert.ToInt32(_methodLevelStateAvailFood.Invoke(ls, null)) < total.Food)
+                    return false;
+                if (total.Workers > 0 && _methodLevelStateAvailWorkers != null
+                    && Convert.ToInt32(_methodLevelStateAvailWorkers.Invoke(ls, null)) < total.Workers)
+                    return false;
+
+                return true;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        public static bool IsAttackCommand(object cmdObj)
+        {
+            if (cmdObj == null) return false;
+            string name = cmdObj.GetType().Name;
+            return name.IndexOf("Attack", StringComparison.OrdinalIgnoreCase) >= 0
+                || string.Equals(name, "UseItem_Grenade", StringComparison.Ordinal);
+        }
+
+        public static void PlayUnitCommandVoice(DXEntity entity, bool isAttack)
+        {
+            if (entity == null || entity.Disposed || DXScene.Current == null || _methodEntityGetDefaultParams == null)
+                return;
+            if (TypeZXEntity != null && !TypeZXEntity.IsInstanceOfType(entity))
+                return;
+
+            Determinism.LockstepClock.EnterAudioContext();
+            try
+            {
+                object audio = _fieldAudioCurrent?.GetValue(null);
+                if (audio == null) return;
+
+                object defParams = _methodEntityGetDefaultParams.Invoke(entity, null);
+                if (defParams == null) return;
+
+                if (_propDefParamsSoundsGeneric == null || _propDefParamsSoundsAttack == null)
+                {
+                    Type dpType = defParams.GetType();
+                    _propDefParamsSoundsGeneric = dpType.GetProperty("SoundsOnCommandGeneric", BindingFlags.Public | BindingFlags.Instance);
+                    _propDefParamsSoundsAttack = dpType.GetProperty("SoundsOnCommandAttack", BindingFlags.Public | BindingFlags.Instance);
+                }
+
+                var list = (isAttack
+                    ? _propDefParamsSoundsAttack?.GetValue(defParams, null) as List<string>
+                    : _propDefParamsSoundsGeneric?.GetValue(defParams, null) as List<string>);
+
+                if ((list == null || list.Count == 0) && isAttack)
+                    list = _propDefParamsSoundsGeneric?.GetValue(defParams, null) as List<string>;
+
+                if (list == null || list.Count == 0) return;
+
+                if (!isAttack && _typeUnit != null && _typeUnit.IsInstanceOfType(entity) && _methodAudioPickWeightedVoice != null)
+                {
+                    _methodAudioPickWeightedVoice.Invoke(audio, new object[] { list });
+                }
+                else if (_methodAudioPlayUniqueList != null)
+                {
+                    _methodAudioPlayUniqueList.Invoke(audio, new object[] { ZXSoundCategory.UnitVoices, ZXUniqueSoundType.EntityVoice, list });
+                }
+            }
+            catch { }
+            finally
+            {
+                Determinism.LockstepClock.ExitAudioContext();
+            }
         }
 
         public static void NotifyUnitCommandExecuted(object executorObj, object cmdObj)

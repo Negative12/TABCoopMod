@@ -36,7 +36,9 @@ namespace TABCoopMod.Networking
         PosDriftSyncChunk = 0x32,
         PosDriftStatsReport = 0x33,
         AllyCursorAndCamera = 0x40,
-        TacticalPing = 0x41
+        TacticalPing = 0x41,
+        RttPing = 0x42,
+        RttPong = 0x43
     }
 
     public sealed class PeerInfo

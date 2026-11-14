@@ -7,6 +7,8 @@ using HarmonyLib;
 using TABCoopMod.Commands;
 using TABCoopMod.Core;
 using TABCoopMod.Determinism;
+using TABCoopMod.UI;
+using ZX;
 
 namespace TABCoopMod.Patches
 {
@@ -37,6 +39,16 @@ namespace TABCoopMod.Patches
             var callback = OnLocalCommandCaptured;
             if (callback != null) callback(cmd);
             else CommandExecutor.Execute(cmd);
+        }
+
+        public static void ConfirmLocalPendingBuild(string typeName, Rectangle footprint)
+        {
+            Patch_ZXCommand_Execute.ConfirmPendingBuild(typeName, footprint);
+        }
+
+        public static void ClearPendingLocalBuilds()
+        {
+            Patch_ZXCommand_Execute.ClearPendingBuilds();
         }
 
         /// <summary>
@@ -108,8 +120,11 @@ namespace TABCoopMod.Patches
                 TargetPosition = __1
             };
 
-            // Show local ground click indicator immediately for responsive feel
+            // Show local ground click indicator and immediate unit confirmation voice at 0ms.
             GameBridge.ShowGroundIndicatorForCommand(__0, __1, 1f);
+            DXEntity leadUnit = DXGame.Current?.GetEntityByID(unitIds[0]);
+            if (leadUnit != null)
+                GameBridge.PlayUnitCommandVoice(leadUnit, GameBridge.IsAttackCommand(__0));
 
             CommandInterceptor.SuppressIndividualMoveExecution = true;
             CommandInterceptor.OnLocalCommandCaptured?.Invoke(netCmd);
@@ -123,13 +138,51 @@ namespace TABCoopMod.Patches
     {
         private struct PendingBuildFootprint
         {
+            public long GhostId;
             public int Tick;
             public double TimestampMs;
             public Rectangle Area;
             public string TypeName;
+            public GameBridge.PendingResourceCost Cost;
         }
 
+        private const double PendingBuildTimeoutMs = 1500.0;
+        private const int PendingBuildTimeoutTicks = 45;
         private static readonly List<PendingBuildFootprint> _recentLocalBuilds = new List<PendingBuildFootprint>();
+        private static readonly object _pendingBuildsSync = new object();
+        private static long _nextGhostId;
+
+        internal static void ConfirmPendingBuild(string typeName, Rectangle footprint)
+        {
+            long removedGhostId = 0;
+            lock (_pendingBuildsSync)
+            {
+                for (int i = 0; i < _recentLocalBuilds.Count; i++)
+                {
+                    var entry = _recentLocalBuilds[i];
+                    bool areaMatch = !footprint.IsEmpty && !entry.Area.IsEmpty && entry.Area == footprint;
+                    bool fallbackMatch = footprint.IsEmpty && entry.Area.IsEmpty
+                        && string.Equals(entry.TypeName, typeName, StringComparison.Ordinal);
+                    if (areaMatch || fallbackMatch)
+                    {
+                        removedGhostId = entry.GhostId;
+                        _recentLocalBuilds.RemoveAt(i);
+                        break;
+                    }
+                }
+            }
+            if (removedGhostId > 0)
+                AllyOverlayRenderer.RemovePendingBuildGhost(removedGhostId);
+        }
+
+        internal static void ClearPendingBuilds()
+        {
+            lock (_pendingBuildsSync)
+            {
+                _recentLocalBuilds.Clear();
+            }
+            AllyOverlayRenderer.ClearPendingBuildGhosts();
+        }
 
         public static MethodBase TargetMethod()
         {
@@ -178,37 +231,77 @@ namespace TABCoopMod.Patches
 
                     Rectangle footprint = GameBridge.ResolveBuildCellArea(null, targetPos, targetSize, targetOrigin);
                     double nowMs = DXHelper_Environment.Ticks;
+                    GameBridge.PendingResourceCost candidateCost = default;
+                    if (!isBonus)
+                        GameBridge.TryGetCommandResourceCost(__instance, executor, out candidateCost);
 
-                    for (int i = _recentLocalBuilds.Count - 1; i >= 0; i--)
-                    {
-                        var entry = _recentLocalBuilds[i];
-                        bool expiredByTime = nowMs - entry.TimestampMs > 350.0 || nowMs < entry.TimestampMs;
-                        bool expiredByTick = curTick < entry.Tick || (curTick - entry.Tick > 8);
-                        if (expiredByTime || expiredByTick)
-                            _recentLocalBuilds.RemoveAt(i);
-                    }
+                    List<long> expiredGhosts = null;
+                    long newGhostId = 0;
 
-                    for (int i = 0; i < _recentLocalBuilds.Count; i++)
+                    lock (_pendingBuildsSync)
                     {
-                        var entry = _recentLocalBuilds[i];
-                        if (!footprint.IsEmpty)
+                        for (int i = _recentLocalBuilds.Count - 1; i >= 0; i--)
                         {
-                            if (!entry.Area.IsEmpty && entry.Area.IntersectsWith(footprint))
-                                return false;
+                            var entry = _recentLocalBuilds[i];
+                            bool expiredByTime = nowMs - entry.TimestampMs > PendingBuildTimeoutMs || nowMs < entry.TimestampMs;
+                            bool expiredByTick = curTick < entry.Tick || (curTick - entry.Tick > PendingBuildTimeoutTicks);
+                            if (expiredByTime || expiredByTick)
+                            {
+                                if (entry.GhostId > 0)
+                                    (expiredGhosts ?? (expiredGhosts = new List<long>())).Add(entry.GhostId);
+                                _recentLocalBuilds.RemoveAt(i);
+                            }
                         }
-                        else if (entry.Area.IsEmpty && string.Equals(entry.TypeName, buildingType.FullName, StringComparison.Ordinal))
+
+                        GameBridge.PendingResourceCost pendingSum = default;
+                        for (int i = 0; i < _recentLocalBuilds.Count; i++)
                         {
+                            var entry = _recentLocalBuilds[i];
+                            if (!footprint.IsEmpty)
+                            {
+                                if (!entry.Area.IsEmpty && entry.Area.IntersectsWith(footprint))
+                                {
+                                    if (expiredGhosts != null)
+                                        foreach (var gid in expiredGhosts) AllyOverlayRenderer.RemovePendingBuildGhost(gid);
+                                    return false;
+                                }
+                            }
+                            else if (entry.Area.IsEmpty && string.Equals(entry.TypeName, buildingType.FullName, StringComparison.Ordinal))
+                            {
+                                if (expiredGhosts != null)
+                                    foreach (var gid in expiredGhosts) AllyOverlayRenderer.RemovePendingBuildGhost(gid);
+                                return false;
+                            }
+                            pendingSum = pendingSum + entry.Cost;
+                        }
+
+                        if (!isBonus && !GameBridge.CanAffordWithPending(candidateCost, pendingSum))
+                        {
+                            if (expiredGhosts != null)
+                                foreach (var gid in expiredGhosts) AllyOverlayRenderer.RemovePendingBuildGhost(gid);
+                            ModLogger.Info($"[CommandInterceptor] Rejected local build {buildingType.Name}: insufficient resources after pending pre-deduction (pendingGold={pendingSum.Gold}, newGold={candidateCost.Gold}).");
                             return false;
                         }
+
+                        newGhostId = ++_nextGhostId;
+                        _recentLocalBuilds.Add(new PendingBuildFootprint
+                        {
+                            GhostId = newGhostId,
+                            Tick = curTick,
+                            TimestampMs = nowMs,
+                            Area = footprint,
+                            TypeName = buildingType.FullName,
+                            Cost = isBonus ? default : candidateCost
+                        });
                     }
 
-                    _recentLocalBuilds.Add(new PendingBuildFootprint
+                    if (expiredGhosts != null)
                     {
-                        Tick = curTick,
-                        TimestampMs = nowMs,
-                        Area = footprint,
-                        TypeName = buildingType.FullName
-                    });
+                        foreach (var gid in expiredGhosts)
+                            AllyOverlayRenderer.RemovePendingBuildGhost(gid);
+                    }
+                    if (!footprint.IsEmpty && newGhostId > 0)
+                        AllyOverlayRenderer.SetPendingBuildGhost(newGhostId, footprint, CommandInterceptor.LocalPlayerId);
 
                     var netBuild = new NetCommand
                     {
@@ -246,6 +339,8 @@ namespace TABCoopMod.Patches
 
             if (targetPos != PointF.Empty)
                 GameBridge.ShowGroundIndicatorForCommand(__instance, targetPos, targetEntityId != 0UL ? 0.6f : 1f);
+
+            GameBridge.PlayUnitCommandVoice(executor, GameBridge.IsAttackCommand(__instance));
 
             CommandInterceptor.OnLocalCommandCaptured?.Invoke(netCmd);
             return false;
@@ -316,6 +411,7 @@ namespace TABCoopMod.Patches
                 if (attackCmd != null)
                 {
                     GameBridge.ShowGroundIndicatorForCommand(attackCmd, mouseEntity.Position, 0.6f);
+                    GameBridge.PlayUnitCommandVoice(leadUnit, isAttack: true);
                     var netCmd = new NetCommand
                     {
                         Type = NetCommandType.ExecuteCommand,
@@ -440,6 +536,53 @@ namespace TABCoopMod.Patches
             };
             CommandInterceptor.OnLocalCommandCaptured?.Invoke(netCmd);
             return false;
+        }
+    }
+
+    // 6. Suppress duplicate unit command voice playback during lockstep replay since the local
+    // player already receives an immediate 0ms voice confirmation when issuing the order.
+    [HarmonyPatch]
+    public static class Patch_Audio_SuppressReplayUnitVoice
+    {
+        public static IEnumerable<MethodBase> TargetMethods()
+        {
+            Type audioType = GameBridge.TypeZXSystemAudio ?? AccessTools.TypeByName(ObfuscatedSymbols.Type_ZXSystemAudio);
+            if (audioType == null) yield break;
+
+            foreach (var m in AccessTools.GetDeclaredMethods(audioType))
+            {
+                if (m == null || m.IsAbstract) continue;
+                if (string.Equals(m.Name, ObfuscatedSymbols.Method_Audio_PickWeightedVoice, StringComparison.Ordinal)
+                    || string.Equals(m.Name, ObfuscatedSymbols.Method_Audio_PlayUnique, StringComparison.Ordinal))
+                {
+                    yield return m;
+                }
+            }
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.Low)]
+        public static bool Prefix(MethodBase __originalMethod, object[] __args, ref int __result)
+        {
+            if (!CommandExecutor.IsReplayingCommand)
+                return true;
+
+            string mName = __originalMethod?.Name;
+            if (string.Equals(mName, ObfuscatedSymbols.Method_Audio_PickWeightedVoice, StringComparison.Ordinal))
+            {
+                __result = 0;
+                return false;
+            }
+
+            if (string.Equals(mName, ObfuscatedSymbols.Method_Audio_PlayUnique, StringComparison.Ordinal)
+                && __args != null && __args.Length >= 1 && __args[0] is ZXSoundCategory cat
+                && cat == ZXSoundCategory.UnitVoices)
+            {
+                __result = 0;
+                return false;
+            }
+
+            return true;
         }
     }
 }

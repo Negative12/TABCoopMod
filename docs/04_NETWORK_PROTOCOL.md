@@ -72,13 +72,15 @@ namespace TABCoopMod.Networking
 | `0x10` | `SnapshotBegin` | Reliable | H -> All | 宣告开始传输 `.zxsav` 快照（总字节数、分片数、`.zxcheck` 内容、初始随机种子、`SyncedEntityIdCounter` 等） |
 | `0x11` | `SnapshotChunk` | Reliable | H -> All | 存档字节流分片（每片最大 `32,768` Bytes，按索引乱序缓冲组装） |
 | `0x12` | `SnapshotLoadedAck` | Reliable | C -> H | 客机完成读档并上报初始状态就绪 |
-| `0x13` | `SessionStart` | Reliable | H -> All | 全员就绪，对齐并进入 Lockstep 步进 |
+| `0x13` | `SessionStart` | Reliable | H -> All | 全员就绪，对齐并进入 Lockstep 步进（携带起始 tick、seed、idCounter 与当前 `InputDelayTicks`） |
 | `0x20` | `ClientInputReport` | Reliable | C -> H | 客机上报本人在当前 Turn 提交的 `NetCommand[]` 列表 |
 | `0x21` | `TurnInputBroadcast` | Reliable | H -> All | 房主汇总全员在 `TargetSimTick` 的指令批次并广播（含空心跳包） |
 | `0x30` | `StateChecksumReport` | Reliable | All -> H | 每 60 逻辑帧（2 秒）上报当前 `SimTick` 的 `StateHasher` 校验和 |
 | `0x31` | `DesyncDetectedAlert` | Reliable | H -> All | 房主检测到状态不一致时下发告警并触发自动快照 `Auto-resync` |
 | `0x40` | `AllyCursorAndCamera` | Unreliable | All <-> All | 20Hz 广播本地鼠标世界坐标、视野矩形与预览建筑状态 |
 | `0x41` | `TacticalPing` | Reliable | All <-> All | 小地图/地面战术信号打点 |
+| `0x42` | `RttPing` | Unreliable | H -> All | 局内 `500ms` 周期下发 `Stopwatch` 时间戳探测包，用于计算平滑 RTT |
+| `0x43` | `RttPong` | Unreliable | C -> H | 客机原样回显 `RttPing`，供房主自适应调整 `InputDelayTicks (1..4)` |
 
 ---
 

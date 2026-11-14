@@ -2634,6 +2634,7 @@ namespace TABCoopMod.Determinism
         }
 
         [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
         public static void Prefix() => LockstepClock.EnterAudioContext();
 
         [HarmonyFinalizer]

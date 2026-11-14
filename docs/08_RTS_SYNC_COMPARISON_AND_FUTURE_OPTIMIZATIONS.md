@@ -56,12 +56,15 @@
 完全停留在现有会话层与拦截/UI 覆盖层内，风险极低：
 1. ~~**非测试模式新建游戏动态种子握手**~~（✅ **已完成**）：
    - 已接入 `CoopSessionManager.RollNewGameSeed()`：非 `TABCOOP_TEST=1` 会话下每次建房/开新图动态滚动 `CurrentSessionSeed`，已在双开测试实测相邻两次新开得到不同种子并正确同步。
-2. **本地待建幽灵虚影与窗口期资源预扣累计**（约 `150~250 行`）：
-   - 在现有 `_recentLocalBuilds`（[CommandInterceptorPatch.cs](../src/TABCoopMod/Patches/CommandInterceptorPatch.cs)）基础上叠加窗口内资源预扣统计，并借助 [AllyOverlayRenderer.cs](../src/TABCoopMod/UI/AllyOverlayRenderer.cs) 在地面即时绘制半透明占位框，提升 Shift 连建反馈。
-3. **0ms 本地单位语音即时确认**（约 `80~150 行`）：
-   - 在 `Patch_LevelSys_GroupMoveSelected` 当场触发本机语音（依托 `AudioRngIsolationPatch` 隔离随机流），并在回合回放执行同一指令时跳过重复发声。
-4. **自适应 `InputDelayTicks`（`1~4 ticks`）**（约 `150~200 行`）：
-   - 基于最近窗口的网络 RTT 动态调整回合延迟（如从 `1 tick / 33ms` 自适应放宽到 `2~4 ticks`），改善高延迟 Steam P2P 跨区联机下的停顿感。
+2. ~~**本地待建幽灵虚影与窗口期资源预扣累计**~~（✅ **已完成**）：
+   - 在 [GameBridge.cs](../src/TABCoopMod/Core/GameBridge.cs) 新增 `TryGetCommandResourceCost` 与 `CanAffordWithPending`（覆盖 `Gold/Wood/Stone/Iron/Oil` 及 `ZXLevelState` 剩余可用 `Energy/Food/Workers`）；
+   - 在 [CommandInterceptorPatch.cs](../src/TABCoopMod/Patches/CommandInterceptorPatch.cs) 对 `_recentLocalBuilds` 窗口内未确认本地建造累计预扣资源并拦截超支连建，同时在 [AllyOverlayRenderer.cs](../src/TABCoopMod/UI/AllyOverlayRenderer.cs) 通过 `DXIsometricGridObject.Current.IsometricMiddle` 即时绘制玩家色半透明占位边框，并在 [NetCommand.cs](../src/TABCoopMod/Commands/NetCommand.cs) `ExecutePlaceBuilding` 落地或超时（`1500ms / 45 ticks`）/切图时自动清理。
+3. ~~**0ms 本地单位语音即时确认**~~（✅ **已完成**）：
+   - 在 [GameBridge.cs](../src/TABCoopMod/Core/GameBridge.cs) 接入 `PlayUnitCommandVoice`（通过 `LockstepClock.EnterAudioContext/ExitAudioContext` 隔离 RNG，复用原生 `ZXSystemAudio` 的 `SoundsOnCommandGeneric` / `SoundsOnCommandAttack`）；
+   - 在 `Patch_LevelSys_GroupMoveSelected`、`Patch_ZXCommand_Execute` 与 `Patch_LevelSys_OnSceneRightClick` 捕获当下 0ms 发声，并在 [CommandInterceptorPatch.cs](../src/TABCoopMod/Patches/CommandInterceptorPatch.cs) 新增 `Patch_Audio_SuppressReplayUnitVoice`（配合 [LockstepClock.cs](../src/TABCoopMod/Determinism/LockstepClock.cs) `AudioRngIsolationPatch` 优先级）在 `CommandExecutor.IsReplayingCommand` 期间屏蔽 `UnitVoices` 重复播报（已通过 `GameBridge 0 missing` 与 `Harmony Classes OK=57, failed-tolerant=0` 启动验证；实机听感待人工桌面交互验收）。
+4. ~~**自适应 `InputDelayTicks`（`1~4 ticks`）**~~（✅ **已完成**）：
+   - 在 [INetworkTransport.cs](../src/TABCoopMod/Networking/INetworkTransport.cs) 新增 `RttPing (0x42)` / `RttPong (0x43)`；
+   - 在 [CoopSessionManager.cs](../src/TABCoopMod/Sync/CoopSessionManager.cs) 将 `InputDelayTicks` 改为 `1..4` 动态调节：局内同步状态下 Host 每 `500ms` 探测 RTT（EMA 平滑并做毛刺截断 + 迟滞阈值 + `1.5s` 冷却），`EmitHostTurns` 在升档时自动补齐中间空心跳包、在降档时保持 `targetTick` 单调递进不回退。实机测试验证：`latency=90;jitter=15` 下自动升档 `1 -> 4 (smoothedRtt=262.3ms)`、`latency=0` 下于首帧波动（`109.1ms`）后自动降档 `3 -> 2 (smoothedRtt=53.2ms)`，期间 `wait=0.0ms` 且全部 `StateChecksum MATCH`。
 
 ### 梯度二：中等深度确定性强化（约 400 ~ 1,000 行，2 ~ 5 天）
 用于进一步压低大规模尸潮混战时的软修正频率：

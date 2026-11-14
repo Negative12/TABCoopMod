@@ -6,6 +6,7 @@ using System.Linq;
 using DXVision;
 using TABCoopMod.Core;
 using TABCoopMod.Determinism;
+using TABCoopMod.Patches;
 
 namespace TABCoopMod.Commands
 {
@@ -320,6 +321,12 @@ namespace TABCoopMod.Commands
 
         private static void ExecutePlaceBuilding(NetCommand netCmd)
         {
+            if (netCmd.PlayerId == CommandInterceptor.LocalPlayerId)
+            {
+                Rectangle fp = GameBridge.ResolveBuildCellArea(null, netCmd.TargetPosition, netCmd.TargetSize, netCmd.TargetOrigin);
+                CommandInterceptor.ConfirmLocalPendingBuild(netCmd.BuildingTypeName, fp);
+            }
+
             if (string.IsNullOrEmpty(netCmd.BuildingTypeName)) return;
 
             Type buildingType = GameBridge.GameAssembly.GetType(netCmd.BuildingTypeName);
