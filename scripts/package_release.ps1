@@ -1,10 +1,10 @@
-# package_release.ps1
+﻿# package_release.ps1
 # Builds TABCoopMod (Release) and packages a drag-and-drop archive into dist/
 # containing ONLY runtime files + a plain-text user guide (no install scripts).
 
 param(
     [string]$WorkspaceDir = "",
-    [string]$Version = "v0.1.0"
+    [string]$Version = "v0.1.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,6 +38,11 @@ Copy-Item (Join-Path $binDir "0Harmony.dll") (Join-Path $stageDir "0Harmony.dll"
 
 [System.IO.File]::WriteAllText((Join-Path $stageDir "steam_appid.txt"), "644930")
 
+$asmVersion = "0.1.1.0"
+if ($Version -match '(\d+)\.(\d+)\.(\d+)') {
+    $asmVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
+}
+
 $configXml = @"
 <?xml version="1.0" encoding="utf-8"?>
 <configuration>
@@ -45,7 +50,7 @@ $configXml = @"
     <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.6"/>
   </startup>
   <runtime>
-    <appDomainManagerAssembly value="TABCoopMod, Version=0.1.0.0, Culture=neutral, PublicKeyToken=null" />
+    <appDomainManagerAssembly value="TABCoopMod, Version=$asmVersion, Culture=neutral, PublicKeyToken=null" />
     <appDomainManagerType value="TABCoopMod.Bootstrap.ModAppDomainManager" />
   </runtime>
 </configuration>
@@ -114,6 +119,7 @@ $guideText = @"
        0Harmony.dll
        steam_appid.txt
        TABCoopMod.log（如存在）
+       TABCoopMod_Logs\ 目录（如存在）
        TABCoopMod_使用说明.txt
   3. 还原 TheyAreBillions.exe.config：
      - 若此前备份了 TheyAreBillions.exe.config.bak，删掉当前的
@@ -135,7 +141,7 @@ $guideText = @"
        0Harmony.dll 位于同一目录。
   2. 启动无反应或闪退：
      - 本 Mod 仅适配 64 位版本 TheyAreBillions.exe（不要运行 _x86.exe）。
-     - 若发生异常，请查看游戏根目录生成的 TABCoopMod.log 定位原因。
+     - 若发生异常，请查看游戏根目录生成的 TABCoopMod.log（以及 TABCoopMod_Logs\ 下按版本归档的历史日志）定位原因。
   3. 杀毒软件误报：
      - Mod 通过 .NET AppDomainManager 在内存中加载 Harmony 补丁（不会修改
        TheyAreBillions.exe 本体），如被拦截请将游戏目录加入白名单。

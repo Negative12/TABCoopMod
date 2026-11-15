@@ -762,6 +762,7 @@ namespace TABCoopMod.Core
         {
             try
             {
+                DisableCameraIntroAnimation();
                 var game = _mZXGameCurrent?.Invoke(null, null) as DXGame;
                 if (game == null) return;
                 var field = AccessTools.Field(TypeZXGame, ObfuscatedSymbols.Field_ZXGame_LoadingFadeObj);
@@ -1372,14 +1373,138 @@ namespace TABCoopMod.Core
             return true;
         }
 
+        private static FieldInfo _fLevelSysHudRoot;
+        private static FieldInfo _fLevelSysIntroCinematic;
+        private static FieldInfo _fLevelSysScreenAnim;
+
+        private static void EnsureCameraIntroFields()
+        {
+            if (TypeZXSystemGameLevel == null) return;
+            if (_fLevelSysHudRoot == null)
+                _fLevelSysHudRoot = AccessTools.Field(TypeZXSystemGameLevel, "#=zNjT9FdpMLDa2");
+            if (_fLevelSysIntroCinematic == null)
+                _fLevelSysIntroCinematic = AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_CameraIntroAnim);
+            if (_fLevelSysScreenAnim == null)
+                _fLevelSysScreenAnim = AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_ScreenAnim);
+        }
+
+        public static void EnforceDisabledCameraIntroForLevel(object levelSys)
+        {
+            try
+            {
+                EnsureCameraIntroFields();
+                if (_fLevelSysIntroCinematic != null && _fLevelSysIntroCinematic.GetValue(null) is bool intro && intro)
+                {
+                    _fLevelSysIntroCinematic.SetValue(null, false);
+                    _fLevelSysScreenAnim?.SetValue(null, null);
+                    var rootObj = DXScene.Current?.RootObject;
+                    if (rootObj != null)
+                    {
+                        rootObj.Blur = 0f;
+                        if (rootObj.State != null) rootObj.State.Blur = 0f;
+                    }
+                }
+
+                if (levelSys != null && _fLevelSysHudRoot != null && _fLevelSysHudRoot.GetValue(levelSys) is DXObject hudObj)
+                {
+                    bool clearedAnim = false;
+                    if (hudObj.Animation != null && hudObj.Animation.Animating)
+                    {
+                        hudObj.Animation.Clear();
+                        clearedAnim = true;
+                    }
+                    var sp = DXScreenParameters.Current;
+                    if (sp != null && !sp.ViewArea.IsEmpty && (clearedAnim || Math.Abs(hudObj.Y - sp.ViewArea.Y) > 0.5f))
+                    {
+                        hudObj.Area = sp.ViewArea;
+                        hudObj.Opacity = 1f;
+                    }
+                }
+            }
+            catch { }
+        }
+
         public static void DisableCameraIntroAnimation()
         {
             try
             {
-                var f = AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_CameraIntroAnim);
-                f?.SetValue(null, false);
+                EnsureCameraIntroFields();
+                _fLevelSysIntroCinematic?.SetValue(null, false);
+                _fLevelSysScreenAnim?.SetValue(null, null);
+
+                var rootObj = DXScene.Current?.RootObject;
+                if (rootObj != null)
+                {
+                    rootObj.Blur = 0f;
+                    if (rootObj.State != null) rootObj.State.Blur = 0f;
+                }
+
+                var levelSys = LevelSystemInstance;
+                if (levelSys != null && _fLevelSysHudRoot != null && _fLevelSysHudRoot.GetValue(levelSys) is DXObject hudObj)
+                {
+                    if (hudObj.Animation != null && hudObj.Animation.Animating)
+                        hudObj.Animation.Clear();
+                    var sp = DXScreenParameters.Current;
+                    if (sp != null && !sp.ViewArea.IsEmpty && Math.Abs(hudObj.Y - sp.ViewArea.Y) > 0.5f)
+                    {
+                        hudObj.Area = sp.ViewArea;
+                    }
+                    hudObj.Opacity = 1f;
+                }
             }
             catch { }
+        }
+
+        public static string GetHudDiagSummary()
+        {
+            try
+            {
+                var levelSys = LevelSystemInstance;
+                var fHud = TypeZXSystemGameLevel != null ? AccessTools.Field(TypeZXSystemGameLevel, "#=zNjT9FdpMLDa2") : null;
+                var fIntro = TypeZXSystemGameLevel != null ? AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_CameraIntroAnim) : null;
+                var fIntroTime = TypeZXSystemGameLevel != null ? AccessTools.Field(TypeZXSystemGameLevel, "#=zIOUagVzqxvgnQeV3rA==") : null;
+                var fIntroBlur = TypeZXSystemGameLevel != null ? AccessTools.Field(TypeZXSystemGameLevel, "#=z40N_lqqB8daJ") : null;
+                var fIsLoadSave = TypeZXGame != null ? AccessTools.Field(TypeZXGame, "#=zAVyuAmKGGVLXLOjjSQ==") : null;
+
+                var hudObj = levelSys != null && fHud != null ? fHud.GetValue(levelSys) as DXObject : null;
+                bool introFlag = fIntro?.GetValue(null) is bool b && b;
+                int introStart = fIntroTime?.GetValue(null) is int t ? t : -1;
+                var introBlur = fIntroBlur?.GetValue(null) as DXAnimation;
+                var gx = _mZXGameCurrent?.Invoke(null, null);
+                bool isLoadSave = gx != null && fIsLoadSave?.GetValue(gx) is bool ls && ls;
+
+                var scene = DXScene.Current;
+                var viewArea = DXScreenParameters.Current?.ViewArea ?? Rectangle.Empty;
+                var cam = scene?.CameraArea ?? RectangleF.Empty;
+                var screen = scene != null ? DXScene.ScreenArea : Rectangle.Empty;
+                float unit = DXScene.Unit;
+                float rootBlur = scene?.RootObject?.Blur ?? -1f;
+                int vtime = scene?.VirtualTimeInt ?? -1;
+
+                string clipDesc = "";
+                if (hudObj?.Animation != null && hudObj.Animation.Clips != null && hudObj.Animation.Clips.Count > 0)
+                {
+                    var parts = new System.Collections.Generic.List<string>();
+                    foreach (var cl in hudObj.Animation.Clips)
+                    {
+                        foreach (var tr in cl.Transitions)
+                        {
+                            parts.Add($"[dur={tr.Duration},loc={tr.RangeLocation},op={tr.RangeOpacity}]");
+                        }
+                    }
+                    clipDesc = ",clips=" + string.Join(";", parts);
+                }
+
+                string hudStr = hudObj != null
+                    ? $"({hudObj.X:F1},{hudObj.Y:F1},{hudObj.Width:F1}x{hudObj.Height:F1},anim={hudObj.Animation?.Animating}{clipDesc},vis={hudObj.Visible},style={hudObj.State?.AreaStyle})"
+                    : "null";
+
+                return $"hud={hudStr} intro={introFlag}(t0={introStart},vt={vtime}) blurAnim={(introBlur != null ? (introBlur.Finished ? "done" : "running") : "null")} rootBlur={rootBlur:F3} isLoadSave={isLoadSave} unit={unit:F3} view={viewArea} screen={screen} cam=({cam.X:F1},{cam.Y:F1},{cam.Width:F1}x{cam.Height:F1})";
+            }
+            catch (Exception ex)
+            {
+                return $"err:{ex.Message}";
+            }
         }
 
         /// <summary>

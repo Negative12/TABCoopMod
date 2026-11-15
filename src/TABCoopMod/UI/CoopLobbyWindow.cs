@@ -27,6 +27,45 @@ namespace TABCoopMod.UI
             public DXTextObject RoleBadge;
         }
 
+        private sealed class CompactLobbyButton : DXButton
+        {
+            public DXTextObject Label;
+            public Color BaseBg;
+            public Color HoverBg;
+            public Color BaseBorder;
+            public Color HoverBorder;
+            public Color TextColor;
+            private bool _wasIluminated;
+
+            protected override void OnSetStyle()
+            {
+                base.OnSetStyle();
+                if (Label == null) return;
+                bool hover = Enabled && Iluminated;
+                if (hover != _wasIluminated)
+                {
+                    _wasIluminated = hover;
+                    SetDynamicText(Label, Label.Text, TextColor, hover ? HoverBorder : BaseBorder, hover ? HoverBg : BaseBg);
+                }
+            }
+        }
+
+        private sealed class ChaosPresetDef
+        {
+            public string Name;
+            public int LatencyMs;
+            public int JitterMs;
+            public double LossRate;
+        }
+
+        private static readonly ChaosPresetDef[] ChaosPresets =
+        {
+            new ChaosPresetDef { Name = "轻微", LatencyMs = 40, JitterMs = 15, LossRate = 0.01 },
+            new ChaosPresetDef { Name = "常规", LatencyMs = 80, JitterMs = 20, LossRate = 0.02 },
+            new ChaosPresetDef { Name = "较差", LatencyMs = 140, JitterMs = 40, LossRate = 0.05 },
+            new ChaosPresetDef { Name = "恶劣", LatencyMs = 220, JitterMs = 80, LossRate = 0.10 }
+        };
+
         private static readonly Color[] SlotColors =
         {
             Color.DodgerBlue,
@@ -85,6 +124,18 @@ namespace TABCoopMod.UI
         private static DXTextObject _clientHintText;
         private static DXButton _btnLeaveRoom;
 
+        // Local loopback network chaos simulator panel (inside Room View)
+        private static DXObject _chaosPanel;
+        private static DXTextObject _chaosPanelBg;
+        private static DXTextObject _chaosTitleText;
+        private static CompactLobbyButton _btnChaosToggle;
+        private static CompactLobbyButton _btnChaosPreset;
+        private static DXTextObject _chaosLatencyText;
+        private static DXTextObject _chaosJitterText;
+        private static DXTextObject _chaosLossText;
+        private static DXTextObject _chaosClientNoteText;
+        private static readonly List<CompactLobbyButton> _chaosAdjustButtons = new List<CompactLobbyButton>();
+
         public static bool IsOpen => _window != null && !_isClosing;
 
         /// <summary>Executes an equivalent button action for automated UI verification via ControlServer.</summary>
@@ -118,6 +169,13 @@ namespace TABCoopMod.UI
                     CoopSessionManager.ToggleBalancePreset();
                     RefreshUI();
                     return true;
+                case "toggle_chaos":
+                    CoopSessionManager.ToggleLocalChaosEnabled();
+                    RefreshUI();
+                    return true;
+                case "cycle_chaos_preset":
+                    CycleChaosPresetClicked();
+                    return true;
                 case "probe_now":
                     TriggerLocalProbeIfDue(force: true);
                     RefreshUI();
@@ -145,7 +203,7 @@ namespace TABCoopMod.UI
                 _noModalSinceTicks = -1.0;
                 _entryStatusMessage = string.Empty;
 
-                var win = GameBridge.CreateZXWindow("多人合作等候大厅 — 执政官模式", bigWindow: true);
+                var win = GameBridge.CreateZXWindow($"多人合作等候大厅 {ModInfo.Tag} — 执政官模式", bigWindow: true);
                 if (win == null)
                 {
                     ModLogger.Error("[CoopLobbyWindow] CreateZXWindow returned null.");
@@ -423,7 +481,7 @@ namespace TABCoopMod.UI
 
             var localDesc = CreateTextBox(padLeft, secondBtnY + _btnCreateLoopback.Height + 6f * u, leftW - padLeft * 2f, 44f * u,
                 10.5f * u, FontStyle.Regular, Color.Silver, ContentAlignment.TopLeft, Color.Transparent, Color.Transparent, 0f);
-            localDesc.Text = "在 127.0.0.1:27099 开放本地房间，\n适合同机双开 / 多窗口联机调试。";
+            localDesc.Text = "在 127.0.0.1:27099 开放本地房间，\n支持同机双开及延迟/抖动/丢包网络模拟。";
             _entryView.AddObject(localDesc);
 
             // Right column: Probe & Join
@@ -466,9 +524,9 @@ namespace TABCoopMod.UI
                 ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
             _roomView.AddObject(_rosterHeaderText);
 
-            float slotY = 40f * u;
-            float slotH = 62f * u;
-            float slotGap = 12f * u;
+            float slotY = 34f * u;
+            float slotH = 50f * u;
+            float slotGap = 8f * u;
 
             for (int i = 0; i < 3; i++)
             {
@@ -480,11 +538,11 @@ namespace TABCoopMod.UI
                 var swatch = CreateSolidBox(2f * u, 2f * u, 8f * u, slotH - 4f * u, SlotColors[i], Color.Transparent, 0f);
                 bg.AddObject(swatch);
 
-                var nameLbl = CreateTextBox(18f * u, 0f, leftW - 145f * u, slotH, 12f * u, FontStyle.Bold, Color.WhiteSmoke,
+                var nameLbl = CreateTextBox(18f * u, 0f, leftW - 145f * u, slotH, 11.5f * u, FontStyle.Bold, Color.WhiteSmoke,
                     ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
                 bg.AddObject(nameLbl);
 
-                var badgeLbl = CreateTextBox(leftW - 125f * u, 0f, 115f * u, slotH, 11f * u, FontStyle.Bold, Color.Gray,
+                var badgeLbl = CreateTextBox(leftW - 125f * u, 0f, 115f * u, slotH, 10.5f * u, FontStyle.Bold, Color.Gray,
                     ContentAlignment.MiddleRight, Color.Transparent, Color.Transparent, 0f);
                 bg.AddObject(badgeLbl);
 
@@ -497,11 +555,13 @@ namespace TABCoopMod.UI
                 };
             }
 
-            float bannerY = slotY + 3 * (slotH + slotGap) + 10f * u;
-            float bannerH = Math.Min(72f * u, Math.Max(52f * u, bodyH - bannerY - 8f * u));
+            float bannerY = slotY + 3f * slotH + 2f * slotGap + 8f * u;
+            float bannerH = 52f * u;
             _roomStatusBanner = CreateTextBox(0f, bannerY, leftW, bannerH,
-                11f * u, FontStyle.Bold, Color.Gold, ContentAlignment.MiddleCenter, PanelBgColor, BorderGoldColor, 1.5f);
+                10.5f * u, FontStyle.Bold, Color.Gold, ContentAlignment.MiddleCenter, PanelBgColor, BorderGoldColor, 1.5f);
             _roomView.AddObject(_roomStatusBanner);
+
+            BuildLocalChaosPanel(leftW, bannerY + bannerH + 8f * u, bodyH, u);
 
             // Right column: Host & Client actions using native ZXButtonSteam size
             var rightHeader = CreateTextBox(rightX, 0f, rightW, 28f * u, 13.5f * u, FontStyle.Bold, Color.Gold,
@@ -559,6 +619,97 @@ namespace TABCoopMod.UI
 
             _btnLeaveRoom = CreateNativeButton("退出房间", rightX, leaveY, -120, LeaveOrDisbandClicked);
             _roomView.AddObject(_btnLeaveRoom);
+        }
+
+        private static void BuildLocalChaosPanel(float leftW, float panelY, float bodyH, float u)
+        {
+            _chaosAdjustButtons.Clear();
+            float chaosH = Math.Max(112f * u, bodyH - panelY - 4f * u);
+            _chaosPanel = new DXObject
+            {
+                X = 0f,
+                Y = panelY,
+                Width = leftW,
+                Height = chaosH
+            };
+            _roomView.AddObject(_chaosPanel);
+
+            _chaosPanelBg = CreateSolidBox(0f, 0f, leftW, chaosH, PanelBgColor, BorderDimColor, 1.5f);
+            _chaosPanel.AddObject(_chaosPanelBg);
+
+            _chaosTitleText = CreateTextBox(10f * u, 7f * u, 192f * u, 24f * u, 10f * u, FontStyle.Bold, Color.Gold,
+                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
+            _chaosTitleText.Text = "网络波动模拟 (本地测试)";
+            _chaosPanelBg.AddObject(_chaosTitleText);
+
+            _btnChaosToggle = CreateCompactButton("模拟: 已关闭", 206f * u, 7f * u, 90f * u, 24f * u, 9.5f * u,
+                Color.FromArgb(220, 32, 38, 46), BorderDimColor, Color.Silver, () =>
+                {
+                    CoopSessionManager.ToggleLocalChaosEnabled();
+                    RefreshUI();
+                });
+            _chaosPanelBg.AddObject(_btnChaosToggle);
+
+            float presetX = 301f * u;
+            _btnChaosPreset = CreateCompactButton("预设: 常规", presetX, 7f * u, leftW - presetX - 9f * u, 24f * u, 9.5f * u,
+                Color.FromArgb(220, 26, 36, 48), BorderGoldColor, Color.Khaki, CycleChaosPresetClicked);
+            _chaosPanelBg.AddObject(_btnChaosPreset);
+
+            float row1Y = 36f * u;
+            float row2Y = 63f * u;
+            float row3Y = 90f * u;
+            float labelW = 190f * u;
+            float rowH = 23f * u;
+
+            _chaosLatencyText = CreateTextBox(12f * u, row1Y, labelW, rowH, 9.5f * u, FontStyle.Regular, Color.WhiteSmoke,
+                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
+            _chaosPanelBg.AddObject(_chaosLatencyText);
+
+            _chaosJitterText = CreateTextBox(12f * u, row2Y, labelW, rowH, 9.5f * u, FontStyle.Regular, Color.WhiteSmoke,
+                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
+            _chaosPanelBg.AddObject(_chaosJitterText);
+
+            _chaosLossText = CreateTextBox(12f * u, row3Y, labelW, rowH, 9.5f * u, FontStyle.Regular, Color.WhiteSmoke,
+                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
+            _chaosPanelBg.AddObject(_chaosLossText);
+
+            float btnStartX = 206f * u;
+            float btnW = 44f * u;
+            float btnGap = 4f * u;
+            float btnH = 22f * u;
+
+            AddChaosStepRow(row1Y, btnStartX, btnW, btnGap, btnH, u,
+                new[] { ("-50", -50), ("-10", -10), ("+10", 10), ("+50", 50) },
+                delta => AdjustChaosLatency(delta));
+
+            AddChaosStepRow(row2Y, btnStartX, btnW, btnGap, btnH, u,
+                new[] { ("-20", -20), ("-5", -5), ("+5", 5), ("+20", 20) },
+                delta => AdjustChaosJitter(delta));
+
+            AddChaosStepRow(row3Y, btnStartX, btnW, btnGap, btnH, u,
+                new[] { ("-5%", -5), ("-1%", -1), ("+1%", 1), ("+5%", 5) },
+                delta => AdjustChaosLossPercent(delta));
+
+            _chaosClientNoteText = CreateTextBox(btnStartX, row1Y, leftW - btnStartX - 10f * u, row3Y + rowH - row1Y,
+                9.5f * u, FontStyle.Regular, Color.LightSteelBlue, ContentAlignment.MiddleLeft,
+                Color.FromArgb(180, 18, 25, 32), BorderDimColor, 1f);
+            _chaosPanelBg.AddObject(_chaosClientNoteText);
+        }
+
+        private static void AddChaosStepRow(
+            float y, float startX, float w, float gap, float h, float u,
+            (string Text, int Delta)[] steps, Action<int> onDelta)
+        {
+            Color bg = Color.FromArgb(230, 28, 36, 44);
+            Color border = Color.FromArgb(180, 110, 130, 150);
+            for (int i = 0; i < steps.Length; i++)
+            {
+                int d = steps[i].Delta;
+                var b = CreateCompactButton(steps[i].Text, startX + i * (w + gap), y, w, h, 9f * u,
+                    bg, border, Color.WhiteSmoke, () => onDelta(d));
+                _chaosAdjustButtons.Add(b);
+                _chaosPanelBg.AddObject(b);
+            }
         }
 
         private static void RefreshUI()
@@ -690,8 +841,9 @@ namespace TABCoopMod.UI
 
             if (isHost)
             {
-                bool isSteam = CoopSessionManager.Transport is SteamP2PTransport;
-                bool lobbyValid = CoopSessionManager.Transport is SteamP2PTransport st && st.CurrentLobbyId.IsValid();
+                var unwrapped = CoopSessionManager.UnwrapTransport();
+                bool isSteam = unwrapped is SteamP2PTransport;
+                bool lobbyValid = unwrapped is SteamP2PTransport st && st.CurrentLobbyId.IsValid();
                 _btnInviteSteam.Enabled = isSteam && lobbyValid;
                 GameBridge.SetZXButtonSteamText(_btnInviteSteam,
                     (isSteam && !lobbyValid) ? "正在创建大厅..." : "邀请 Steam 好友");
@@ -725,6 +877,141 @@ namespace TABCoopMod.UI
                     : "  点击上方按钮切换准备状态。\n  全员准备后房主即可选图或读档，\n  加载完毕后将自动同步并开始。")
                     + $"\n\n  新生存预设: {presetDesc}\n  (读档与自定义地图始终保持原版)");
             }
+
+            RefreshLocalChaosPanel(isHost);
+        }
+
+        private static void RefreshLocalChaosPanel(bool isHost)
+        {
+            if (_chaosPanel == null) return;
+            bool isLocal = CoopSessionManager.IsLocalLoopbackSession;
+            _chaosPanel.Visible = isLocal;
+            if (!isLocal) return;
+
+            bool enabled = CoopSessionManager.LocalChaosEnabled;
+            int lat = CoopSessionManager.LocalChaosLatencyMs;
+            int jit = CoopSessionManager.LocalChaosJitterMs;
+            double loss = CoopSessionManager.LocalChaosLossRate;
+            bool lockedByEnv = CoopSessionManager.IsLocalChaosLockedByEnv;
+            bool canEdit = isHost && !lockedByEnv;
+
+            SetSolidBoxColors(_chaosPanelBg, PanelBgColor, enabled ? Color.Orange : BorderDimColor);
+            SetDynamicText(_chaosTitleText,
+                enabled ? "网络波动模拟 (模拟中)" : "网络波动模拟 (本地测试)",
+                textColor: enabled ? Color.Orange : Color.Gold);
+
+            int estRtt = lat * 2 + jit;
+            SetDynamicText(_chaosLatencyText, $"单向延迟: {lat} ms (RTT~{estRtt}ms)",
+                textColor: enabled ? Color.WhiteSmoke : Color.Silver);
+            SetDynamicText(_chaosJitterText, $"随机抖动: 0~{jit} ms",
+                textColor: enabled ? Color.WhiteSmoke : Color.Silver);
+            SetDynamicText(_chaosLossText, $"随机丢包: {loss * 100.0:0.#} %",
+                textColor: enabled ? Color.WhiteSmoke : Color.Silver);
+
+            _btnChaosToggle.Visible = canEdit;
+            _btnChaosPreset.Visible = canEdit;
+            foreach (var b in _chaosAdjustButtons)
+            {
+                b.Visible = canEdit;
+            }
+
+            if (canEdit)
+            {
+                _chaosClientNoteText.Visible = false;
+                if (enabled)
+                {
+                    SetCompactButtonStyle(_btnChaosToggle, "模拟: 已开启",
+                        Color.FromArgb(220, 140, 74, 18), Color.FromArgb(240, 178, 96, 26),
+                        Color.Orange, Color.Gold, Color.White);
+                }
+                else
+                {
+                    SetCompactButtonStyle(_btnChaosToggle, "模拟: 已关闭",
+                        Color.FromArgb(220, 34, 42, 50), Color.FromArgb(235, 50, 62, 74),
+                        BorderDimColor, Color.Silver, Color.Silver);
+                }
+
+                string presetName = DetectChaosPresetName(lat, jit, loss);
+                SetCompactButtonStyle(_btnChaosPreset, $"预设: {presetName}",
+                    Color.FromArgb(220, 26, 40, 54), Color.FromArgb(240, 38, 58, 78),
+                    BorderGoldColor, Color.Gold, Color.Khaki);
+            }
+            else
+            {
+                _chaosClientNoteText.Visible = true;
+                string note = lockedByEnv
+                    ? "  已由环境变量 TABCOOP_CHAOS\n  锁定参数，界面不可修改。"
+                    : (enabled
+                        ? "  当前已开启（由房主同步）\n  双向均已应用相同延迟/丢包，\n  顶部状态栏可查看实时 RTT。"
+                        : "  当前未开启（由房主同步）\n  房主可在左侧实时开启并调参。");
+                SetDynamicText(_chaosClientNoteText, note,
+                    textColor: enabled ? Color.Orange : Color.LightSteelBlue,
+                    borderColor: enabled ? Color.Orange : BorderDimColor);
+            }
+        }
+
+        private static string DetectChaosPresetName(int lat, int jit, double loss)
+        {
+            foreach (var p in ChaosPresets)
+            {
+                if (p.LatencyMs == lat && p.JitterMs == jit && Math.Abs(p.LossRate - loss) < 0.0005)
+                    return p.Name;
+            }
+            return "自定义";
+        }
+
+        private static void CycleChaosPresetClicked()
+        {
+            if (!CoopSessionManager.IsLocalLoopbackSession || !CoopSessionManager.Transport.IsHost || CoopSessionManager.IsLocalChaosLockedByEnv)
+                return;
+
+            int curIdx = -1;
+            for (int i = 0; i < ChaosPresets.Length; i++)
+            {
+                var p = ChaosPresets[i];
+                if (p.LatencyMs == CoopSessionManager.LocalChaosLatencyMs
+                    && p.JitterMs == CoopSessionManager.LocalChaosJitterMs
+                    && Math.Abs(p.LossRate - CoopSessionManager.LocalChaosLossRate) < 0.0005)
+                {
+                    curIdx = i;
+                    break;
+                }
+            }
+            int nextIdx = (curIdx + 1) % ChaosPresets.Length;
+            var next = ChaosPresets[nextIdx];
+            CoopSessionManager.SetLocalChaosSettings(true, next.LatencyMs, next.JitterMs, next.LossRate);
+            RefreshUI();
+        }
+
+        private static void AdjustChaosLatency(int deltaMs)
+        {
+            CoopSessionManager.SetLocalChaosSettings(
+                CoopSessionManager.LocalChaosEnabled,
+                CoopSessionManager.LocalChaosLatencyMs + deltaMs,
+                CoopSessionManager.LocalChaosJitterMs,
+                CoopSessionManager.LocalChaosLossRate);
+            RefreshUI();
+        }
+
+        private static void AdjustChaosJitter(int deltaMs)
+        {
+            CoopSessionManager.SetLocalChaosSettings(
+                CoopSessionManager.LocalChaosEnabled,
+                CoopSessionManager.LocalChaosLatencyMs,
+                CoopSessionManager.LocalChaosJitterMs + deltaMs,
+                CoopSessionManager.LocalChaosLossRate);
+            RefreshUI();
+        }
+
+        private static void AdjustChaosLossPercent(int deltaPct)
+        {
+            double nextLoss = CoopSessionManager.LocalChaosLossRate + deltaPct / 100.0;
+            CoopSessionManager.SetLocalChaosSettings(
+                CoopSessionManager.LocalChaosEnabled,
+                CoopSessionManager.LocalChaosLatencyMs,
+                CoopSessionManager.LocalChaosJitterMs,
+                nextLoss);
+            RefreshUI();
         }
 
         private static void UpdateRoomBanner(bool isHost, int peerCount)
@@ -803,7 +1090,7 @@ namespace TABCoopMod.UI
                 return $"当前玩家: {persona} ({steamTag})   |   状态: 未加入房间";
             }
 
-            string mode = CoopSessionManager.Transport is LocalTcpLoopbackTransport ? "本地回环" : "Steam P2P";
+            string mode = CoopSessionManager.IsLocalLoopbackSession ? "本地回环" : "Steam P2P";
             var diag = CoopSessionManager.Transport as ITransportDiagnostics;
             string pathText = diag != null ? diag.ActivePathSummary : mode;
             double showRtt = (diag != null && diag.ActiveDirectRttMs > 0.0)
@@ -864,7 +1151,7 @@ namespace TABCoopMod.UI
 
         private static void InviteSteamClicked()
         {
-            if (CoopSessionManager.Transport is SteamP2PTransport steamTrans && steamTrans.CurrentLobbyId.IsValid())
+            if (CoopSessionManager.UnwrapTransport() is SteamP2PTransport steamTrans && steamTrans.CurrentLobbyId.IsValid())
             {
                 steamTrans.OpenSteamInviteOverlay();
             }
@@ -949,6 +1236,58 @@ namespace TABCoopMod.UI
             return btn;
         }
 
+        private static CompactLobbyButton CreateCompactButton(
+            string text, float x, float y, float w, float h, float fontSize,
+            Color bgColor, Color borderColor, Color textColor, Action onClick)
+        {
+            var lbl = CreateTextBox(0f, 0f, w, h, fontSize, FontStyle.Bold, textColor,
+                ContentAlignment.MiddleCenter, bgColor, borderColor, 1f);
+            lbl.Text = text;
+
+            var btn = new CompactLobbyButton
+            {
+                X = x,
+                Y = y,
+                Width = w,
+                Height = h,
+                Image = null,
+                Border = null,
+                Label = lbl,
+                BaseBg = bgColor,
+                HoverBg = Color.FromArgb(240, Math.Min(255, bgColor.R + 24), Math.Min(255, bgColor.G + 24), Math.Min(255, bgColor.B + 24)),
+                BaseBorder = borderColor,
+                HoverBorder = Color.Gold,
+                TextColor = textColor
+            };
+            btn.AddObject(lbl);
+            btn.Activated += _ =>
+            {
+                try
+                {
+                    onClick?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Error($"[CoopLobbyWindow] CompactButton '{text}' action failed", ex);
+                }
+            };
+            return btn;
+        }
+
+        private static void SetCompactButtonStyle(
+            CompactLobbyButton btn, string text,
+            Color baseBg, Color hoverBg, Color baseBorder, Color hoverBorder, Color textColor)
+        {
+            if (btn == null || btn.Label == null) return;
+            btn.BaseBg = baseBg;
+            btn.HoverBg = hoverBg;
+            btn.BaseBorder = baseBorder;
+            btn.HoverBorder = hoverBorder;
+            btn.TextColor = textColor;
+            bool hover = btn.Enabled && btn.Iluminated;
+            SetDynamicText(btn.Label, text, textColor, hover ? hoverBorder : baseBorder, hover ? hoverBg : baseBg);
+        }
+
         private static void ResetTextSurface(DXTextObject obj)
         {
             if (obj == null || obj.Image == null) return;
@@ -978,19 +1317,26 @@ namespace TABCoopMod.UI
             DXTextObject obj,
             string text,
             Color? textColor = null,
-            Color? borderColor = null)
+            Color? borderColor = null,
+            Color? bgColor = null)
         {
             if (obj == null) return;
             string desired = text ?? string.Empty;
             bool colorChanged =
                 (textColor.HasValue && obj.TextRenderer.ColorText != textColor.Value) ||
-                (borderColor.HasValue && obj.TextRenderer.ColorAreaBorder != borderColor.Value);
+                (borderColor.HasValue && obj.TextRenderer.ColorAreaBorder != borderColor.Value) ||
+                (bgColor.HasValue && obj.TextRenderer.ColorBackground != bgColor.Value);
             bool textChanged = !string.Equals(obj.Text, desired, StringComparison.Ordinal);
 
             if (!colorChanged && !textChanged) return;
 
             if (textColor.HasValue) obj.TextRenderer.ColorText = textColor.Value;
             if (borderColor.HasValue) obj.TextRenderer.ColorAreaBorder = borderColor.Value;
+            if (bgColor.HasValue)
+            {
+                obj.TextRenderer.ColorBackground = bgColor.Value;
+                obj.TextRenderer.MakeTransparent = bgColor.Value == Color.Transparent;
+            }
 
             if (!textChanged)
             {

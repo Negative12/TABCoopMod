@@ -291,6 +291,7 @@ namespace TABCoopMod.Testing
                 ["commandCenterExtraWorkers"] = ccExtraWorkers,
                 ["commandCenterExtraFood"] = ccExtraFood,
                 ["balancePreset"] = Sync.CoopSessionManager.BalancePreset.ToString(),
+                ["hudDiag"] = GameBridge.GetHudDiagSummary(),
                 ["gold"] = GameBridge.GetLevelInt("Gold"),
                 ["wood"] = GameBridge.GetLevelInt("Wood"),
                 ["stone"] = GameBridge.GetLevelInt("Stone"),
@@ -678,6 +679,12 @@ namespace TABCoopMod.Testing
                 ["survivalGenBusy"] = GameBridge.SurvivalGenInProgress,
                 ["survivalGenOk"] = GameBridge.SurvivalGenLastOk,
                 ["survivalGenError"] = GameBridge.SurvivalGenLastError ?? "",
+                ["isLocalLoopback"] = Sync.CoopSessionManager.IsLocalLoopbackSession,
+                ["chaosEnabled"] = Sync.CoopSessionManager.LocalChaosEnabled,
+                ["chaosLatencyMs"] = Sync.CoopSessionManager.LocalChaosLatencyMs,
+                ["chaosJitterMs"] = Sync.CoopSessionManager.LocalChaosJitterMs,
+                ["chaosLossRate"] = Sync.CoopSessionManager.LocalChaosLossRate,
+                ["smoothedRttMs"] = Sync.CoopSessionManager.CurrentSmoothedRttMs,
                 ["peers"] = peers
             };
         }
@@ -731,6 +738,20 @@ namespace TABCoopMod.Testing
                         ["max"] = res.MaxPlayers,
                         ["phase"] = res.RoomPhase,
                         ["hostName"] = res.HostName
+                    };
+                case "set_chaos":
+                    Sync.CoopSessionManager.SetLocalChaosSettings(
+                        GetBool(args, "enabled", Sync.CoopSessionManager.LocalChaosEnabled),
+                        GetInt(args, "latencyMs", Sync.CoopSessionManager.LocalChaosLatencyMs),
+                        GetInt(args, "jitterMs", Sync.CoopSessionManager.LocalChaosJitterMs),
+                        GetFloat(args, "lossRate", (float)Sync.CoopSessionManager.LocalChaosLossRate));
+                    return new Dictionary<string, object>
+                    {
+                        ["ok"] = true,
+                        ["enabled"] = Sync.CoopSessionManager.LocalChaosEnabled,
+                        ["latencyMs"] = Sync.CoopSessionManager.LocalChaosLatencyMs,
+                        ["jitterMs"] = Sync.CoopSessionManager.LocalChaosJitterMs,
+                        ["lossRate"] = Sync.CoopSessionManager.LocalChaosLossRate
                     };
                 default:
                     bool ok = CoopLobbyWindow.InvokeTestAction(act);

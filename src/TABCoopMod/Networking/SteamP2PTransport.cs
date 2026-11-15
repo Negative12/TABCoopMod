@@ -84,6 +84,8 @@ namespace TABCoopMod.Networking
 
         public static void PumpSteamCallbacksIfNeeded(INetworkTransport activeTransport)
         {
+            while (activeTransport is ChaosTransport ct)
+                activeTransport = ct.InnerTransport;
             if (activeTransport is SteamP2PTransport) return;
             try
             {
@@ -251,8 +253,8 @@ namespace TABCoopMod.Networking
             }
             _currentLobbyId = new CSteamID(param.m_ulSteamIDLobby);
             SteamMatchmaking.SetLobbyData(_currentLobbyId, "tab_coop_host", SteamUser.GetSteamID().m_SteamID.ToString());
-            SteamMatchmaking.SetLobbyData(_currentLobbyId, "tab_coop_ver", "0.1.0");
-            ModLogger.Info($"[SteamP2PTransport] Steam Lobby created! LobbyID={_currentLobbyId.m_SteamID}");
+            SteamMatchmaking.SetLobbyData(_currentLobbyId, "tab_coop_ver", ModInfo.Version);
+            ModLogger.Info($"[SteamP2PTransport] Steam Lobby created! LobbyID={_currentLobbyId.m_SteamID} (ver={ModInfo.Version})");
         }
 
         private void OnLobbyEntered(LobbyEnter_t param)
@@ -305,7 +307,7 @@ namespace TABCoopMod.Networking
             SendToSteamUser(_hostSteamId, SendChannel.ReliableCommand, PacketType.HandshakeRequest, w =>
             {
                 w.Write(SteamFriends.GetPersonaName() ?? "Client");
-                w.Write("0.1.0");
+                w.Write(ModInfo.Version);
             });
         }
 
@@ -506,6 +508,10 @@ namespace TABCoopMod.Networking
             {
                 string clientName = reader.ReadString();
                 string ver = reader.ReadString();
+                if (!string.Equals(ver, ModInfo.Version, StringComparison.Ordinal))
+                    ModLogger.Warn($"[SteamP2PTransport] Version mismatch! Host={ModInfo.Version}, Client({clientName})={ver}");
+                else
+                    ModLogger.Info($"[SteamP2PTransport] Handshake from {clientName} (ver={ver}).");
                 byte assignedId = _nextPlayerId++;
                 _playerToSteamId[assignedId] = remoteSteamId;
 

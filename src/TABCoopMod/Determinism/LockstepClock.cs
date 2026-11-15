@@ -802,8 +802,10 @@ namespace TABCoopMod.Determinism
                         if (!Sync.CoopSessionManager.IsHostSnapshotReloadPending)
                         {
                             // Initial Host load before exporting coop_host_snapshot.zxsav: calibrate ID counter
-                            // without mutating DXLevel.Current.Random or level state prior to serialization.
+                            // and suppress the 6s intro zoom/blur/HUD slide so the exported snapshot retains
+                            // the normal starting camera and never leaks intro state into the snapshot reload.
                             CalibrateEntityIdCounterFromLoadedLevel(seed);
+                            GameBridge.DisableCameraIntroAnimation();
                             LoadingLevel = false;
                             PausedBySession = true;
                             var initHostGame = DXGame.Current;
@@ -823,7 +825,7 @@ namespace TABCoopMod.Determinism
                             }
                             GameBridge.ClearWaitCursor();
                             GameBridge.ClearLoadingFadeOverlay();
-                            ModLogger.Info($"[LockstepClock] Host initial level load complete: counter={_syncedEntityIdCounter}, holding paused for snapshot export.");
+                            ModLogger.Info($"[LockstepClock] Host initial level load complete: counter={_syncedEntityIdCounter}, holding paused for snapshot export. | {GameBridge.GetHudDiagSummary()}");
                             return;
                         }
 
@@ -846,7 +848,7 @@ namespace TABCoopMod.Determinism
                         }
                         GameBridge.ClearWaitCursor();
                         GameBridge.ClearLoadingFadeOverlay();
-                        ModLogger.Info($"[LockstepClock] Host snapshot reload complete: baseline applied (seed={seed}, counter={_syncedEntityIdCounter}).");
+                        ModLogger.Info($"[LockstepClock] Host snapshot reload complete: baseline applied (seed={seed}, counter={_syncedEntityIdCounter}). | {GameBridge.GetHudDiagSummary()}");
                         return;
                     }
 
@@ -3270,6 +3272,26 @@ namespace TABCoopMod.Determinism
         public static void Finalizer()
         {
             LockstepClock.ExitEntityBehaviourRngScope();
+        }
+    }
+
+    /// <summary>
+    /// Prevents the vanilla 6s New Game intro cinematic (5x camera zoom-out, RootObject blur, and
+    /// +300/-300*Unit HUD slide animation) from triggering during active Co-op or deterministic replay
+    /// sessions, including during the brief pre-ShowScene window when InitLevel enables CurrentGameSystem.
+    /// </summary>
+    [HarmonyPatch]
+    public static class DisableIntroCinematicInCoopPatch
+    {
+        public static MethodBase TargetMethod() =>
+            AccessTools.Method(Core.GameBridge.TypeZXSystemGameLevel, "OnSetCamera");
+
+        [HarmonyPrefix]
+        public static void Prefix(object __instance)
+        {
+            if (!Sync.CoopSessionManager.IsSessionActive && !LockstepClock.IsDeterministicModeActive)
+                return;
+            Core.GameBridge.EnforceDisabledCameraIntroForLevel(__instance);
         }
     }
 }

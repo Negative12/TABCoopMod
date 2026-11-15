@@ -61,6 +61,22 @@ namespace TABCoopMod.Sync
         public static CoopBalancePreset BalancePreset { get; private set; } = CoopBalancePreset.Balanced;
         public static string HostActionHint { get; private set; } = string.Empty;
         public static bool ShouldOpenLobbyOnMainMenu { get; set; }
+
+        // Local loopback network fluctuation simulation (only applies to LocalTcpLoopbackTransport).
+        public static bool LocalChaosEnabled { get; private set; }
+        public static int LocalChaosLatencyMs { get; private set; } = 80;
+        public static int LocalChaosJitterMs { get; private set; } = 20;
+        public static double LocalChaosLossRate { get; private set; } = 0.02;
+        public static bool IsLocalChaosLockedByEnv => TestHarnessConfig.HasChaos;
+        public static bool IsLocalLoopbackSession => UnwrapTransport() is LocalTcpLoopbackTransport;
+
+        public static INetworkTransport UnwrapTransport(INetworkTransport transport = null)
+        {
+            var t = transport ?? Transport;
+            while (t is ChaosTransport chaos)
+                t = chaos.InnerTransport;
+            return t;
+        }
         private static volatile bool _pendingClientReturnToMainMenu;
         private static volatile bool _suppressReturnNotice;
         private static readonly List<PeerInfo> _lobbyRoster = new List<PeerInfo>();
@@ -425,6 +441,45 @@ namespace TABCoopMod.Sync
                 : CoopBalancePreset.Balanced);
         }
 
+        private static ChaosConfig BuildLocalChaosConfig()
+        {
+            return new ChaosConfig
+            {
+                Enabled = LocalChaosEnabled,
+                LatencyMs = LocalChaosLatencyMs,
+                JitterMs = LocalChaosJitterMs,
+                LossRate = LocalChaosLossRate,
+                Seed = 12345
+            };
+        }
+
+        public static void SetLocalChaosSettings(bool enabled, int latencyMs, int jitterMs, double lossRate)
+        {
+            if (TestHarnessConfig.HasChaos) return;
+            if (IsSessionActive && (!Transport.IsHost || !IsLocalLoopbackSession)) return;
+
+            LocalChaosEnabled = enabled;
+            LocalChaosLatencyMs = Math.Max(0, Math.Min(500, latencyMs));
+            LocalChaosJitterMs = Math.Max(0, Math.Min(300, jitterMs));
+            LocalChaosLossRate = Math.Round(Math.Max(0.0, Math.Min(0.30, lossRate)), 3);
+
+            if (IsLocalLoopbackSession && Transport is ChaosTransport chaos)
+            {
+                chaos.UpdateConfig(BuildLocalChaosConfig());
+            }
+
+            if (IsSessionActive && Transport.IsHost && IsLocalLoopbackSession)
+            {
+                BroadcastLobbyRoster();
+            }
+            LobbyStateChanged?.Invoke();
+        }
+
+        public static void ToggleLocalChaosEnabled()
+        {
+            SetLocalChaosSettings(!LocalChaosEnabled, LocalChaosLatencyMs, LocalChaosJitterMs, LocalChaosLossRate);
+        }
+
         public static void BroadcastLobbyRoster()
         {
             if (!IsSessionActive || !Transport.IsHost) return;
@@ -457,6 +512,13 @@ namespace TABCoopMod.Sync
                     w.Write(p.IsReady);
                 }
                 w.Write((byte)BalancePreset);
+                if (IsLocalLoopbackSession && !TestHarnessConfig.HasChaos)
+                {
+                    w.Write(LocalChaosEnabled);
+                    w.Write(LocalChaosLatencyMs);
+                    w.Write(LocalChaosJitterMs);
+                    w.Write((float)LocalChaosLossRate);
+                }
             });
         }
 
@@ -689,8 +751,18 @@ namespace TABCoopMod.Sync
 
             if (TestHarnessConfig.HasChaos)
             {
-                transport = new ChaosTransport(transport, ChaosConfig.FromString(TestHarnessConfig.ChaosSpec));
+                var envCfg = ChaosConfig.FromString(TestHarnessConfig.ChaosSpec);
+                envCfg.Enabled = true;
+                LocalChaosEnabled = true;
+                LocalChaosLatencyMs = envCfg.LatencyMs;
+                LocalChaosJitterMs = envCfg.JitterMs;
+                LocalChaosLossRate = envCfg.LossRate;
+                transport = new ChaosTransport(transport, envCfg);
                 ModLogger.Info($"[CoopSessionManager] Chaos injection active: {TestHarnessConfig.ChaosSpec}");
+            }
+            else if (useLoopback)
+            {
+                transport = new ChaosTransport(transport, BuildLocalChaosConfig());
             }
             return transport;
         }
@@ -1255,6 +1327,10 @@ namespace TABCoopMod.Sync
 
         public static void OnFrameTick()
         {
+            var frameGame = DXGame.Current;
+            if (frameGame == null || frameGame.Disposing)
+                return;
+
             if (!TestHarnessConfig.Enabled && !TestHarnessConfig.ControlEnabled)
             {
                 SteamP2PTransport.PumpSteamCallbacksIfNeeded(Transport);
@@ -1279,7 +1355,7 @@ namespace TABCoopMod.Sync
 
             CoopLobbyWindow.Tick();
 
-            if (!IsSessionActive) return;
+            if (!IsSessionActive || Transport == null) return;
 
             // Deferred, top-of-frame (shallow stack) work: export never runs inside the loader
             // postfix; client load never runs inside packet delivery.
@@ -1298,11 +1374,14 @@ namespace TABCoopMod.Sync
                 BeginClientSnapshotLoad(path);
             }
 
-            Transport.PollEvents();
+            Transport?.PollEvents();
             ProbeNetworkRtt();
 
             // Keep the engine's loader fades advancing while the Client waits to enter the level.
             TickLoadingFade();
+
+            if (!IsSessionActive || Transport == null || DXGame.Current == null || DXGame.Current.Disposing)
+                return;
 
             // Keep Host paused and hold turn broadcasts while waiting for Host reload + Client ack.
             if (Transport.IsHost && (_hostWaitingOwnReload || _awaitingClientSnapshotAck))
@@ -1324,10 +1403,13 @@ namespace TABCoopMod.Sync
                 }
             }
 
-            if (!IsInSyncedLevel || GameBridge.CurrentLevelState == null)
+            if (!IsSessionActive || !IsInSyncedLevel || Transport == null || GameBridge.CurrentLevelState == null)
                 return;
 
             DrainAsyncQueues();
+
+            if (!IsSessionActive || !IsInSyncedLevel || Transport == null || GameBridge.CurrentLevelState == null)
+                return;
 
             // 1. Flush Client outgoing commands to Host
             if (!Transport.IsHost)
@@ -1774,6 +1856,21 @@ namespace TABCoopMod.Sync
                     {
                         BalancePreset = (CoopBalancePreset)r.ReadByte();
                     }
+                    if (r.BaseStream.Position + 13 <= r.BaseStream.Length && !TestHarnessConfig.HasChaos && IsLocalLoopbackSession)
+                    {
+                        bool chaosOn = r.ReadBoolean();
+                        int lat = r.ReadInt32();
+                        int jit = r.ReadInt32();
+                        float loss = r.ReadSingle();
+                        LocalChaosEnabled = chaosOn;
+                        LocalChaosLatencyMs = Math.Max(0, Math.Min(500, lat));
+                        LocalChaosJitterMs = Math.Max(0, Math.Min(300, jit));
+                        LocalChaosLossRate = Math.Round(Math.Max(0.0, Math.Min(0.30, (double)loss)), 3);
+                        if (Transport is ChaosTransport chaos)
+                        {
+                            chaos.UpdateConfig(BuildLocalChaosConfig());
+                        }
+                    }
                     Transport.SyncPeers(_lobbyRoster);
                     LobbyStateChanged?.Invoke();
                     break;
@@ -2083,7 +2180,7 @@ namespace TABCoopMod.Sync
                     if (rttMs < 0.0 || rttMs > 2000.0 || double.IsNaN(rttMs) || double.IsInfinity(rttMs))
                         break;
 
-                    double sample = Math.Min(rttMs, 400.0);
+                    double sample = Math.Min(rttMs, 1500.0);
                     if (_peerSmoothedRttMs.TryGetValue(senderId, out double prev))
                         _peerSmoothedRttMs[senderId] = 0.70 * prev + 0.30 * sample;
                     else

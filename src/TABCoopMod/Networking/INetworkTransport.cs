@@ -167,7 +167,7 @@ namespace TABCoopMod.Networking
             SendToPeer(1, SendChannel.ReliableCommand, PacketType.HandshakeRequest, w =>
             {
                 w.Write(Environment.UserName ?? "ClientPlayer");
-                w.Write("0.1.0");
+                w.Write(ModInfo.Version);
             });
         }
 
@@ -493,6 +493,10 @@ namespace TABCoopMod.Networking
             {
                 string clientName = reader.ReadString();
                 string version = reader.ReadString();
+                if (!string.Equals(version, ModInfo.Version, StringComparison.Ordinal))
+                    ModLogger.Warn($"[LocalTcpLoopbackTransport] Version mismatch! Host={ModInfo.Version}, Client({clientName})={version}");
+                else
+                    ModLogger.Info($"[LocalTcpLoopbackTransport] Handshake from {clientName} (ver={version}).");
                 var peer = new PeerInfo { PlayerId = senderId, PlayerName = $"{clientName}#{senderId}", IsReady = false };
                 _peers.RemoveAll(p => p.PlayerId == senderId);
                 _peers.Add(peer);

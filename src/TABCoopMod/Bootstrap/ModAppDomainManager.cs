@@ -49,6 +49,7 @@ namespace TABCoopMod.Bootstrap
                 {
                     AppDomain.CurrentDomain.AssemblyLoad -= OnAssemblyLoaded;
                     ModLogger.Info($"[AssemblyLoad] TheyAreBillions loaded: {loaded.FullName}");
+                    ModLogger.LogGameVersionInfo(loaded);
 
                     // Ensure <Module>..cctor runs first so embedded DXVision / Steamworks.NET resolvers are active
                     RuntimeHelpers.RunModuleConstructor(loaded.ManifestModule.ModuleHandle);

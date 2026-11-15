@@ -19,11 +19,26 @@ namespace TABCoopMod.Networking
     /// </summary>
     public sealed class ChaosConfig
     {
+        public bool Enabled = true;
         public int Seed = 12345;
         public int LatencyMs;
         public int JitterMs;
         public double LossRate;
         public readonly List<DisconnectWindow> DisconnectWindows = new List<DisconnectWindow>();
+
+        public ChaosConfig Clone()
+        {
+            var copy = new ChaosConfig
+            {
+                Enabled = Enabled,
+                Seed = Seed,
+                LatencyMs = LatencyMs,
+                JitterMs = JitterMs,
+                LossRate = LossRate
+            };
+            copy.DisconnectWindows.AddRange(DisconnectWindows);
+            return copy;
+        }
 
         public static ChaosConfig FromString(string spec)
         {
@@ -88,16 +103,20 @@ namespace TABCoopMod.Networking
         private readonly double _startTicks;
         private readonly List<PendingPacket> _queue = new List<PendingPacket>();
         private uint _rngState;
-        private double _lastReliableDeliverAt;
+        private readonly Dictionary<SendChannel, double> _lastReliableDeliverAt = new Dictionary<SendChannel, double>();
 
         public long Delivered { get; private set; }
         public long Dropped { get; private set; }
         public long Scheduled { get; private set; }
 
+        public INetworkTransport InnerTransport => _inner;
+        public ChaosConfig Config => _cfg;
+        public bool IsChaosActive => _cfg.Enabled && (_cfg.LatencyMs > 0 || _cfg.JitterMs > 0 || _cfg.LossRate > 0.0 || _cfg.DisconnectWindows.Count > 0);
+
         public ChaosTransport(INetworkTransport inner, ChaosConfig cfg)
         {
             _inner = inner ?? throw new ArgumentNullException(nameof(inner));
-            _cfg = cfg ?? new ChaosConfig();
+            _cfg = cfg != null ? cfg.Clone() : new ChaosConfig();
             _rngState = (uint)(_cfg.Seed == 0 ? 1 : _cfg.Seed);
             _startTicks = DXHelper_Environment.Ticks;
 
@@ -105,7 +124,45 @@ namespace TABCoopMod.Networking
             _inner.OnPeerConnected += p => OnPeerConnected?.Invoke(p);
             _inner.OnPeerDisconnected += id => OnPeerDisconnected?.Invoke(id);
 
-            ModLogger.Info($"[ChaosTransport] enabled: latency={_cfg.LatencyMs}ms jitter={_cfg.JitterMs}ms loss={_cfg.LossRate:P1} windows={_cfg.DisconnectWindows.Count} seed={_cfg.Seed}");
+            if (IsChaosActive)
+                ModLogger.Info($"[ChaosTransport] enabled: latency={_cfg.LatencyMs}ms jitter={_cfg.JitterMs}ms loss={_cfg.LossRate:P1} windows={_cfg.DisconnectWindows.Count} seed={_cfg.Seed}");
+            else
+                ModLogger.Info($"[ChaosTransport] attached (bypassed; ready for live toggle, default latency={_cfg.LatencyMs}ms jitter={_cfg.JitterMs}ms loss={_cfg.LossRate:P1})");
+        }
+
+        public void UpdateConfig(ChaosConfig newCfg)
+        {
+            if (newCfg == null) return;
+            int lat = Math.Max(0, newCfg.LatencyMs);
+            int jit = Math.Max(0, newCfg.JitterMs);
+            double loss = Math.Max(0.0, Math.Min(0.95, newCfg.LossRate));
+            bool changed =
+                _cfg.Enabled != newCfg.Enabled ||
+                _cfg.LatencyMs != lat ||
+                _cfg.JitterMs != jit ||
+                Math.Abs(_cfg.LossRate - loss) > 0.0001 ||
+                (newCfg.Seed != 0 && newCfg.Seed != _cfg.Seed) ||
+                _cfg.DisconnectWindows.Count != newCfg.DisconnectWindows.Count;
+
+            if (!changed) return;
+
+            _cfg.Enabled = newCfg.Enabled;
+            _cfg.LatencyMs = lat;
+            _cfg.JitterMs = jit;
+            _cfg.LossRate = loss;
+            if (newCfg.Seed != 0 && newCfg.Seed != _cfg.Seed)
+            {
+                _cfg.Seed = newCfg.Seed;
+                _rngState = (uint)_cfg.Seed;
+            }
+            _cfg.DisconnectWindows.Clear();
+            _cfg.DisconnectWindows.AddRange(newCfg.DisconnectWindows);
+
+            if (!IsChaosActive)
+            {
+                FlushQueuedImmediately();
+            }
+            ModLogger.Info($"[ChaosTransport] config updated: active={IsChaosActive} enabled={_cfg.Enabled} latency={_cfg.LatencyMs}ms jitter={_cfg.JitterMs}ms loss={_cfg.LossRate:P1}");
         }
 
         public bool IsActive => _inner.IsActive;
@@ -114,9 +171,22 @@ namespace TABCoopMod.Networking
         public IReadOnlyList<PeerInfo> ConnectedPeers => _inner.ConnectedPeers;
 
         public bool IsDirectConnected => (_inner as ITransportDiagnostics)?.IsDirectConnected ?? false;
-        public string ActivePathSummary => (_inner as ITransportDiagnostics)?.ActivePathSummary ?? "Local Loopback (Chaos)";
+        public string ActivePathSummary
+        {
+            get
+            {
+                string innerSummary = (_inner as ITransportDiagnostics)?.ActivePathSummary ?? "Local Loopback";
+                if (!IsChaosActive) return innerSummary;
+                return $"{innerSummary} [波动 {_cfg.LatencyMs}ms ±{_cfg.JitterMs}ms 丢包{_cfg.LossRate * 100.0:0.#}%]";
+            }
+        }
         public double ActiveDirectRttMs => (_inner as ITransportDiagnostics)?.ActiveDirectRttMs ?? 0.0;
-        public string GetDebugStatsLine() => (_inner as ITransportDiagnostics)?.GetDebugStatsLine() ?? "ChaosTransport";
+        public string GetDebugStatsLine()
+        {
+            string innerLine = (_inner as ITransportDiagnostics)?.GetDebugStatsLine() ?? "ChaosTransport";
+            if (!IsChaosActive) return innerLine;
+            return $"{innerLine} | Chaos(lat={_cfg.LatencyMs}ms, jit={_cfg.JitterMs}ms, loss={_cfg.LossRate:P1}, sent={Scheduled}, dlv={Delivered}, drop={Dropped})";
+        }
 
         public event Action<byte, PacketType, BinaryReader> OnPacketReceived;
         public event Action<PeerInfo> OnPeerConnected;
@@ -127,17 +197,34 @@ namespace TABCoopMod.Networking
 
         public void SendToPeer(byte targetPlayerId, SendChannel channel, PacketType type, Action<BinaryWriter> writePayload)
         {
+            if (!IsChaosActive)
+            {
+                FlushQueuedImmediately();
+                _inner.SendToPeer(targetPlayerId, channel, type, writePayload);
+                return;
+            }
             Schedule(false, false, targetPlayerId, 0, channel, type, Serialize(writePayload));
         }
 
         public void Broadcast(SendChannel channel, PacketType type, Action<BinaryWriter> writePayload)
         {
+            if (!IsChaosActive)
+            {
+                FlushQueuedImmediately();
+                _inner.Broadcast(channel, type, writePayload);
+                return;
+            }
             Schedule(true, false, 0, 0, channel, type, Serialize(writePayload));
         }
 
         public void PollEvents()
         {
             _inner.PollEvents();
+            if (!IsChaosActive)
+            {
+                FlushQueuedImmediately();
+                return;
+            }
             DeliverDue();
         }
 
@@ -169,9 +256,9 @@ namespace TABCoopMod.Networking
             double deliverAt = DXHelper_Environment.Ticks + delay;
             if (channel != SendChannel.UnreliableSequenced)
             {
-                if (deliverAt < _lastReliableDeliverAt)
-                    deliverAt = _lastReliableDeliverAt;
-                _lastReliableDeliverAt = deliverAt;
+                if (_lastReliableDeliverAt.TryGetValue(channel, out double lastAt) && deliverAt < lastAt)
+                    deliverAt = lastAt;
+                _lastReliableDeliverAt[channel] = deliverAt;
             }
 
             _queue.Add(new PendingPacket
@@ -216,23 +303,40 @@ namespace TABCoopMod.Networking
                 }
 
                 _queue.RemoveAt(i);
-
-                if (p.Incoming)
-                {
-                    using (var ms = new MemoryStream(p.Payload, false))
-                    using (var reader = new BinaryReader(ms))
-                    {
-                        OnPacketReceived?.Invoke(p.Sender, p.Type, reader);
-                    }
-                }
-                else
-                {
-                    if (p.Broadcast)
-                        _inner.Broadcast(p.Channel, p.Type, w => w.Write(p.Payload));
-                    else
-                        _inner.SendToPeer(p.Target, p.Channel, p.Type, w => w.Write(p.Payload));
-                }
+                DispatchPacket(p);
                 Delivered++;
+            }
+        }
+
+        private void FlushQueuedImmediately()
+        {
+            if (_queue.Count == 0) return;
+            _lastReliableDeliverAt.Clear();
+            while (_queue.Count > 0)
+            {
+                var p = _queue[0];
+                _queue.RemoveAt(0);
+                DispatchPacket(p);
+                Delivered++;
+            }
+        }
+
+        private void DispatchPacket(PendingPacket p)
+        {
+            if (p.Incoming)
+            {
+                using (var ms = new MemoryStream(p.Payload, false))
+                using (var reader = new BinaryReader(ms))
+                {
+                    OnPacketReceived?.Invoke(p.Sender, p.Type, reader);
+                }
+            }
+            else
+            {
+                if (p.Broadcast)
+                    _inner.Broadcast(p.Channel, p.Type, w => w.Write(p.Payload));
+                else
+                    _inner.SendToPeer(p.Target, p.Channel, p.Type, w => w.Write(p.Payload));
             }
         }
 
