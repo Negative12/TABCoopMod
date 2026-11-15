@@ -1,7 +1,7 @@
 # 09 — 多人执政官模式（Archon Mode）生存新局平衡性设计论证与留档
 
-> **整理日期**: 2026-11-14
-> **状态**: 设计论证留档（待后续版本按需排期实装，当前代码未启用）
+> **整理日期**: 2026-11-14（2026-11-15 更新实装、IL 边界修正与全图对比结果）
+> **状态**: 已实装并完成双开与 4 场景全图视觉验收（默认 `Co-op Balanced`，可在等候大厅切换 `Vanilla`）
 > **适用范围**: 仅针对多人联机下 **新建生存模式（New Survival Game）**；**现有存档加载（Load Save）** 与 **自定义地图（Custom Map）** 维持 $100\%$ 原版不做改动。
 
 ---
@@ -57,7 +57,7 @@
 | 陆地、草地、森林、石矿、铁矿、金矿 | **是（自动放大）** | 在有效矩形 `rectangleF` 内逐格按柏林噪声生成。 |
 | 油井（`OilSource`） | **是（近似按面积放大）** | 按 `NCellsPerOilSource`（默认 `48`）分块遍历有效可通行格生成。 |
 | 普通游荡僵尸（`LayerZombies`） | **是（自动放大）** | 遍历 `0..nCells` 有效连通格，按 `num43 = zXMapTheme.InfectedFactor * FactorZombiePopulation` 生成。 |
-| 感染者村庄（Doom Village） | **否（固定配置）** | 数量 `num9` 与半径 `num11` 均直接取自 `ZXMapTheme.NumDoomVillages` 与 `DoomVillagesSize`。**注意工程细节**：源码第 218 行限制村庄距基地的最大轴距为 `nCells / 2 - 60 - num11`；当底层 `nCells` 进位到 `512` 时该上限会放大到 `196 - num11`，实装时需用实际传入边长（`params.NCells / 2 - 60 - num11`）约束距离，避免村庄贴边生成。 |
+| 感染者村庄（Doom Village） | **否（固定配置）** | 数量 `num9` 与半径 `num11` 均直接取自 `ZXMapTheme.NumDoomVillages` 与 `DoomVillagesSize`。**已解决工程细节**：源码中村庄距基地最大轴距上限为 `nCells / 2 - 60 - num11`（同时渡鸦/遗迹上限为 `nCells / 4`）；当引擎把 `280`/`304` 对齐到 `512` 时未缩放的 `nCells` 会放大至 `196 - num11` 而失效，现已通过 [`SurvivalBalancePatch`](../src/TABCoopMod/Patches/SurvivalBalancePatch.cs) Transpiler 按 `TargetNCells` 等比缩回至 `74`（2P）/ `81`（3P）。 |
 | 拾取宝箱 & 食物/电力废墟 | **否（固定配置）** | 直接读取 `ZXMapTheme.NumTreasures`、`NumSuppyFood`、`NumSuppyEnergy`。 |
 | 巨型感染者 & 变异体 | **否（固定配置）** | 读取 `ZXMapTheme.NumInfectedGiants` 与 `NumInfectedMutants`，仅随 `FactorZombiePopulation` 阶梯翻倍。 |
 
@@ -155,3 +155,28 @@
 | **6. 游荡僵尸** | 噪声密度阈值 $\times 1.05 / 1.10$ | 密度 $1.00\times$<br>总量 $1.00\times$ | 密度 **$1.05\times$**<br>全图总量 **$1.26\times$** | 密度 **$1.10\times$**<br>全图总量 **$1.55\times$** | 保持开局家门口密度手感不变，全图总怪量随地图尺寸与难度自然放大 |
 | **7. 巨人 / 变异体 / 废墟** | 按面积倍率四舍五入 (`Math.Round`) | $1.00\times$ | **$\times 1.20$** (四舍五入) | **$\times 1.41$** (四舍五入) | 避免单数精英怪向上取整直接翻倍 |
 | **8. 尸潮强度** | `ZXLevelEvent.#=z0XSLMcBEuHC4` | $1.00\times$ | 前期 **$+10\%$**<br>中后期/最终 **$+20\%$** | 前期 **$+20\%$**<br>中后期/最终 **$+40\%$** | 前轻后重分段缩放，精确对齐复利雪球与地图资源增幅 |
+
+---
+
+## 5. 实装落点、边界修正与实测对比结果（2026-11-15）
+
+### 5.1 核心实现文件
+- [`Sync/CoopBalanceManager.cs`](../src/TABCoopMod/Sync/CoopBalanceManager.cs)：负责档案计算（2P `NCells=280` / 3P `NCells=304`）、生成期 `ZXMapTheme` 临时改写与 `finally` 还原、按面积缩放的游荡密度/精英/宝箱、半径放大的 `DoomVillagesSize`、`+2R` / `+2R+1S` 分簇出兵、`CommandCenterExtraWorkers/Food` 补偿与前后段 `ZXLevelEvent` 缩放。
+- [`Patches/SurvivalBalancePatch.cs`](../src/TABCoopMod/Patches/SurvivalBalancePatch.cs)：在房主新建生存生成阶段挂载 `Prefix`/`Postfix`/`Finalizer` 驱动，并通过 `[HarmonyTranspiler]`（实机日志 `doom=1, raven=1`）将 `MapGenerator.#=zEzgd90E=` 在 `gridNCells=512` 下的未缩放外环距离上限重写为按 `TargetNCells` 等比缩放的基准值（`GetEffectiveDoomVillageMaxDistBase`：`280 -> 74`、`304 -> 81`；`GetEffectiveQuarterNCells`：`280 -> 70`、`304 -> 76`）。
+- [`UI/CoopLobbyWindow.cs`](../src/TABCoopMod/UI/CoopLobbyWindow.cs) 与 [`Sync/CoopSessionManager.cs`](../src/TABCoopMod/Sync/CoopSessionManager.cs)：等候大厅新增房主可切换、客机只读同步的预设按钮（`Co-op Balanced` / `Vanilla`）。
+
+### 5.2 同一种子全图对比实测（`reports/panorama_comparison.html`）
+使用 [`scripts/generate_panorama_comparisons.ps1`](../scripts/generate_panorama_comparisons.ps1) 生成同一种子下 Vanilla 与 Co-op 的全图全景对比与定量指标（见 [`reports/panorama_metrics.json`](../reports/panorama_metrics.json) 与 [`reports/panorama_comparison.html`](../reports/panorama_comparison.html)）：
+
+| 场景 (`Seed`) | 档位 (`NCells` / 可玩宽) | 游荡僵尸总量 | 感染村镇建筑 (`DV`) | 关键变化摘要 |
+| :--- | :--- | :---: | :---: | :--- |
+| **BR 100% 暗黑荒原** (`202601`) | Vanilla `256` (`148`) | `5,198` | `7` | 基准地形与中环感染镇 |
+| **BR 100% 暗黑荒原** (`202601`) | **2P `280` (`164`)** / **3P `304` (`178`)** | `9,849` / `11,485` | **`7` / `7`** | Transpiler 修正前 2P 因贴边被截断为 `4`，修正后恢复完整 `7` 座中环建筑 |
+| **DS 120% 干旱高地** (`202602`) | Vanilla `256` vs **2P `280`** | `13,067` -> `17,370` | `64` -> `55` | 三座高密村镇均自然分布于中环（修正前被推到边界角落），石矿 `417 -> 602` |
+| **FA 120% 寒冰荒原** (`202603`) | Vanilla `256` vs **3P `304`** | `9,769` -> `17,448` | `3` -> `7` | 森林 `3,613 -> 5,706`，石/铁矿近翻倍，村镇位于中环内部 |
+| **VO 900% 剧毒荒原** (`202604`) | Vanilla `256` vs **2P `280`** / **3P `304`** | `15,652` -> `22,295` / `25,952` | `81` -> `95` / `115` | 保持单座巨型僵尸城视觉格局并温和扩大规模，且稳定位于可建造边界内 |
+
+### 5.3 双开端到端回归
+[`scripts/verify_new_survival_balance.ps1`](../scripts/verify_new_survival_balance.ps1)（`exit 0`）验证：
+- Host / Client 联机开启 2P Balanced 新生存局，两端同步校验 `NCells=280, levelNCells=512, extraW=2, extraF=0, Units=6R+1S+1CC`，解停运行后 `StateChecksum` 连续 `MATCH`；
+- 退回大厅切换为 `Vanilla` 预设重开，两端一致校验 `NCells=256, extraW=0, extraF=0, Units=4R+1S+1CC`，Host/Client 全程无 `ERROR`。

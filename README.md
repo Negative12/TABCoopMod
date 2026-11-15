@@ -53,6 +53,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install_mod.ps1
 | [`docs/06_PROJECT_STATUS.md`](docs/06_PROJECT_STATUS.md) | 实时状态 | **当前项目状态与门禁验收报告**：Gate A1/A2/B1/B2/C/D 实测结果、工程边界与下一步优先级。 |
 | [`docs/07_TESTING_AND_MCP.md`](docs/07_TESTING_AND_MCP.md) | 测试工具 | **自动化测试台与 MCP 操作指南**：17 个 MCP 工具、双进程回放验证、Loopback/Chaos 联机脚本与存档库。 |
 | [`docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md`](docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md) | 专题备忘 | **经典 RTS 同步机制对比与后续可复用优化评估**：引擎底层差异复盘与三梯度改造工程量评估。 |
+| [`docs/09_MULTIPLAYER_BALANCE_DESIGN.md`](docs/09_MULTIPLAYER_BALANCE_DESIGN.md) | 平衡设计 | **多人执政官模式生存新局平衡性设计论证与实测**：`280`/`304` 扩图、出兵/村庄/尸潮配平、Transpiler 边界修正与同种子全景对比。 |
 | [`docs/archive/`](docs/archive/ROOT_CAUSE_POSTMORTEMS.md) | 历史归档 | **疑难根因复盘与会话演进日志**：已解决的技术难题深挖档案（`ROOT_CAUSE_POSTMORTEMS.md`）与 S1~S6 里程碑记录。 |
 
 ---

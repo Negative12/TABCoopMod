@@ -159,3 +159,13 @@
 | `ZXSystemAudio` | `#=zas_QVHmVp4jw4ljVfQ==` 等 10 个方法（完整见 `ObfuscatedSymbols.cs` §10） | 音频随机选音与播放入口（`AudioRngIsolationPatch` 隔离 RNG） |
 | `SysColonists` | `#=zUJ8sfNZq6x5U` / `#=zTsexjauQRm5IZtGeraXJooM=` / `#=zt0FcM$Mg6$EPDdIcLavKxd4=` | 游标 / 列表 / 重建列表 |
 | `BHFarmer` / `ZXBehaviour` | `#=zK2CGzIZdW6uI$Q9jPNxMDPs=` / `#=zHKPHAW92Cyls` | 农场麦田寻格与 `BData` 所属实体获取 |
+
+### 4.7 生存新局生成、过渡切换与全图全景（同步 `ObfuscatedSymbols.cs` §15）
+
+| 类名 | 混淆成员名 | 语义与用途 |
+| :--- | :--- | :--- |
+| `MapGenerator` (`#=zyl_NPjjlA7DRfVtsRJCX1kN4BxSr`) | `#=zEzgd90E=` | 随机生存地图生成入口（`ZXRandomLevelParams`）；含非 2 的幂次地图升格 `512` 网格逻辑 |
+| `ZXMapTheme` | `#=z4k5FO$EclQhr` | 静态获取全生态主题配置字典/集合 |
+| `ZXLevelEvent` | `#=z0XSLMcBEuHC4` | 独立尸潮刷怪波次人口倍率缩放入口 |
+| `ZXGame` / `ProgressWindowHelper` | `#=z9DPDdq9qP9lZ` / `#=zzi2cl4h1HYA5cX8aaw==.#=z9gBNlmJCE1ly` | `AsyncTransition` 与异步进度窗（自动化无 UI 切图流程安全等待用） |
+| `ZXSystemGameLevel` | `#=z5NVIUf3bnsHNNo8FfA==` / `#=zwK_pUIeRBpbp` | 原生整图全屏全景导出（`CapturePanorama`）与进入关卡视图入口 |

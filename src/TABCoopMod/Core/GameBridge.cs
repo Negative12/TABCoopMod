@@ -89,6 +89,45 @@ namespace TABCoopMod.Core
         private static FieldInfo _fieldMovableTargetPos;
         private static bool _zombieAggroReflectionInit;
 
+        // 12. Random Survival Map Generator & Balance Scaling Handles
+        public static Type TypeZXMapGenerator { get; private set; }
+        public static Type TypeCommandCenter { get; private set; }
+        public static Type TypeRanger { get; private set; }
+        public static Type TypeSoldierRegular { get; private set; }
+        private static Type _typeZXRandomLevelParams;
+        private static Type _typeZXMapTheme;
+        private static Type _typeZXLevelExtension;
+        private static Type _typeZXMapDrawer;
+        private static Type _typeZXLevelEvent;
+        private static MethodInfo _methodMapGeneratorGenerate;
+        private static MethodInfo _methodZXMapThemeGetThemes;
+        private static MethodInfo _methodLevelEventScalePop;
+        private static MethodInfo _methodLevelSysCapturePanorama;
+        private static MethodInfo _methodLevelSysEnterGameView;
+        private static MethodInfo _mInitLevel;
+        private static Type _typeZXGameState;
+        private static PropertyInfo _propRandomParamsNCells;
+        private static PropertyInfo _propRandomParamsFactorDuration;
+        private static PropertyInfo _propRandomParamsFactorZombiePop;
+        private static PropertyInfo _propMapThemeDoomVillagesSize;
+        private static PropertyInfo _propMapThemeNumTreasures;
+        private static PropertyInfo _propMapThemeNumSuppyFood;
+        private static PropertyInfo _propMapThemeNumSuppyEnergy;
+        private static PropertyInfo _propMapThemeNumInfectedGiants;
+        private static PropertyInfo _propMapThemeNumInfectedMutants;
+        private static PropertyInfo _propMapThemeInfectedFactor;
+        private static PropertyInfo _propLevelExtMapDrawer;
+        private static PropertyInfo _propLevelExtLevelEvents;
+        private static PropertyInfo _propMapDrawerExtraEntities;
+        private static PropertyInfo _propMapDrawerLayerTerrain;
+        private static PropertyInfo _propMapDrawerLayerObjects;
+        private static PropertyInfo _propMapDrawerNCells;
+        private static PropertyInfo _propLevelEventStartTimeH;
+        private static PropertyInfo _propLevelEventGameTimeH;
+        private static PropertyInfo _propLevelEventFinalSwarm;
+        private static PropertyInfo _propLevelStateExtraWorkers;
+        private static PropertyInfo _propLevelStateExtraFood;
+
         private static MethodInfo _mCurCmd;
         private static MethodInfo _mCancelCur;
         private static MethodInfo _mCancelSlot;
@@ -311,6 +350,115 @@ namespace TABCoopMod.Core
                 Check(_methodLevelStateAvailFood, "ZXLevelState.AvailFood");
                 Check(_methodLevelStateAvailWorkers, "ZXLevelState.AvailWorkers");
                 Check(_methodLevelStateAvailEnergy, "ZXLevelState.AvailEnergy");
+
+                // 12. Random Survival Map Generator & Balance Scaling Handles
+                TypeZXMapGenerator = GameAssembly.GetType(ObfuscatedSymbols.Type_MapGenerator);
+                TypeCommandCenter = GameAssembly.GetType(ObfuscatedSymbols.Type_CommandCenter);
+                TypeRanger = GameAssembly.GetType(ObfuscatedSymbols.Type_Ranger);
+                TypeSoldierRegular = GameAssembly.GetType(ObfuscatedSymbols.Type_SoldierRegular);
+                _typeZXRandomLevelParams = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXRandomLevelParams);
+                _typeZXMapTheme = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXMapTheme);
+                _typeZXLevelExtension = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXLevelExtension);
+                _typeZXMapDrawer = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXMapDrawer);
+                _typeZXLevelEvent = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXLevelEvent);
+
+                _methodMapGeneratorGenerate = (TypeZXMapGenerator != null && _typeZXRandomLevelParams != null)
+                    ? AccessTools.Method(TypeZXMapGenerator, ObfuscatedSymbols.Method_MapGenerator_Generate, new[] { _typeZXRandomLevelParams })
+                    : null;
+                _methodZXMapThemeGetThemes = _typeZXMapTheme != null
+                    ? AccessTools.Method(_typeZXMapTheme, ObfuscatedSymbols.Method_ZXMapTheme_GetThemes, Type.EmptyTypes)
+                    : null;
+                _methodLevelEventScalePop = _typeZXLevelEvent != null
+                    ? AccessTools.Method(_typeZXLevelEvent, ObfuscatedSymbols.Method_ZXLevelEvent_ScalePopulation, new[] { typeof(float), typeof(int) })
+                    : null;
+                _methodLevelSysCapturePanorama = TypeZXSystemGameLevel != null
+                    ? AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_CapturePanorama, new[] { typeof(string), typeof(int) })
+                    : null;
+                _methodLevelSysEnterGameView = TypeZXSystemGameLevel != null
+                    ? AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_EnterGameView, Type.EmptyTypes)
+                    : null;
+                _mInitLevel = TypeZXSystemGameLevel != null
+                    ? AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_InitLevel, new[] { typeof(DXLevel) })
+                    : null;
+                _typeZXGameState = typeof(ZXGameState);
+
+                if (_typeZXRandomLevelParams != null)
+                {
+                    _propRandomParamsNCells = AccessTools.Property(_typeZXRandomLevelParams, "NCells");
+                    _propRandomParamsFactorDuration = AccessTools.Property(_typeZXRandomLevelParams, "FactorGameDuration");
+                    _propRandomParamsFactorZombiePop = AccessTools.Property(_typeZXRandomLevelParams, "FactorZombiePopulation");
+                }
+                if (_typeZXMapTheme != null)
+                {
+                    _propMapThemeDoomVillagesSize = AccessTools.Property(_typeZXMapTheme, "DoomVillagesSize");
+                    _propMapThemeNumTreasures = AccessTools.Property(_typeZXMapTheme, "NumTreasures");
+                    _propMapThemeNumSuppyFood = AccessTools.Property(_typeZXMapTheme, "NumSuppyFood");
+                    _propMapThemeNumSuppyEnergy = AccessTools.Property(_typeZXMapTheme, "NumSuppyEnergy");
+                    _propMapThemeNumInfectedGiants = AccessTools.Property(_typeZXMapTheme, "NumInfectedGiants");
+                    _propMapThemeNumInfectedMutants = AccessTools.Property(_typeZXMapTheme, "NumInfectedMutants");
+                    _propMapThemeInfectedFactor = AccessTools.Property(_typeZXMapTheme, "InfectedFactor");
+                }
+                if (_typeZXLevelExtension != null)
+                {
+                    _propLevelExtMapDrawer = AccessTools.Property(_typeZXLevelExtension, "MapDrawer");
+                    _propLevelExtLevelEvents = AccessTools.Property(_typeZXLevelExtension, "LevelEvents");
+                }
+                if (_typeZXMapDrawer != null)
+                {
+                    _propMapDrawerExtraEntities = AccessTools.Property(_typeZXMapDrawer, "ExtraEntities");
+                    _propMapDrawerLayerTerrain = AccessTools.Property(_typeZXMapDrawer, "LayerTerrain");
+                    _propMapDrawerLayerObjects = AccessTools.Property(_typeZXMapDrawer, "LayerObjects");
+                    _propMapDrawerNCells = AccessTools.Property(_typeZXMapDrawer, "NCells");
+                }
+                if (_typeZXLevelEvent != null)
+                {
+                    _propLevelEventStartTimeH = AccessTools.Property(_typeZXLevelEvent, "StartTimeH");
+                    _propLevelEventGameTimeH = AccessTools.Property(_typeZXLevelEvent, "GameTimeH");
+                    _propLevelEventFinalSwarm = AccessTools.Property(_typeZXLevelEvent, "FinalSwarm");
+                }
+                var lsType = LevelStateType ?? GameAssembly.GetType("ZX.ZXLevelState");
+                if (lsType != null)
+                {
+                    _propLevelStateExtraWorkers = AccessTools.Property(lsType, "CommandCenterExtraWorkers");
+                    _propLevelStateExtraFood = AccessTools.Property(lsType, "CommandCenterExtraFood");
+                }
+
+                Check(TypeZXMapGenerator, "Type RandomMapGenerator");
+                Check(_methodMapGeneratorGenerate, "RandomMapGenerator.Generate(ZXRandomLevelParams)");
+                Check(TypeCommandCenter, "Type ZX.Entities.CommandCenter");
+                Check(TypeRanger, "Type ZX.Entities.Ranger");
+                Check(TypeSoldierRegular, "Type ZX.Entities.SoldierRegular");
+                Check(_typeZXRandomLevelParams, "Type ZXRandomLevelParams");
+                Check(_propRandomParamsNCells, "ZXRandomLevelParams.NCells");
+                Check(_propRandomParamsFactorDuration, "ZXRandomLevelParams.FactorGameDuration");
+                Check(_propRandomParamsFactorZombiePop, "ZXRandomLevelParams.FactorZombiePopulation");
+                Check(_typeZXMapTheme, "Type ZXMapTheme");
+                Check(_methodZXMapThemeGetThemes, "ZXMapTheme.GetThemes");
+                Check(_propMapThemeDoomVillagesSize, "ZXMapTheme.DoomVillagesSize");
+                Check(_propMapThemeNumTreasures, "ZXMapTheme.NumTreasures");
+                Check(_propMapThemeNumSuppyFood, "ZXMapTheme.NumSuppyFood");
+                Check(_propMapThemeNumSuppyEnergy, "ZXMapTheme.NumSuppyEnergy");
+                Check(_propMapThemeNumInfectedGiants, "ZXMapTheme.NumInfectedGiants");
+                Check(_propMapThemeNumInfectedMutants, "ZXMapTheme.NumInfectedMutants");
+                Check(_propMapThemeInfectedFactor, "ZXMapTheme.InfectedFactor");
+                Check(_typeZXLevelExtension, "Type ZXLevelExtension");
+                Check(_propLevelExtMapDrawer, "ZXLevelExtension.MapDrawer");
+                Check(_propLevelExtLevelEvents, "ZXLevelExtension.LevelEvents");
+                Check(_typeZXMapDrawer, "Type ZXMapDrawer");
+                Check(_propMapDrawerExtraEntities, "ZXMapDrawer.ExtraEntities");
+                Check(_propMapDrawerLayerTerrain, "ZXMapDrawer.LayerTerrain");
+                Check(_propMapDrawerLayerObjects, "ZXMapDrawer.LayerObjects");
+                Check(_propMapDrawerNCells, "ZXMapDrawer.NCells");
+                Check(_typeZXLevelEvent, "Type ZXLevelEvent");
+                Check(_methodLevelEventScalePop, "ZXLevelEvent.ScalePopulation");
+                Check(_propLevelEventStartTimeH, "ZXLevelEvent.StartTimeH");
+                Check(_propLevelEventGameTimeH, "ZXLevelEvent.GameTimeH");
+                Check(_propLevelEventFinalSwarm, "ZXLevelEvent.FinalSwarm");
+                Check(_propLevelStateExtraWorkers, "ZXLevelState.CommandCenterExtraWorkers");
+                Check(_propLevelStateExtraFood, "ZXLevelState.CommandCenterExtraFood");
+                Check(_methodLevelSysCapturePanorama, "ZXSystemGameLevel.CapturePanorama");
+                Check(_methodLevelSysEnterGameView, "ZXSystemGameLevel.EnterGameView");
+                Check(_typeZXGameState, "Type ZXGameState");
 
                 if (missingCount == 0)
                 {
@@ -2815,6 +2963,530 @@ namespace TABCoopMod.Core
                     ent.HashCode = origHash;
                 }
             }
+        }
+
+        // ====================================================================
+        // Random Survival Map Generator & Balance Scaling Helpers
+        // ====================================================================
+
+        public static MethodInfo GetMapGeneratorMethod() => _methodMapGeneratorGenerate;
+
+        public static int GetRandomParamsNCells(object randomParams)
+        {
+            if (randomParams == null || _propRandomParamsNCells == null) return 256;
+            return (int)_propRandomParamsNCells.GetValue(randomParams);
+        }
+
+        public static void SetRandomParamsNCells(object randomParams, int nCells)
+        {
+            if (randomParams != null && _propRandomParamsNCells != null)
+                _propRandomParamsNCells.SetValue(randomParams, nCells);
+        }
+
+        public static float GetRandomParamsFactorGameDuration(object randomParams)
+        {
+            if (randomParams == null || _propRandomParamsFactorDuration == null) return 1f;
+            return (float)_propRandomParamsFactorDuration.GetValue(randomParams);
+        }
+
+        public static IDictionary GetMapThemesDictionary()
+        {
+            if (_methodZXMapThemeGetThemes == null) return null;
+            return _methodZXMapThemeGetThemes.Invoke(null, null) as IDictionary;
+        }
+
+        public struct MapThemeBalanceSnapshot
+        {
+            public object ThemeObj;
+            public DXRange<int> DoomVillagesSize;
+            public DXRange<int> NumTreasures;
+            public DXRange<int> NumSuppyFood;
+            public DXRange<int> NumSuppyEnergy;
+            public int NumInfectedGiants;
+            public int NumInfectedMutants;
+            public double InfectedFactor;
+        }
+
+        public static MapThemeBalanceSnapshot CaptureMapThemeSnapshot(object themeObj)
+        {
+            return new MapThemeBalanceSnapshot
+            {
+                ThemeObj = themeObj,
+                DoomVillagesSize = (DXRange<int>)_propMapThemeDoomVillagesSize.GetValue(themeObj),
+                NumTreasures = (DXRange<int>)_propMapThemeNumTreasures.GetValue(themeObj),
+                NumSuppyFood = (DXRange<int>)_propMapThemeNumSuppyFood.GetValue(themeObj),
+                NumSuppyEnergy = (DXRange<int>)_propMapThemeNumSuppyEnergy.GetValue(themeObj),
+                NumInfectedGiants = (int)_propMapThemeNumInfectedGiants.GetValue(themeObj),
+                NumInfectedMutants = (int)_propMapThemeNumInfectedMutants.GetValue(themeObj),
+                InfectedFactor = (double)_propMapThemeInfectedFactor.GetValue(themeObj)
+            };
+        }
+
+        public static void ApplyMapThemeValues(
+            object themeObj,
+            DXRange<int> doomVillagesSize,
+            DXRange<int> numTreasures,
+            DXRange<int> numSuppyFood,
+            DXRange<int> numSuppyEnergy,
+            int numInfectedGiants,
+            int numInfectedMutants,
+            double infectedFactor)
+        {
+            if (themeObj == null) return;
+            _propMapThemeDoomVillagesSize.SetValue(themeObj, doomVillagesSize);
+            _propMapThemeNumTreasures.SetValue(themeObj, numTreasures);
+            _propMapThemeNumSuppyFood.SetValue(themeObj, numSuppyFood);
+            _propMapThemeNumSuppyEnergy.SetValue(themeObj, numSuppyEnergy);
+            _propMapThemeNumInfectedGiants.SetValue(themeObj, numInfectedGiants);
+            _propMapThemeNumInfectedMutants.SetValue(themeObj, numInfectedMutants);
+            _propMapThemeInfectedFactor.SetValue(themeObj, infectedFactor);
+        }
+
+        public static void RestoreMapThemeSnapshot(MapThemeBalanceSnapshot snap)
+        {
+            ApplyMapThemeValues(
+                snap.ThemeObj,
+                snap.DoomVillagesSize,
+                snap.NumTreasures,
+                snap.NumSuppyFood,
+                snap.NumSuppyEnergy,
+                snap.NumInfectedGiants,
+                snap.NumInfectedMutants,
+                snap.InfectedFactor);
+        }
+
+        public static bool TryGetGeneratedLevelContext(
+            DXLevel level,
+            out object mapDrawer,
+            out List<DXEntity> extraEntities,
+            out DXGridLayerEnum<ZXMapLayerTerrainType> layerTerrain,
+            out DXGridLayerEnum<ZXMapLayerObjectType> layerObjects,
+            out int gridNCells,
+            out IList levelEvents)
+        {
+            mapDrawer = null;
+            extraEntities = null;
+            layerTerrain = null;
+            layerObjects = null;
+            gridNCells = 0;
+            levelEvents = null;
+
+            object ext = level?.Extension;
+            if (ext == null || (_typeZXLevelExtension != null && !_typeZXLevelExtension.IsInstanceOfType(ext)))
+                return false;
+
+            mapDrawer = _propLevelExtMapDrawer?.GetValue(ext);
+            levelEvents = _propLevelExtLevelEvents?.GetValue(ext) as IList;
+            if (mapDrawer == null) return false;
+
+            extraEntities = _propMapDrawerExtraEntities?.GetValue(mapDrawer) as List<DXEntity>;
+            layerTerrain = _propMapDrawerLayerTerrain?.GetValue(mapDrawer) as DXGridLayerEnum<ZXMapLayerTerrainType>;
+            layerObjects = _propMapDrawerLayerObjects?.GetValue(mapDrawer) as DXGridLayerEnum<ZXMapLayerObjectType>;
+            gridNCells = _propMapDrawerNCells != null ? (int)_propMapDrawerNCells.GetValue(mapDrawer) : level.NCells;
+            return extraEntities != null;
+        }
+
+        public static void ScaleLevelEventPopulation(object levelEvent, float factor, int maxPower)
+        {
+            if (levelEvent == null || _methodLevelEventScalePop == null) return;
+            _methodLevelEventScalePop.Invoke(levelEvent, new object[] { factor, maxPower });
+        }
+
+        public static void GetLevelEventTiming(object levelEvent, out int startTimeH, out int gameTimeH, out bool isFinalSwarm)
+        {
+            startTimeH = _propLevelEventStartTimeH != null ? (int)_propLevelEventStartTimeH.GetValue(levelEvent) : 0;
+            gameTimeH = _propLevelEventGameTimeH != null ? (int)_propLevelEventGameTimeH.GetValue(levelEvent) : 0;
+            isFinalSwarm = _propLevelEventFinalSwarm != null && (bool)_propLevelEventFinalSwarm.GetValue(levelEvent);
+        }
+
+        public static DXEntityTemplate GetEntityTemplateByType(Type entityType)
+        {
+            if (entityType == null || _methodGetTemplateFromEntityType == null) return null;
+            DXGame zxGame = ZXGameInstance;
+            if (zxGame == null) return null;
+            return _methodGetTemplateFromEntityType.Invoke(zxGame, new object[] { entityType }) as DXEntityTemplate;
+        }
+
+        public static bool AddLevelStateCommandCenterExtras(int addWorkers, int addFood)
+        {
+            object ls = CurrentLevelState;
+            if (ls == null || _propLevelStateExtraWorkers == null || _propLevelStateExtraFood == null) return false;
+
+            if (addWorkers != 0)
+            {
+                int curW = (int)_propLevelStateExtraWorkers.GetValue(ls);
+                _propLevelStateExtraWorkers.SetValue(ls, curW + addWorkers);
+            }
+            if (addFood != 0)
+            {
+                int curF = (int)_propLevelStateExtraFood.GetValue(ls);
+                _propLevelStateExtraFood.SetValue(ls, curF + addFood);
+            }
+            return true;
+        }
+
+        public static void GetLevelStateCommandCenterExtras(out int extraWorkers, out int extraFood)
+        {
+            extraWorkers = 0;
+            extraFood = 0;
+            object ls = CurrentLevelState;
+            if (ls == null) return;
+            if (_propLevelStateExtraWorkers != null) extraWorkers = (int)_propLevelStateExtraWorkers.GetValue(ls);
+            if (_propLevelStateExtraFood != null) extraFood = (int)_propLevelStateExtraFood.GetValue(ls);
+        }
+
+        public static bool CaptureMapPanorama(string outputPath, int resolution = 2048, bool revealFog = true)
+        {
+            var lvlSys = LevelSystemInstance;
+            if (lvlSys == null || _methodLevelSysCapturePanorama == null || DXLevel.Current == null)
+                return false;
+
+            FieldInfo progressWinField = null;
+            object prevProgressWin = null;
+            object tempProgressWin = null;
+            try
+            {
+                string dir = System.IO.Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrEmpty(dir)) System.IO.Directory.CreateDirectory(dir);
+
+                ClearLoadingFadeOverlay();
+                ClearWaitCursor();
+
+                // Cancel the 6-second New Game intro blur/cinematic so Paused frames are crisp.
+                AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_IntroCinematic)?.SetValue(null, false);
+                AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_ScreenAnim)?.SetValue(null, null);
+                var rootObj = DXScene.Current?.RootObject;
+                if (rootObj != null)
+                {
+                    rootObj.Blur = 0f;
+                    if (rootObj.State != null) rootObj.State.Blur = 0f;
+                }
+
+                if (revealFog)
+                {
+                    RevealAll(true);
+                    object ml = GetMapLayersInstance();
+                    if (ml != null)
+                    {
+                        SetInstanceBool(ml, "ShadowEnabled", false);
+                        AccessTools.Method(ml.GetType(), "OnFinishUpdate")?.Invoke(ml, null);
+                    }
+                    if (DXScene.Current != null && DXLevel.Current != null)
+                    {
+                        DXScene.Current.GlobalLightColor = DXLevel.Current.GlobalLightColor;
+                    }
+                }
+
+                var helperType = GameAssembly?.GetType(ObfuscatedSymbols.Type_ProgressWindowHelper);
+                progressWinField = helperType != null
+                    ? AccessTools.Field(helperType, ObfuscatedSymbols.Field_ProgressWindow_Current)
+                    : null;
+                if (progressWinField != null)
+                {
+                    prevProgressWin = progressWinField.GetValue(null);
+                    if (prevProgressWin == null)
+                    {
+                        var winType = GameAssembly?.GetType("ZX.GUI.ZXWindow");
+                        var ctors = winType?.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (ctors != null && ctors.Length > 0)
+                        {
+                            var ctor = ctors[0];
+                            var ps = ctor.GetParameters();
+                            var cArgs = new object[ps.Length];
+                            for (int i = 0; i < ps.Length; i++)
+                            {
+                                var pt = ps[i].ParameterType;
+                                if (pt == typeof(string)) cArgs[i] = "";
+                                else if (pt.IsEnum) cArgs[i] = Enum.ToObject(pt, 0);
+                                else if (ps[i].HasDefaultValue) cArgs[i] = ps[i].DefaultValue;
+                                else if (pt.IsValueType) cArgs[i] = Activator.CreateInstance(pt);
+                            }
+                            tempProgressWin = ctor.Invoke(cArgs);
+                            if (tempProgressWin is DXObject dxObj) dxObj.Visible = false;
+                            progressWinField.SetValue(null, tempProgressWin);
+                        }
+                    }
+                }
+
+                _methodLevelSysCapturePanorama.Invoke(lvlSys, new object[] { outputPath, resolution });
+                return System.IO.File.Exists(outputPath) || System.IO.File.Exists(System.IO.Path.ChangeExtension(outputPath, ".png"));
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error($"[GameBridge] CaptureMapPanorama({outputPath}) failed", ex);
+                return false;
+            }
+            finally
+            {
+                if (progressWinField != null && tempProgressWin != null)
+                {
+                    try { progressWinField.SetValue(null, prevProgressWin); } catch { }
+                    try { (tempProgressWin as IDisposable)?.Dispose(); } catch { }
+                }
+            }
+        }
+
+        public static volatile bool SurvivalGenInProgress;
+        public static volatile bool SurvivalGenLastOk;
+        public static volatile string SurvivalGenLastError;
+
+        public static bool StartSurvivalAsync(
+            int seed,
+            string themeName,
+            float factorZombiePop = 1f,
+            float factorDuration = 1f,
+            Sync.CoopBalancePreset? overridePreset = null,
+            int? overridePlayerCount = null)
+        {
+            if (SurvivalGenInProgress)
+            {
+                ModLogger.Warn("[GameBridge] StartSurvivalAsync: generation already in progress.");
+                return false;
+            }
+
+            try
+            {
+                if (TypeZXGame == null || TypeZXSystemGameLevel == null || _typeZXGameState == null ||
+                    _typeZXRandomLevelParams == null || _methodMapGeneratorGenerate == null || _mInitLevel == null)
+                {
+                    SurvivalGenLastError = "missing required bindings";
+                    ModLogger.Warn("[GameBridge] StartSurvivalAsync: missing required bindings.");
+                    return false;
+                }
+
+                SurvivalGenInProgress = true;
+                SurvivalGenLastOk = false;
+                SurvivalGenLastError = null;
+
+                if (DXModalScreen.IsInModal && DXModalScreen.CurrentModalObject != null)
+                {
+                    DXModalScreen.RemoveModal(DXModalScreen.CurrentModalObject);
+                }
+                PrepareForProgrammaticLoad();
+
+                var game = ZXGameInstance;
+                var asyncTransitionMethod = AccessTools.Method(
+                    TypeZXGame,
+                    ObfuscatedSymbols.Method_ZXGame_AsyncTransition,
+                    new[] { typeof(int), typeof(Action), typeof(Action), typeof(List<string>), typeof(bool) });
+                if (asyncTransitionMethod == null)
+                {
+                    SurvivalGenLastError = "missing ZXGame.AsyncTransition method";
+                    SurvivalGenInProgress = false;
+                    return false;
+                }
+
+                if (!Enum.TryParse<ZXMapThemeType>(themeName ?? "BR", true, out var themeType))
+                    themeType = ZXMapThemeType.BR;
+
+                var resetMethod = AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_ZXGame_ResetWorldState, Type.EmptyTypes);
+                var lsType = LevelStateType ?? GameAssembly.GetType("ZX.ZXLevelState");
+
+                MethodInfo loadGeneric = null;
+                foreach (var m in typeof(DXSystem).GetMethods(BindingFlags.Public | BindingFlags.Static))
+                {
+                    if (m.Name == "Load" && m.IsGenericMethodDefinition && m.GetParameters().Length == 1)
+                    {
+                        loadGeneric = m.MakeGenericMethod(TypeZXSystemGameLevel);
+                        break;
+                    }
+                }
+
+                object newSys = null;
+                DXLevel generated = null;
+                string workerErr = null;
+
+                Action workerAction = () =>
+                {
+                    try
+                    {
+                        ModLogger.Info($"[GameBridge] StartSurvivalAsync worker begin: theme={themeType}, seed={seed}, preset={overridePreset}, players={overridePlayerCount}");
+                        resetMethod?.Invoke(game, null);
+
+                        object gameState = Activator.CreateInstance(_typeZXGameState, $"Panorama_{themeType}_{seed}");
+                        AccessTools.Property(_typeZXGameState, "GameMode")?.SetValue(gameState, ZXGameModeType.Survival);
+                        AccessTools.Property(_typeZXGameState, "ChallengeType")?.SetValue(gameState, ZXGameChallengeType.Default);
+
+                        object randParams = Activator.CreateInstance(_typeZXRandomLevelParams);
+                        AccessTools.Property(_typeZXRandomLevelParams, "Seed")?.SetValue(randParams, seed);
+                        AccessTools.Property(_typeZXRandomLevelParams, "NCells")?.SetValue(randParams, 256);
+                        AccessTools.Property(_typeZXRandomLevelParams, "ThemeType")?.SetValue(randParams, themeType);
+                        AccessTools.Property(_typeZXRandomLevelParams, "FactorZombiePopulation")?.SetValue(randParams, factorZombiePop);
+                        AccessTools.Property(_typeZXRandomLevelParams, "FactorGameDuration")?.SetValue(randParams, factorDuration);
+                        AccessTools.Property(_typeZXRandomLevelParams, "Name")?.SetValue(randParams, $"Panorama_{themeType}_{seed}");
+                        AccessTools.Property(_typeZXGameState, "SurvivalModeParams")?.SetValue(gameState, randParams);
+
+                        AccessTools.Method(_typeZXGameState, ObfuscatedSymbols.Method_ZXGameState_SetCurrent, new[] { _typeZXGameState })
+                            ?.Invoke(null, new[] { gameState });
+
+                        object levelState = Activator.CreateInstance(lsType);
+                        AccessTools.Method(lsType, ObfuscatedSymbols.Method_ZXLevelState_SetCurrent, new[] { lsType })
+                            ?.Invoke(null, new[] { levelState });
+                        AccessTools.Method(lsType, ObfuscatedSymbols.Method_ZXLevelState_PreInit, Type.EmptyTypes)
+                            ?.Invoke(levelState, null);
+
+                        newSys = loadGeneric?.Invoke(null, new object[] { false });
+                        AccessTools.Property(TypeZXGame, "CurrentGameSystem")?.SetValue(game, newSys);
+
+                        Sync.CoopBalanceManager.TestOverridePreset = overridePreset;
+                        Sync.CoopBalanceManager.TestOverridePlayerCount = overridePlayerCount;
+
+                        ModLogger.Info("[GameBridge] StartSurvivalAsync worker calling MapGenerator.Generate...");
+                        generated = _methodMapGeneratorGenerate.Invoke(null, new[] { randParams }) as DXLevel;
+                        if (generated == null)
+                        {
+                            workerErr = "MapGenerator returned null";
+                        }
+                        else
+                        {
+                            ModLogger.Info($"[GameBridge] StartSurvivalAsync worker generated NCells={generated.NCells}, calling InitLevel...");
+                            _mInitLevel.Invoke(newSys, new object[] { generated });
+                            ModLogger.Info("[GameBridge] StartSurvivalAsync worker InitLevel completed.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        workerErr = ex.InnerException?.Message ?? ex.Message;
+                        ModLogger.Error("[GameBridge] StartSurvivalAsync worker failed", ex);
+                    }
+                    finally
+                    {
+                        Sync.CoopBalanceManager.TestOverridePreset = null;
+                        Sync.CoopBalanceManager.TestOverridePlayerCount = null;
+                    }
+                };
+
+                Action finishAction = () =>
+                {
+                    try
+                    {
+                        ModLogger.Info($"[GameBridge] StartSurvivalAsync finishAction: err={workerErr ?? "none"}, hasLevel={generated != null}");
+                        if (workerErr == null && generated != null && newSys != null)
+                        {
+                            _methodLevelSysEnterGameView?.Invoke(newSys, Type.EmptyTypes);
+                            ClearLoadingFadeOverlay();
+                            ClearWaitCursor();
+                            if (game != null) game.Paused = true;
+                            SurvivalGenLastOk = DXLevel.Current != null && CurrentLevelState != null;
+                            if (!SurvivalGenLastOk) SurvivalGenLastError = "DXLevel or LevelState null after EnterGameView";
+                        }
+                        else
+                        {
+                            SurvivalGenLastOk = false;
+                            SurvivalGenLastError = workerErr ?? "unknown worker failure";
+                        }
+                    }
+                    catch (Exception ex2)
+                    {
+                        SurvivalGenLastOk = false;
+                        SurvivalGenLastError = ex2.Message;
+                        ModLogger.Error("[GameBridge] StartSurvivalAsync completion failed", ex2);
+                    }
+                    finally
+                    {
+                        SurvivalGenInProgress = false;
+                    }
+                };
+
+                if (_propZXGameIsLoading == null)
+                    _propZXGameIsLoading = AccessTools.Property(TypeZXGame, "IsLoading");
+
+                asyncTransitionMethod.Invoke(game, new object[]
+                {
+                    20,
+                    workerAction,
+                    finishAction,
+                    new List<string> { "Generating panorama comparison map..." },
+                    true
+                });
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                SurvivalGenLastOk = false;
+                SurvivalGenLastError = ex.Message;
+                SurvivalGenInProgress = false;
+                ModLogger.Error("[GameBridge] StartSurvivalAsync failed", ex);
+                return false;
+            }
+        }
+
+        public static Dictionary<string, object> CollectCurrentMapMetrics()
+        {
+            var res = new Dictionary<string, object>();
+            object survivalParams = GetGameStateProperty("SurvivalModeParams");
+            int survivalNCells = survivalParams != null ? GetRandomParamsNCells(survivalParams) : (DXLevel.Current?.NCells ?? 0);
+            res["survivalNCells"] = survivalNCells;
+            res["gridNCells"] = DXLevel.Current?.NCells ?? 0;
+            res["playableAreaWidth"] = DXLevel.Current?.PlayableArea.Width ?? 0f;
+            res["theme"] = survivalParams != null ? AccessTools.Property(survivalParams.GetType(), "ThemeType")?.GetValue(survivalParams)?.ToString() : "";
+            res["seed"] = survivalParams != null ? AccessTools.Property(survivalParams.GetType(), "Seed")?.GetValue(survivalParams) : 0;
+
+            GetLevelStateCommandCenterExtras(out int ccW, out int ccF);
+            res["ccExtraWorkers"] = ccW;
+            res["ccExtraFood"] = ccF;
+
+            int rangers = 0, soldiers = 0, zombies = 0, giants = 0, mutants = 0;
+            int doomVillages = 0, oilSources = 0, pickables = 0, trees = 0, minerals = 0;
+            var nestType = GameAssembly?.GetType("ZX.Components.CInfectionNest");
+
+            if (DXGame.Current?.Entities != null)
+            {
+                foreach (var e in DXGame.Current.Entities)
+                {
+                    if (e == null || e.Disposed) continue;
+                    string tn = e.GetType().Name;
+                    if (tn == "Ranger") rangers++;
+                    else if (tn == "SoldierRegular") soldiers++;
+                    else if (tn == "OilSource") oilSources++;
+                    else if (tn.Contains("Giant") && _typeZombie != null && _typeZombie.IsInstanceOfType(e)) { giants++; zombies++; }
+                    else if (tn.Contains("Mutant") && _typeZombie != null && _typeZombie.IsInstanceOfType(e)) { mutants++; zombies++; }
+                    else if (_typeZombie != null && _typeZombie.IsInstanceOfType(e)) zombies++;
+                    else if (tn.Contains("Pickable") || tn.Contains("Item") || tn.Contains("Gold") && !tn.Contains("Mineral")) pickables++;
+                    else if (tn.Contains("Forest") || tn.Contains("Tree")) trees++;
+                    else if (tn.Contains("Mineral")) minerals++;
+
+                    if (nestType != null && e.Components != null && e.Components.Exists(c => c != null && nestType.IsInstanceOfType(c)))
+                        doomVillages++;
+                }
+            }
+
+            // Also count static map-layer mineral/forest cells from MapDrawer
+            int terrainTrees = 0, terrainGold = 0, terrainStone = 0, terrainIron = 0;
+            if (DXLevel.Current != null && TryGetGeneratedLevelContext(DXLevel.Current, out _, out _, out _, out var layerObj, out int gN, out _))
+            {
+                if (layerObj != null && gN > 0)
+                {
+                    for (int x = 0; x < gN; x++)
+                    {
+                        for (int y = 0; y < gN; y++)
+                        {
+                            var o = layerObj[x, y];
+                            if (o == ZXMapLayerObjectType.Tree) terrainTrees++;
+                            else if (o == ZXMapLayerObjectType.MineralGold) terrainGold++;
+                            else if (o == ZXMapLayerObjectType.MineralStone) terrainStone++;
+                            else if (o == ZXMapLayerObjectType.MineralIron) terrainIron++;
+                        }
+                    }
+                }
+            }
+
+            int levelEventsCount = GetLevelCollectionCount("LevelEvents");
+            res["rangers"] = rangers;
+            res["soldiers"] = soldiers;
+            res["zombiesTotal"] = zombies;
+            res["giants"] = giants;
+            res["mutants"] = mutants;
+            res["doomVillages"] = doomVillages;
+            res["oilSources"] = oilSources;
+            res["pickables"] = pickables;
+            res["terrainTreeCells"] = terrainTrees;
+            res["terrainGoldCells"] = terrainGold;
+            res["terrainStoneCells"] = terrainStone;
+            res["terrainIronCells"] = terrainIron;
+            res["levelEventsCount"] = levelEventsCount;
+            return res;
         }
     }
 }

@@ -235,5 +235,32 @@ namespace TABCoopMod.Core
         // ====================================================================
         public const string Method_ZXLevelState_IsChoosingMayor  = "#=zL2Yzn7nYwjqmjuOHNGOPtmw=";
         public const string Method_ZXLevelState_SetChoosingMayor = "#=zNc5a0Zvt_w5ui5CfZqiEAkE=";
+
+        // ====================================================================
+        // 15. Random Survival Map Generator & Balance Scaling
+        // ====================================================================
+        public const string Type_MapGenerator                  = "#=zyl_NPjjlA7DRfVtsRJCX1kN4BxSr";
+        public const string Method_MapGenerator_Generate       = "#=zEzgd90E=";
+        public const string Type_ZXRandomLevelParams           = "ZX.GameSystems.ZXRandomLevelParams";
+        public const string Type_ZXMapTheme                    = "ZX.GameSystems.ZXMapTheme";
+        public const string Method_ZXMapTheme_GetThemes        = "#=z4k5FO$EclQhr";
+        public const string Type_ZXLevelExtension              = "ZX.GameSystems.ZXLevelExtension";
+        public const string Type_ZXMapDrawer                   = "ZX.GameSystems.ZXMapDrawer";
+        public const string Type_ZXLevelEvent                  = "ZX.GameSystems.ZXLevelEvent";
+        public const string Method_ZXLevelEvent_ScalePopulation = "#=z0XSLMcBEuHC4";
+        public const string Type_CommandCenter                 = "ZX.Entities.CommandCenter";
+        public const string Type_Ranger                        = "ZX.Entities.Ranger";
+        public const string Type_SoldierRegular                = "ZX.Entities.SoldierRegular";
+        public const string Method_LevelSys_CapturePanorama    = "#=z5NVIUf3bnsHNNo8FfA==";
+        public const string Method_LevelSys_EnterGameView      = "#=zwK_pUIeRBpbp";
+        public const string Method_ZXGameState_SetCurrent      = "#=z2SXmL2Q=";
+        public const string Method_ZXLevelState_SetCurrent     = "#=z2SXmL2Q=";
+        public const string Method_ZXLevelState_PreInit        = "#=zF1YHTRUZSNRa";
+        public const string Method_ZXGame_ResetWorldState      = "#=zFi4bPug=";
+        public const string Method_ZXGame_AsyncTransition      = "#=z9DPDdq9qP9lZ";
+        public const string Type_ProgressWindowHelper          = "#=zzi2cl4h1HYA5cX8aaw==";
+        public const string Field_ProgressWindow_Current       = "#=z9gBNlmJCE1ly";
+        public const string Field_LevelSys_IntroCinematic      = "#=zfFXkD0aj1o9gF76ANQ==";
+        public const string Field_LevelSys_ScreenAnim          = "#=z40N_lqqB8daJ";
     }
 }

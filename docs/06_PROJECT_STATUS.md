@@ -1,7 +1,7 @@
 # 06 — 当前项目状态、门禁验收报告与下一步计划 (Project Status)
 
-> **最后更新**: 2026-11-14（完成文档 08 梯度一全部 4 项轻量优化：待建幽灵虚影与资源预扣、0ms 单位语音与回放去重、自适应 `InputDelayTicks (1..4)`）
-> **构建基线**: `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=57, failed-tolerant=0`**（新增主菜单/大厅、音频回放去重等补丁）。
+> **最后更新**: 2026-11-15（完成多人执政官生存新局平衡实装、非 2 的幂次地图感染镇/遗迹边界 Transpiler 修正、4 场景同种子全景图对比及双开平衡 E2E 回归）
+> **构建基线**: `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=58, failed-tolerant=0`**（新增 `SurvivalBalancePatch` 含 `MapGenerator` IL Transpiler）。
 > **历史过程记录**: 早期排查过程与会话 1~6 演进流水已归档至 [`docs/archive/`](archive/SESSION_CHANGELOG_S1_TO_S6.md)。
 
 ---
@@ -23,6 +23,7 @@
 | **并发冲突与建造实测** | `900survival.zxsav`（18,074 实体 / 双端 ControlServer 同时发令） | 同批 3 单位同时反向 `move_units` 按确定性顺序收敛至同一目标（`Host/Client` 均抵达 `(132.89, 114.81)`）；同格 `(120.5, 134.5)` 并发 `ZX.Entities.WallWood` 仅建 **1 座**（`WallWoodDelta Host=1 Client=1`，木材 `20→17` / 金币 `799` 一致，双端同报 `Rejected PlaceBuilding`）；不同格 `(122.5, 132.5)` 与 `(122.5, 134.5)` 并发均建 **2 座**（`WallWoodDelta Host=2 Client=2`，木材 `14→8` / 金币 `769`）；两轮共 28/28 + 22/22 次 `StateChecksum` 全部 `MATCH`，`0 ERROR`，`0 AsyncPosAlign` 强制瞬移 | ✅ 通过 |
 | **RTS 等候房间与全流程** | `verify_lobby_flow.ps1` + `1_Backup.zxsav` 双开实测 + `run_replay_verify.ps1` | 主菜单入口/探测本地主机（`1/3`、`InLobby`）/加入初态未准备与房主 `canStart=False` 门控/客机切换就绪解锁开局/复用单人[新建生存游戏]并验证每次滚动动态种子（`-1880374752` vs `859584069`）/取消自动回房间/读档进入同步对局（`3018` 实体对齐）/房主 `ReturnToMainMenu` 双端退回主菜单且保留网络、重置客机为未准备并重开大厅；12 张实机截图无斜切撕裂或换行，双进程回放 `120 ticks identical`、`0 ERROR` | ✅ 通过 |
 | **文档 08 梯度一优化** | `1_Backup.zxsav`（120 tick 回放 + `latency=90/0` 双开测试） | 完成本地待建幽灵虚影与 8 项资源预扣累计、0ms 本地单位语音即时确认与回放期 `UnitVoices` 去重、基于 RTT 探测的自适应 `InputDelayTicks (1..4)`；实测 `GameBridge 0 missing`、`Classes OK=57, failed-tolerant=0`、回放 `120 ticks identical`、`latency=90` 升档 `1 -> 4`、`latency=0` 自动降档 `3 -> 2` 且全程 `StateChecksum MATCH`（幽灵框视觉与语音听感待人工桌面确认） | ✅ 已实现 |
+| **生存新局平衡与全景对比** | `verify_new_survival_balance.ps1` + 4 场景同种子全景图（`BR`/`DS`/`FA`/`VO`） | 实装 `CoopBalanceManager` + `SurvivalBalancePatch`（含 `MapGenerator` 非 2 的幂次边界 Transpiler `doom=1, raven=1`）+ 大厅 `Co-op Balanced / Vanilla` 切换同步；`Classes OK=58, failed-tolerant=0`；双开校验 Balanced (`NCells=280, extraW=2, 6R+1S+1CC`, Tick 2/120/197 `StateChecksum MATCH`) 与 Vanilla 对照 (`NCells=256, 4R+1S+1CC`) 通过，`0 ERROR`；4 场景全景图目视确认感染村镇回到可建造区中环（`reports/panorama_comparison.html`） | ✅ 通过 |
 
 ---
 

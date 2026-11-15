@@ -30,8 +30,8 @@
 
 ### Phase 2 & Phase 3：网络同步、快照流与协同 UX 🔄
 - 网络传输：[`Networking/INetworkTransport.cs`](../src/TABCoopMod/Networking/INetworkTransport.cs)、[`Networking/SteamP2PTransport.cs`](../src/TABCoopMod/Networking/SteamP2PTransport.cs)、[`Networking/ChaosTransport.cs`](../src/TABCoopMod/Networking/ChaosTransport.cs)
-- 会话与同步：[`Sync/CoopSessionManager.cs`](../src/TABCoopMod/Sync/CoopSessionManager.cs)、[`Sync/PauseSyncController.cs`](../src/TABCoopMod/Sync/PauseSyncController.cs)
-- 交互拦截与渲染：[`Patches/PauseAndSpeedInputPatch.cs`](../src/TABCoopMod/Patches/PauseAndSpeedInputPatch.cs)、[`Patches/MayorSyncPatch.cs`](../src/TABCoopMod/Patches/MayorSyncPatch.cs)、[`UI/CoopLobbyWindow.cs`](../src/TABCoopMod/UI/CoopLobbyWindow.cs)、[`UI/AllyOverlayRenderer.cs`](../src/TABCoopMod/UI/AllyOverlayRenderer.cs)
+- 会话与同步：[`Sync/CoopSessionManager.cs`](../src/TABCoopMod/Sync/CoopSessionManager.cs)、[`Sync/PauseSyncController.cs`](../src/TABCoopMod/Sync/PauseSyncController.cs)、[`Sync/CoopBalanceManager.cs`](../src/TABCoopMod/Sync/CoopBalanceManager.cs)
+- 交互拦截与渲染：[`Patches/PauseAndSpeedInputPatch.cs`](../src/TABCoopMod/Patches/PauseAndSpeedInputPatch.cs)、[`Patches/MayorSyncPatch.cs`](../src/TABCoopMod/Patches/MayorSyncPatch.cs)、[`Patches/SurvivalBalancePatch.cs`](../src/TABCoopMod/Patches/SurvivalBalancePatch.cs)、[`UI/CoopLobbyWindow.cs`](../src/TABCoopMod/UI/CoopLobbyWindow.cs)、[`UI/AllyOverlayRenderer.cs`](../src/TABCoopMod/UI/AllyOverlayRenderer.cs)
 
 #### Phase 2/3 剩余待验收项
 1. **真人键鼠操作全链路验证持续收尾**：已实机修复视角移动卡顿、攻击动作中断、重叠建造透支、市长双倍奖励与客机高频修正抖动问题；待继续覆盖大波尸潮交战平滑体感与其余热键边界。

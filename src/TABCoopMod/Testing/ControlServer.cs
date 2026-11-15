@@ -118,7 +118,11 @@ namespace TABCoopMod.Testing
 
                         var pending = new PendingRequest { RequestJson = line, Done = new ManualResetEventSlim(false) };
                         _queue.Enqueue(pending);
-                        if (!pending.Done.Wait(10000))
+                        int waitMs = (line.IndexOf("start_survival_gen", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                      line.IndexOf("capture_panorama", StringComparison.OrdinalIgnoreCase) >= 0)
+                            ? 120000
+                            : 10000;
+                        if (!pending.Done.Wait(waitMs))
                         {
                             writer.WriteLine(ErrorResponse(0, "timeout waiting for game main thread (is the game paused/loading?)"));
                             continue;
@@ -207,6 +211,12 @@ namespace TABCoopMod.Testing
                     return GetLobbyState();
                 case "lobby_action":
                     return RunLobbyAction(args);
+                case "start_survival_gen":
+                    return StartSurvivalGen(args);
+                case "capture_panorama":
+                    return CapturePanoramaTool(args);
+                case "map_metrics":
+                    return GameBridge.CollectCurrentMapMetrics();
                 default: throw new InvalidOperationException($"unknown tool '{tool}'");
             }
         }
@@ -248,6 +258,8 @@ namespace TABCoopMod.Testing
             object survivalParams = GameBridge.GetGameStateProperty("SurvivalModeParams");
             var curSys = GameBridge.CurrentGameSystem as DXSystem;
 
+            GameBridge.GetLevelStateCommandCenterExtras(out int ccExtraWorkers, out int ccExtraFood);
+
             return new Dictionary<string, object>
             {
                 ["tick"] = game?.IAIterationInt ?? 0,
@@ -274,6 +286,11 @@ namespace TABCoopMod.Testing
                 ["inCampaign"] = inCampaign is bool ic && ic,
                 ["difficulty"] = difficulty?.ToString(),
                 ["survivalMode"] = survivalParams != null,
+                ["survivalNCells"] = survivalParams != null ? GameBridge.GetRandomParamsNCells(survivalParams) : 0,
+                ["levelNCells"] = DXLevel.Current?.NCells ?? 0,
+                ["commandCenterExtraWorkers"] = ccExtraWorkers,
+                ["commandCenterExtraFood"] = ccExtraFood,
+                ["balancePreset"] = Sync.CoopSessionManager.BalancePreset.ToString(),
                 ["gold"] = GameBridge.GetLevelInt("Gold"),
                 ["wood"] = GameBridge.GetLevelInt("Wood"),
                 ["stone"] = GameBridge.GetLevelInt("Stone"),
@@ -649,13 +666,18 @@ namespace TABCoopMod.Testing
                 ["inLevel"] = GameBridge.CurrentLevelState != null,
                 ["loading"] = GameBridge.IsGameLoading(),
                 ["anyModalOpen"] = GameBridge.IsAnyModalOpen(),
+                ["modalHasEditBox"] = DXVision.GUI.DXModalScreen.IsInModal && HasModalEditBox(DXVision.GUI.DXModalScreen.CurrentModalObject),
                 ["lobbyWindowOpen"] = CoopLobbyWindow.IsOpen,
                 ["sessionActive"] = Sync.CoopSessionManager.IsSessionActive,
                 ["isHost"] = Sync.CoopSessionManager.Transport?.IsHost ?? false,
                 ["localPlayerId"] = Sync.CoopSessionManager.Transport?.LocalPlayerId ?? 0,
                 ["roomPhase"] = Sync.CoopSessionManager.RoomPhase.ToString(),
                 ["canStart"] = Sync.CoopSessionManager.CanHostStartGame,
+                ["balancePreset"] = Sync.CoopSessionManager.BalancePreset.ToString(),
                 ["sessionSeed"] = Sync.CoopSessionManager.CurrentSessionSeed,
+                ["survivalGenBusy"] = GameBridge.SurvivalGenInProgress,
+                ["survivalGenOk"] = GameBridge.SurvivalGenLastOk,
+                ["survivalGenError"] = GameBridge.SurvivalGenLastError ?? "",
                 ["peers"] = peers
             };
         }
@@ -669,6 +691,26 @@ namespace TABCoopMod.Testing
                     var modal = DXVision.GUI.DXModalScreen.CurrentModalObject;
                     if (modal != null) GameBridge.CloseZXWindow(modal);
                     return new Dictionary<string, object> { ["ok"] = modal != null };
+                case "confirm_modal":
+                {
+                    var topModal = DXVision.GUI.DXModalScreen.CurrentModalObject;
+                    bool hasEdit = HasModalEditBox(topModal);
+                    string inputText = GetStr(args, "inputText");
+                    if (!string.IsNullOrEmpty(inputText) && topModal != null)
+                        SetModalEditBoxText(topModal, inputText);
+
+                    DXVision.GUI.DXButton confirmBtn = FindRightmostEnabledButton(topModal);
+                    ModLogger.Info($"[ControlServer] confirm_modal: topModal={topModal?.GetType().Name ?? "null"} hasEdit={hasEdit} inputText='{inputText ?? ""}' btn={(confirmBtn != null ? confirmBtn.X + "," + confirmBtn.Y : "null")}");
+                    if (confirmBtn != null)
+                    {
+                        confirmBtn.Activate();
+                        return new Dictionary<string, object> { ["ok"] = true, ["hasEdit"] = hasEdit, ["x"] = confirmBtn.X, ["y"] = confirmBtn.Y };
+                    }
+                    return new Dictionary<string, object> { ["ok"] = false, ["error"] = "no enabled confirm button found on modal" };
+                }
+                case "kick_fade":
+                    GameBridge.KickLoadingFade(700.0);
+                    return new Dictionary<string, object> { ["ok"] = true };
                 case "return_to_menu":
                     bool r = GameBridge.ReturnToMainMenu();
                     return new Dictionary<string, object> { ["ok"] = r };
@@ -694,6 +736,115 @@ namespace TABCoopMod.Testing
                     bool ok = CoopLobbyWindow.InvokeTestAction(act);
                     return new Dictionary<string, object> { ["ok"] = ok, ["action"] = act };
             }
+        }
+
+        private static object StartSurvivalGen(Dictionary<string, object> args)
+        {
+            int seed = GetInt(args, "seed", 12345);
+            string theme = GetStr(args, "theme") ?? "BR";
+            float factorPop = GetFloat(args, "factorPop", 1.0f);
+            float factorDuration = GetFloat(args, "factorDuration", 1.0f);
+            string mode = (GetStr(args, "mode") ?? "vanilla").ToLowerInvariant();
+
+            Sync.CoopBalancePreset preset = Sync.CoopBalancePreset.Vanilla;
+            int playerCount = 1;
+            if (mode == "coop2p")
+            {
+                preset = Sync.CoopBalancePreset.Balanced;
+                playerCount = 2;
+            }
+            else if (mode == "coop3p")
+            {
+                preset = Sync.CoopBalancePreset.Balanced;
+                playerCount = 3;
+            }
+
+            bool started = GameBridge.StartSurvivalAsync(seed, theme, factorPop, factorDuration, preset, playerCount);
+            return new Dictionary<string, object>
+            {
+                ["ok"] = started,
+                ["started"] = started,
+                ["mode"] = mode
+            };
+        }
+
+        private static object CapturePanoramaTool(Dictionary<string, object> args)
+        {
+            string path = GetStr(args, "path");
+            if (string.IsNullOrEmpty(path))
+                return new Dictionary<string, object> { ["ok"] = false, ["error"] = "path is required" };
+            int res = GetInt(args, "resolution", 2048);
+            bool reveal = GetBool(args, "reveal", true);
+
+            bool ok = GameBridge.CaptureMapPanorama(path, res, reveal);
+            return new Dictionary<string, object>
+            {
+                ["ok"] = ok,
+                ["path"] = path,
+                ["resolution"] = res
+            };
+        }
+
+        private static bool HasModalEditBox(DXVision.DXObject root)
+        {
+            if (root == null) return false;
+            var stack = new Stack<DXVision.DXObject>();
+            stack.Push(root);
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur == null) continue;
+                if (cur is DXVision.DXEditBoxObject) return true;
+                foreach (var child in cur.Children)
+                {
+                    if (child != null) stack.Push(child);
+                }
+            }
+            return false;
+        }
+
+        private static void SetModalEditBoxText(DXVision.DXObject root, string text)
+        {
+            if (root == null) return;
+            var stack = new Stack<DXVision.DXObject>();
+            stack.Push(root);
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur == null) continue;
+                if (cur is DXVision.DXEditBoxObject editBox)
+                {
+                    editBox.Text = text;
+                }
+                foreach (var child in cur.Children)
+                {
+                    if (child != null) stack.Push(child);
+                }
+            }
+        }
+
+        private static DXVision.GUI.DXButton FindRightmostEnabledButton(DXVision.DXObject root)
+        {
+            if (root == null) return null;
+            DXVision.GUI.DXButton best = null;
+            var stack = new Stack<DXVision.DXObject>();
+            stack.Push(root);
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur == null || !cur.Visible) continue;
+                if (cur is DXVision.GUI.DXButton btn && btn.Enabled)
+                {
+                    // Prefer the bottom-right confirmation button (higher Y, then higher X).
+                    if (best == null || btn.Y > best.Y + 5f || (Math.Abs(btn.Y - best.Y) <= 5f && btn.X > best.X))
+                        best = btn;
+                }
+                foreach (var child in cur.Children)
+                {
+                    if (child != null) stack.Push(child);
+                }
+            }
+            return best;
         }
 
         private static int CurrentTick() => DXGame.Current?.IAIterationInt ?? 0;

@@ -52,6 +52,7 @@ namespace TABCoopMod.Sync
         public static bool IsInSyncedLevel { get; private set; }
         public static int CurrentSessionSeed { get; private set; } = SyncSeed;
         public static LobbyRoomPhase RoomPhase { get; private set; } = LobbyRoomPhase.Idle;
+        public static CoopBalancePreset BalancePreset { get; private set; } = CoopBalancePreset.Balanced;
         public static string HostActionHint { get; private set; } = string.Empty;
         public static bool ShouldOpenLobbyOnMainMenu { get; set; }
         private static volatile bool _pendingClientReturnToMainMenu;
@@ -376,6 +377,24 @@ namespace TABCoopMod.Sync
             LobbyStateChanged?.Invoke();
         }
 
+        public static void SetBalancePreset(CoopBalancePreset preset)
+        {
+            if (!IsSessionActive || !Transport.IsHost) return;
+            if (BalancePreset == preset) return;
+            BalancePreset = preset;
+            ModLogger.Info($"[CoopSessionManager] BalancePreset changed to {preset}.");
+            BroadcastLobbyRoster();
+            LobbyStateChanged?.Invoke();
+        }
+
+        public static void ToggleBalancePreset()
+        {
+            if (!IsSessionActive || !Transport.IsHost) return;
+            SetBalancePreset(BalancePreset == CoopBalancePreset.Balanced
+                ? CoopBalancePreset.Vanilla
+                : CoopBalancePreset.Balanced);
+        }
+
         public static void BroadcastLobbyRoster()
         {
             if (!IsSessionActive || !Transport.IsHost) return;
@@ -407,6 +426,7 @@ namespace TABCoopMod.Sync
                     w.Write(p.SteamId64);
                     w.Write(p.IsReady);
                 }
+                w.Write((byte)BalancePreset);
             });
         }
 
@@ -438,6 +458,7 @@ namespace TABCoopMod.Sync
                 }
             }
             RoomPhase = LobbyRoomPhase.InLobby;
+            BalancePreset = CoopBalancePreset.Balanced;
             HostActionHint = string.Empty;
 
             CommandInterceptor.LocalPlayerId = 1;
@@ -459,6 +480,7 @@ namespace TABCoopMod.Sync
             Transport.ConnectToHost(targetAddressOrSteamId);
 
             RoomPhase = LobbyRoomPhase.InLobby;
+            BalancePreset = CoopBalancePreset.Balanced;
             HostActionHint = string.Empty;
             CommandInterceptor.OnLocalCommandCaptured = OnLocalCommandCaptured;
             ModLogger.Info($"[CoopSessionManager] Joining Session at '{targetAddressOrSteamId}' (Mode={(useLoopback ? "LocalLoopback" : "SteamP2P")}).");
@@ -474,6 +496,7 @@ namespace TABCoopMod.Sync
             CommandExecutor.IsReplayingCommand = false;
             IsInSyncedLevel = false;
             RoomPhase = LobbyRoomPhase.Idle;
+            BalancePreset = CoopBalancePreset.Balanced;
             HostActionHint = string.Empty;
             ShouldOpenLobbyOnMainMenu = false;
             _pendingClientReturnToMainMenu = false;
@@ -1580,6 +1603,10 @@ namespace TABCoopMod.Sync
                     }
                     RoomPhase = phase;
                     HostActionHint = hint;
+                    if (r.BaseStream.Position < r.BaseStream.Length)
+                    {
+                        BalancePreset = (CoopBalancePreset)r.ReadByte();
+                    }
                     Transport.SyncPeers(_lobbyRoster);
                     LobbyStateChanged?.Invoke();
                     break;

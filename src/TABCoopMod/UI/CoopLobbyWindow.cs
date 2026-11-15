@@ -78,6 +78,7 @@ namespace TABCoopMod.UI
         private static DXButton _btnHostLoadSave;
         private static DXButton _btnHostNewSurvival;
         private static DXButton _btnHostCustomMap;
+        private static DXButton _btnBalancePreset;
         private static DXButton _btnDisbandRoom;
         private static DXButton _btnClientReady;
         private static DXTextObject _clientHintText;
@@ -111,6 +112,10 @@ namespace TABCoopMod.UI
                     return true;
                 case "open_custom_map":
                     OpenHostSingleplayerMenu("房主正在选择自定义地图...", GameBridge.OpenMainMenuCustomMap, rollSeed: true);
+                    return true;
+                case "toggle_balance_preset":
+                    CoopSessionManager.ToggleBalancePreset();
+                    RefreshUI();
                     return true;
                 case "probe_now":
                     TriggerLocalProbeIfDue(force: true);
@@ -238,8 +243,8 @@ namespace TABCoopMod.UI
                         return;
                     }
 
-                    // Wait 350ms with no active modal (filters brief transition gaps between nested menus).
-                    if (now - _noModalSinceTicks >= 350.0)
+                    // Wait 950ms with no active modal (filters transition fade gaps between nested menus like SaveName InputBox -> New Survival Config).
+                    if (now - _noModalSinceTicks >= 950.0)
                     {
                         _reopenAfterSingleplayerMenu = false;
                         _noModalSinceTicks = -1.0;
@@ -494,8 +499,8 @@ namespace TABCoopMod.UI
             rightHeader.Text = "房间操作";
             _roomView.AddObject(rightHeader);
 
-            float ry = 40f * u;
-            float gapY = 12f * u;
+            float ry = 36f * u;
+            float gapY = 5f * u;
 
             _btnInviteSteam = CreateNativeButton("邀请 Steam 好友", rightX, ry, 0, InviteSteamClicked);
             _roomView.AddObject(_btnInviteSteam);
@@ -521,7 +526,15 @@ namespace TABCoopMod.UI
             });
             _roomView.AddObject(_btnHostCustomMap);
 
-            float leaveY = bodyH - _btnInviteSteam.Height - 10f * u;
+            ry += _btnHostCustomMap.Height + gapY;
+            _btnBalancePreset = CreateNativeButton("新局预设: 联机均衡", rightX, ry, -30, () =>
+            {
+                CoopSessionManager.ToggleBalancePreset();
+                RefreshUI();
+            }, smallFont: true);
+            _roomView.AddObject(_btnBalancePreset);
+
+            float leaveY = bodyH - _btnInviteSteam.Height - 4f * u;
             _btnDisbandRoom = CreateNativeButton("解散房间", rightX, leaveY, -120, LeaveOrDisbandClicked);
             _roomView.AddObject(_btnDisbandRoom);
 
@@ -530,7 +543,7 @@ namespace TABCoopMod.UI
             _roomView.AddObject(_btnClientReady);
 
             float hintY = 40f * u + _btnClientReady.Height + 16f * u;
-            _clientHintText = CreateTextBox(rightX, hintY, rightW, 130f * u, 10.5f * u, FontStyle.Regular, Color.LightGray,
+            _clientHintText = CreateTextBox(rightX, hintY, rightW, 170f * u, 10.5f * u, FontStyle.Regular, Color.LightGray,
                 ContentAlignment.MiddleLeft, PanelBgColor, BorderDimColor, 1f);
             _roomView.AddObject(_clientHintText);
 
@@ -655,11 +668,15 @@ namespace TABCoopMod.UI
             _btnHostLoadSave.Visible = isHost;
             _btnHostNewSurvival.Visible = isHost;
             _btnHostCustomMap.Visible = isHost;
+            _btnBalancePreset.Visible = isHost;
             _btnDisbandRoom.Visible = isHost;
 
             _btnClientReady.Visible = !isHost;
             _clientHintText.Visible = !isHost;
             _btnLeaveRoom.Visible = !isHost;
+
+            bool isBalanced = CoopSessionManager.BalancePreset == CoopBalancePreset.Balanced;
+            string presetDesc = CoopBalanceManager.DescribePreset(CoopSessionManager.BalancePreset);
 
             if (isHost)
             {
@@ -675,10 +692,13 @@ namespace TABCoopMod.UI
                 _btnHostLoadSave.Enabled = canStart && hasSaves;
                 _btnHostNewSurvival.Enabled = canStart;
                 _btnHostCustomMap.Enabled = canStart;
+                _btnBalancePreset.Enabled = true;
 
                 GameBridge.SetZXButtonSteamHue(_btnHostLoadSave, (canStart && hasSaves) ? -30 : 0);
                 GameBridge.SetZXButtonSteamHue(_btnHostNewSurvival, canStart ? -30 : 0);
                 GameBridge.SetZXButtonSteamHue(_btnHostCustomMap, canStart ? -30 : 0);
+                GameBridge.SetZXButtonSteamText(_btnBalancePreset, isBalanced ? "新局预设: 联机均衡" : "新局预设: 原版纯净");
+                GameBridge.SetZXButtonSteamHue(_btnBalancePreset, isBalanced ? -30 : 0);
             }
             else
             {
@@ -690,9 +710,10 @@ namespace TABCoopMod.UI
                     !joined ? "正在连接房主..." : (ready ? "取消准备" : "进入准备状态"));
                 GameBridge.SetZXButtonSteamHue(_btnClientReady, ready ? 0 : -30);
 
-                SetDynamicText(_clientHintText, CoopSessionManager.RoomPhase == LobbyRoomPhase.InGame
+                SetDynamicText(_clientHintText, (CoopSessionManager.RoomPhase == LobbyRoomPhase.InGame
                     ? "  房主当前正在对局中，\n  等待房主返回大厅或同步重连。"
-                    : "  点击上方按钮切换准备状态。\n  全员准备后房主即可选图或读档，\n  加载完毕后将自动同步并开始。");
+                    : "  点击上方按钮切换准备状态。\n  全员准备后房主即可选图或读档，\n  加载完毕后将自动同步并开始。")
+                    + $"\n\n  新生存预设: {presetDesc}\n  (读档与自定义地图始终保持原版)");
             }
         }
 
@@ -714,8 +735,9 @@ namespace TABCoopMod.UI
                 }
                 else
                 {
+                    string presetLabel = CoopBalanceManager.DescribePreset(CoopSessionManager.BalancePreset);
                     SetDynamicText(_roomStatusBanner,
-                        "全员已准备就绪！请在右侧选择 [从存档加载] 或 [新建游戏]",
+                        $"全员已准备就绪！请在右侧开启游戏\n新生存预设: {presetLabel}",
                         textColor: Color.SpringGreen, borderColor: Color.SpringGreen);
                 }
                 return;
@@ -780,6 +802,10 @@ namespace TABCoopMod.UI
         {
             if (!CoopSessionManager.CanHostStartGame) return;
 
+            // Ensure any return-to-menu fade-out object (#=zbvwh$ickzalV) is detached before opening
+            // singleplayer menus; otherwise ZXGame.#=zXAMaTPI= silently no-ops on Play if still in Scene.
+            GameBridge.ClearLoadingFadeOverlay();
+
             if (rollSeed)
             {
                 CoopSessionManager.RollNewGameSeed();
@@ -792,6 +818,7 @@ namespace TABCoopMod.UI
 
             CloseLobbyModalOnly(() =>
             {
+                GameBridge.ClearLoadingFadeOverlay();
                 bool ok = openMenuAction != null && openMenuAction();
                 if (!ok)
                 {
