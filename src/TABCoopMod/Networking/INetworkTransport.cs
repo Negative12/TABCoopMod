@@ -12,8 +12,9 @@ namespace TABCoopMod.Networking
 {
     public enum SendChannel : byte
     {
-        ReliableOrdered = 0,
-        UnreliableSequenced = 1
+        ReliableOrdered = 0,     // Bulk reliable (snapshots, PosDriftSync, checksums)
+        UnreliableSequenced = 1, // Unreliable low-latency (ally cursor/camera, RTT probe)
+        ReliableCommand = 2      // High-priority reliable commands (inputs, turns, lobby, session control)
     }
 
     public enum PacketType : byte
@@ -25,12 +26,16 @@ namespace TABCoopMod.Networking
         LobbyRosterSync = 0x08,
         ClientReadyState = 0x09,
         LobbyHostNotice = 0x0A,
+        DirectEndpointExchange = 0x0B,
+        DirectCutoverSync = 0x0C,
+        DirectFallbackBatch = 0x0D,
         SnapshotBegin = 0x10,
         SnapshotChunk = 0x11,
         SnapshotLoadedAck = 0x12,
         SessionStart = 0x13,
         ClientInputReport = 0x20,
         TurnInputBroadcast = 0x21,
+        HostPauseKeepalive = 0x22,
         StateChecksumReport = 0x30,
         DesyncDetectedAlert = 0x31,
         PosDriftSyncChunk = 0x32,
@@ -39,6 +44,14 @@ namespace TABCoopMod.Networking
         TacticalPing = 0x41,
         RttPing = 0x42,
         RttPong = 0x43
+    }
+
+    public interface ITransportDiagnostics
+    {
+        bool IsDirectConnected { get; }
+        string ActivePathSummary { get; }
+        double ActiveDirectRttMs { get; }
+        string GetDebugStatsLine();
     }
 
     public sealed class PeerInfo
@@ -81,7 +94,7 @@ namespace TABCoopMod.Networking
     /// Local TCP Loopback Transport (127.0.0.1:27099) for AI Agent automated dual-instance testing
     /// and local multi-window debugging without Steam Lobby overhead.
     /// </summary>
-    public sealed class LocalTcpLoopbackTransport : INetworkTransport
+    public sealed class LocalTcpLoopbackTransport : INetworkTransport, ITransportDiagnostics
     {
         public const int DefaultPort = 27099;
 
@@ -103,6 +116,11 @@ namespace TABCoopMod.Networking
         public bool IsHost { get; private set; }
         public byte LocalPlayerId { get; private set; } = 1;
         public IReadOnlyList<PeerInfo> ConnectedPeers => _peers;
+
+        public bool IsDirectConnected => IsActive;
+        public string ActivePathSummary => "Local Loopback (127.0.0.1)";
+        public double ActiveDirectRttMs => 0.0;
+        public string GetDebugStatsLine() => $"LocalTcpLoopback(Active={IsActive}, Peers={_peers.Count})";
 
         public event Action<byte, PacketType, BinaryReader> OnPacketReceived;
         public event Action<PeerInfo> OnPeerConnected;
@@ -146,7 +164,7 @@ namespace TABCoopMod.Networking
             IsActive = true;
 
             ModLogger.Info($"[LocalTcpLoopbackTransport] Connected to Host at {host}:{port}, sending HandshakeRequest...");
-            SendToPeer(1, SendChannel.ReliableOrdered, PacketType.HandshakeRequest, w =>
+            SendToPeer(1, SendChannel.ReliableCommand, PacketType.HandshakeRequest, w =>
             {
                 w.Write(Environment.UserName ?? "ClientPlayer");
                 w.Write("0.1.0");
@@ -479,7 +497,7 @@ namespace TABCoopMod.Networking
                 _peers.RemoveAll(p => p.PlayerId == senderId);
                 _peers.Add(peer);
 
-                SendToPeer(senderId, SendChannel.ReliableOrdered, PacketType.HandshakeAccept, w =>
+                SendToPeer(senderId, SendChannel.ReliableCommand, PacketType.HandshakeAccept, w =>
                 {
                     w.Write(senderId);
                     w.Write((byte)_peers.Count);

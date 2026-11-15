@@ -99,6 +99,8 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(object __0, PointF __1)
         {
+            if (TABCoopMod.Sync.CoopSessionManager.IsGameplayInputLocked)
+                return false;
             if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.IsSimulationThreadActive)
                 return true;
 
@@ -195,6 +197,8 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(object __instance, object __0, object __1)
         {
+            if (TABCoopMod.Sync.CoopSessionManager.IsGameplayInputLocked)
+                return false;
             if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || CommandInterceptor.InQueueAutoAdvance)
                 return true;
 
@@ -318,6 +322,7 @@ namespace TABCoopMod.Patches
                         TargetSize = targetSize,
                         TargetOrigin = targetOrigin
                     };
+                    GameBridge.PlayLocalBuildOrOrderFeedback(buildingType, preferCreationSound: true, fallbackExecutor: executor);
                     CommandInterceptor.OnLocalCommandCaptured?.Invoke(netBuild);
                     return false;
                 }
@@ -340,7 +345,11 @@ namespace TABCoopMod.Patches
             if (targetPos != PointF.Empty)
                 GameBridge.ShowGroundIndicatorForCommand(__instance, targetPos, targetEntityId != 0UL ? 0.6f : 1f);
 
-            GameBridge.PlayUnitCommandVoice(executor, GameBridge.IsAttackCommand(__instance));
+            Type orderEntityType = GameBridge.GetBuildingTypeFromCommand(__instance);
+            if (orderEntityType != null)
+                GameBridge.PlayLocalBuildOrOrderFeedback(orderEntityType, preferCreationSound: false, fallbackExecutor: executor);
+            else
+                GameBridge.PlayUnitCommandVoice(executor, GameBridge.IsAttackCommand(__instance));
 
             CommandInterceptor.OnLocalCommandCaptured?.Invoke(netCmd);
             return false;
@@ -390,6 +399,8 @@ namespace TABCoopMod.Patches
         public static bool Prefix(out List<GameBridge.CommandableSnapshot> __state)
         {
             __state = null;
+            if (TABCoopMod.Sync.CoopSessionManager.IsGameplayInputLocked)
+                return false;
             if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.IsSimulationThreadActive)
                 return true;
 
@@ -490,6 +501,8 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(DXComponent __instance)
         {
+            if (TABCoopMod.Sync.CoopSessionManager.IsGameplayInputLocked)
+                return false;
             if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.IsSimulationThreadActive)
                 return true;
 
@@ -504,6 +517,7 @@ namespace TABCoopMod.Patches
                 TargetSimTick = DXGame.Current?.IAIterationInt ?? 0,
                 ExecutorEntityIds = new[] { ent.ID }
             };
+            GameBridge.PlayLocalBuildOrOrderFeedback(null, preferCreationSound: false, fallbackExecutor: ent);
             CommandInterceptor.OnLocalCommandCaptured?.Invoke(netCmd);
             return false;
         }
@@ -519,6 +533,8 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(DXComponent __instance, int __0)
         {
+            if (TABCoopMod.Sync.CoopSessionManager.IsGameplayInputLocked)
+                return false;
             if (!CommandInterceptor.IsInterceptionEnabled || CommandExecutor.IsReplayingCommand || LockstepClock.IsSimulationThreadActive)
                 return true;
 
@@ -534,6 +550,7 @@ namespace TABCoopMod.Patches
                 ExecutorEntityIds = new[] { ent.ID },
                 QueueSlotIndex = (byte)__0
             };
+            GameBridge.PlayLocalBuildOrOrderFeedback(null, preferCreationSound: false, fallbackExecutor: ent);
             CommandInterceptor.OnLocalCommandCaptured?.Invoke(netCmd);
             return false;
         }
@@ -582,6 +599,35 @@ namespace TABCoopMod.Patches
                 return false;
             }
 
+            return true;
+        }
+    }
+
+    // 7. Suppress duplicate local Effects SFX when replaying our own 0ms-predicted build/order command.
+    [HarmonyPatch]
+    public static class Patch_Audio_SuppressReplayLocalBuildSfx
+    {
+        public static IEnumerable<MethodBase> TargetMethods()
+        {
+            Type audioType = GameBridge.TypeZXSystemAudio ?? AccessTools.TypeByName(ObfuscatedSymbols.Type_ZXSystemAudio);
+            if (audioType == null) yield break;
+
+            var mList = AccessTools.Method(audioType, ObfuscatedSymbols.Method_Audio_Play2DSound, new[] { typeof(ZXSoundCategory), typeof(List<string>) });
+            if (mList != null) yield return mList;
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.Low)]
+        public static bool Prefix(object[] __args)
+        {
+            if (!CommandExecutor.IsReplayingLocalBuild)
+                return true;
+
+            if (__args != null && __args.Length >= 1 && __args[0] is ZXSoundCategory cat
+                && (cat == ZXSoundCategory.Effects || cat == ZXSoundCategory.UnitVoices))
+            {
+                return false;
+            }
             return true;
         }
     }

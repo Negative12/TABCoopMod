@@ -26,6 +26,7 @@ scripts/.tools/
 
 # Logs
 *.log
+logs/
 
 # Dev & verification outputs
 tabcoop_shots/

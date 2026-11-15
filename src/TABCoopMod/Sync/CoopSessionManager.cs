@@ -50,6 +50,12 @@ namespace TABCoopMod.Sync
         public static INetworkTransport Transport { get; private set; }
         public static bool IsSessionActive => Transport != null && Transport.IsActive;
         public static bool IsInSyncedLevel { get; private set; }
+        public static bool IsInSyncBarrier =>
+            IsSessionActive && !IsInSyncedLevel &&
+            (_hostSnapshotReloadPending || _awaitingSnapshotLoad || _awaitingClientSnapshotAck
+             || _pendingClientSnapshotLoadPath != null || _pendingHostSnapshotExport
+             || GameBridge.CurrentLevelState != null);
+        public static bool IsGameplayInputLocked => IsInSyncBarrier;
         public static int CurrentSessionSeed { get; private set; } = SyncSeed;
         public static LobbyRoomPhase RoomPhase { get; private set; } = LobbyRoomPhase.Idle;
         public static CoopBalancePreset BalancePreset { get; private set; } = CoopBalancePreset.Balanced;
@@ -246,7 +252,21 @@ namespace TABCoopMod.Sync
         private static int _consecutiveProjOnlyMismatch;
         private static int _consecutiveHardMismatch;
         private static int _consecutivePosExceeded;
+        private static int _verifiedChecksumCycles;
+        private static bool _econEarlyBypassUsed;
+        private static bool _driftOnsetLogged;
         private static int _posSyncSeq;
+
+        // Modal / engine pause keepalive & E2E command latency telemetry
+        private static double _hostLastPauseKeepaliveSentTicks = -100000.0;
+        private static double _clientHostPauseKeepaliveUntilTicks = -1.0;
+        private static int _clientHostPausedTick = -1;
+        private static bool _clientHostInModalPause;
+        private static uint _nextTraceSeq;
+        private static readonly Dictionary<uint, long> _localCmdSentTs = new Dictionary<uint, long>();
+        private static readonly List<double> _cmdE2ELatencySamplesMs = new List<double>();
+        private static double _lastLatencyStatsLogTicks = -100000.0;
+
         private static readonly Dictionary<int, TickDigestRecord> _hostTickDigests = new Dictionary<int, TickDigestRecord>();
         private static readonly Dictionary<int, Dictionary<byte, TickDigestRecord>> _clientTickDigests =
             new Dictionary<int, Dictionary<byte, TickDigestRecord>>();
@@ -266,6 +286,16 @@ namespace TABCoopMod.Sync
             _consecutiveProjOnlyMismatch = 0;
             _consecutiveHardMismatch = 0;
             _consecutivePosExceeded = 0;
+            _verifiedChecksumCycles = 0;
+            _econEarlyBypassUsed = false;
+            _driftOnsetLogged = false;
+            _hostLastPauseKeepaliveSentTicks = -100000.0;
+            _clientHostPauseKeepaliveUntilTicks = -1.0;
+            _clientHostPausedTick = -1;
+            _clientHostInModalPause = false;
+            lock (_localCmdSentTs) _localCmdSentTs.Clear();
+            lock (_cmdE2ELatencySamplesMs) _cmdE2ELatencySamplesMs.Clear();
+            _lastLatencyStatsLogTicks = -100000.0;
             ResetTieredResyncState();
             _epochHasher.Reset();
             _hostTickDigests.Clear();
@@ -361,7 +391,7 @@ namespace TABCoopMod.Sync
                 }
             }
             Transport.SyncPeers(_lobbyRoster);
-            Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.ClientReadyState, w =>
+            Transport.SendToPeer(1, SendChannel.ReliableCommand, PacketType.ClientReadyState, w =>
             {
                 w.Write(ready);
             });
@@ -414,7 +444,7 @@ namespace TABCoopMod.Sync
             }
 
             Transport.SyncPeers(_lobbyRoster);
-            Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.LobbyRosterSync, w =>
+            Transport.Broadcast(SendChannel.ReliableCommand, PacketType.LobbyRosterSync, w =>
             {
                 w.Write((byte)RoomPhase);
                 w.Write(HostActionHint ?? string.Empty);
@@ -544,6 +574,12 @@ namespace TABCoopMod.Sync
                 Transport.Dispose();
                 Transport = null;
             }
+            try
+            {
+                if (DXGame.Current != null && !DXGame.Current.InputEnabled)
+                    DXGame.Current.InputEnabled = true;
+            }
+            catch { }
             LobbyStateChanged?.Invoke();
         }
 
@@ -557,6 +593,12 @@ namespace TABCoopMod.Sync
 
             IsInSyncedLevel = false;
             CommandInterceptor.IsInterceptionEnabled = false;
+            try
+            {
+                if (DXGame.Current != null && !DXGame.Current.InputEnabled)
+                    DXGame.Current.InputEnabled = true;
+            }
+            catch { }
             CommandInterceptor.SuppressIndividualMoveExecution = false;
             CommandInterceptor.InQueueAutoAdvance = false;
             CommandExecutor.IsReplayingCommand = false;
@@ -609,7 +651,7 @@ namespace TABCoopMod.Sync
 
                 if (!suppressBroadcast)
                 {
-                    Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.LobbyHostNotice, w =>
+                    Transport.Broadcast(SendChannel.ReliableCommand, PacketType.LobbyHostNotice, w =>
                     {
                         w.Write((byte)LobbyHostNoticeType.ReturnToLobby);
                     });
@@ -808,6 +850,7 @@ namespace TABCoopMod.Sync
                 IsInSyncedLevel = false;
                 CommandInterceptor.IsInterceptionEnabled = false;
                 LockstepClock.SetSessionPause(true);
+                if (DXGame.Current != null) DXGame.Current.InputEnabled = false;
 
                 _hostSnapshotReloadPending = true;
                 _hostWaitingOwnReload = true;
@@ -867,7 +910,7 @@ namespace TABCoopMod.Sync
 
             int startTick = DXGame.Current?.IAIterationInt ?? 0;
             long idCounter = LockstepClock.CurrentSyncedEntityIdCounter;
-            Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.SessionStart, w =>
+            Transport.Broadcast(SendChannel.ReliableCommand, PacketType.SessionStart, w =>
             {
                 w.Write(startTick);
                 w.Write(CurrentSessionSeed);
@@ -879,11 +922,28 @@ namespace TABCoopMod.Sync
 
         private static void OnLocalCommandCaptured(NetCommand cmd)
         {
+            if (IsGameplayInputLocked)
+            {
+                ModLogger.Warn($"[CoopSessionManager] Dropped local command {cmd?.Type} during sync barrier.");
+                return;
+            }
+
             if (!IsSessionActive || !IsInSyncedLevel)
             {
                 // Single-player deterministic test mode: execute immediately
                 CommandExecutor.Execute(cmd);
                 return;
+            }
+
+            if (cmd != null && cmd.TraceId == 0)
+            {
+                cmd.TraceId = ++_nextTraceSeq;
+                if (cmd.TraceId == 0) cmd.TraceId = ++_nextTraceSeq;
+                lock (_localCmdSentTs)
+                {
+                    if (_localCmdSentTs.Count > 512) _localCmdSentTs.Clear();
+                    _localCmdSentTs[cmd.TraceId] = Stopwatch.GetTimestamp();
+                }
             }
 
             if (Transport.IsHost)
@@ -1015,7 +1075,35 @@ namespace TABCoopMod.Sync
                 }
 
                 foreach (var cmd in due)
+                {
+                    if (cmd != null && cmd.TraceId != 0 && Transport != null && cmd.PlayerId == Transport.LocalPlayerId)
+                    {
+                        long sentTs = 0;
+                        bool found = false;
+                        lock (_localCmdSentTs)
+                        {
+                            if (_localCmdSentTs.TryGetValue(cmd.TraceId, out sentTs))
+                            {
+                                _localCmdSentTs.Remove(cmd.TraceId);
+                                found = true;
+                            }
+                        }
+                        if (found && sentTs > 0)
+                        {
+                            double e2eMs = (Stopwatch.GetTimestamp() - sentTs) * 1000.0 / Stopwatch.Frequency;
+                            if (e2eMs >= 0.0 && e2eMs < 30000.0)
+                            {
+                                lock (_cmdE2ELatencySamplesMs)
+                                {
+                                    if (_cmdE2ELatencySamplesMs.Count >= 256)
+                                        _cmdE2ELatencySamplesMs.RemoveAt(0);
+                                    _cmdE2ELatencySamplesMs.Add(e2eMs);
+                                }
+                            }
+                        }
+                    }
                     CommandExecutor.Execute(cmd);
+                }
             }
         }
 
@@ -1023,6 +1111,18 @@ namespace TABCoopMod.Sync
         {
             int cur = DXGame.Current?.IAIterationInt ?? 0;
             double now = DXHelper_Environment.Ticks;
+
+            if (now <= _clientHostPauseKeepaliveUntilTicks)
+            {
+                _gateWaitStartTicks = -1.0;
+                if (now - _gateLastWarnTicks >= 1500.0)
+                {
+                    _gateLastWarnTicks = now;
+                    if (_clientHostInModalPause)
+                        GameBridge.ShowTopBanner("Host paused (dialog/pause open)...", Color.LightSkyBlue, 900);
+                }
+                return;
+            }
 
             if (cur != _gateLastObservedTick)
             {
@@ -1061,6 +1161,7 @@ namespace TABCoopMod.Sync
             {
                 // Freeze immediately at 0 elapsed ticks until snapshot export and client handshake complete.
                 LockstepClock.SetSessionPause(true);
+                if (DXGame.Current != null) DXGame.Current.InputEnabled = false;
                 if (_hostSnapshotReloadPending && _hostWaitingOwnReload)
                 {
                     _hostWaitingOwnReload = false;
@@ -1077,6 +1178,7 @@ namespace TABCoopMod.Sync
                         _awaitingClientSnapshotAck = true;
                         _awaitingClientAckStartTicks = DXHelper_Environment.Ticks;
                         ModLogger.Info($"[CoopSessionManager] Broadcasting Snapshot ({savBytes.Length:N0} bytes in {totalChunks} chunks, seed={syncSeed}, idCounter={idCounter})...");
+                        GameBridge.ShowTopBanner("Waiting for Client to finish loading...", Color.Cyan, 4000);
                         Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.SnapshotBegin, w =>
                         {
                             w.Write(savBytes.Length);
@@ -1114,8 +1216,9 @@ namespace TABCoopMod.Sync
             _awaitingSnapshotLoad = false;
             IsInSyncedLevel = false;
             LockstepClock.SetSessionPause(true);
+            if (DXGame.Current != null) DXGame.Current.InputEnabled = false;
             int clientTick = DXGame.Current?.IAIterationInt ?? 0;
-            Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.SnapshotLoadedAck, w =>
+            Transport.SendToPeer(1, SendChannel.ReliableCommand, PacketType.SnapshotLoadedAck, w =>
             {
                 w.Write(clientTick);
             });
@@ -1205,6 +1308,7 @@ namespace TABCoopMod.Sync
             if (Transport.IsHost && (_hostWaitingOwnReload || _awaitingClientSnapshotAck))
             {
                 LockstepClock.SetSessionPause(true);
+                if (DXGame.Current != null && DXGame.Current.InputEnabled) DXGame.Current.InputEnabled = false;
                 if (!_hostWaitingOwnReload && _awaitingClientAckStartTicks > 0.0 && DXHelper_Environment.Ticks - _awaitingClientAckStartTicks > 60000.0)
                 {
                     ModLogger.Warn("[CoopSessionManager] Timed out (60s) waiting for Client SnapshotLoadedAck; resuming Host.");
@@ -1229,20 +1333,39 @@ namespace TABCoopMod.Sync
             if (!Transport.IsHost)
                 FlushOutgoingClientCommands();
 
-            // 2. Host broadcasts TurnInputBroadcast only while paused or before first tick from OnFrameTick;
-            //    during active simulation turns are sealed right before each tick starts in OnSimulationTickStarting.
+            // 2. Host broadcasts TurnInputBroadcast while paused (session or engine/modal pause) or before
+            //    first tick from OnFrameTick; during active sim turns are sealed in OnSimulationTickStarting.
             if (Transport.IsHost)
             {
-                if (LockstepClock.PausedBySession || _hostLastBroadcastSimTick < 0)
+                var gx = DXGame.Current;
+                bool hostEnginePaused = gx != null && gx.Paused;
+                if (hostEnginePaused || LockstepClock.PausedBySession || _hostLastBroadcastSimTick < 0)
                 {
-                    int cur = DXGame.Current?.IAIterationInt ?? 0;
+                    int cur = gx?.IAIterationInt ?? 0;
                     EmitHostTurns(cur);
+                    if (hostEnginePaused || LockstepClock.PausedBySession)
+                    {
+                        double nowKeep = DXHelper_Environment.Ticks;
+                        if (nowKeep - _hostLastPauseKeepaliveSentTicks >= 250.0 || nowKeep < _hostLastPauseKeepaliveSentTicks)
+                        {
+                            _hostLastPauseKeepaliveSentTicks = nowKeep;
+                            bool inModal = GameBridge.IsAnyModalOpen();
+                            Transport.Broadcast(SendChannel.ReliableCommand, PacketType.HostPauseKeepalive, w =>
+                            {
+                                w.Write(cur);
+                                w.Write(inModal);
+                                w.Write(LockstepClock.PausedBySession);
+                            });
+                        }
+                    }
                 }
             }
             else
             {
                 MonitorGateWait();
             }
+
+            LogPeriodicLatencyStats();
 
             // While paused by session, UpdateGameLogic may not fire every tick, so flush any
             // authorized turn commands stamped for the frozen tick directly on the main thread.
@@ -1334,7 +1457,7 @@ namespace TABCoopMod.Sync
 
             if (toSend != null)
             {
-                Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.ClientInputReport, w =>
+                Transport.SendToPeer(1, SendChannel.ReliableCommand, PacketType.ClientInputReport, w =>
                 {
                     w.Write((ushort)toSend.Count);
                     foreach (var c in toSend) c.WriteTo(w);
@@ -1346,10 +1469,10 @@ namespace TABCoopMod.Sync
         {
             if (!Transport.IsHost) return;
 
-            // Use the synchronized pause flag, not DXGame.Paused: the engine's save loader leaves
-            // DXGame.Paused set, which would stop the host from emitting heartbeat turns and
-            // deadlock the client's gate at the very first tick.
-            bool paused = LockstepClock.PausedBySession;
+            // Use the synchronized pause flag, or engine/modal pause when a game modal opens:
+            // during modal pause UpdateGameLogic is frozen so we must not keep advancing targetTick
+            // into the future, while still flushing buffered commands and sending HostPauseKeepalive.
+            bool paused = LockstepClock.PausedBySession || (DXGame.Current != null && DXGame.Current.Paused);
             bool hasTurn = false;
             lock (_hostTurnBuffer) hasTurn = _hostTurnBuffer.Count > 0;
             if (paused)
@@ -1414,7 +1537,7 @@ namespace TABCoopMod.Sync
 
             _networkGate.MarkReady(targetTick);
 
-            Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.TurnInputBroadcast, w =>
+            Transport.Broadcast(SendChannel.ReliableCommand, PacketType.TurnInputBroadcast, w =>
             {
                 w.Write(targetTick);
                 w.Write((ushort)(turnCmds?.Count ?? 0));
@@ -1426,7 +1549,10 @@ namespace TABCoopMod.Sync
         private static void ProbeNetworkRtt()
         {
             if (Transport == null || !Transport.IsHost || !HasJoinedClient) return;
-            if (!IsInSyncedLevel || LockstepClock.LoadingLevel || GameBridge.CurrentLevelState == null) return;
+            if (LockstepClock.LoadingLevel) return;
+            bool inSyncedGame = IsInSyncedLevel && GameBridge.CurrentLevelState != null;
+            bool inLobby = RoomPhase == LobbyRoomPhase.InLobby || RoomPhase == LobbyRoomPhase.HostSelectingMenu;
+            if (!inSyncedGame && !inLobby) return;
 
             double now = DXHelper_Environment.Ticks;
             if (now - _lastRttProbeTicks < RttProbeIntervalMs && now >= _lastRttProbeTicks)
@@ -1435,10 +1561,12 @@ namespace TABCoopMod.Sync
             _lastRttProbeTicks = now;
             uint seq = ++_rttPingSeq;
             long timestamp = Stopwatch.GetTimestamp();
+            float hostSmoothedRtt = (float)CurrentSmoothedRttMs;
             Transport.Broadcast(SendChannel.UnreliableSequenced, PacketType.RttPing, w =>
             {
                 w.Write(seq);
                 w.Write(timestamp);
+                w.Write(hostSmoothedRtt);
             });
         }
 
@@ -1469,10 +1597,10 @@ namespace TABCoopMod.Sync
 
             int cur = InputDelayTicks;
             int desired = cur;
-            if (maxRtt > 130.0) desired = 4;
-            else if (maxRtt > 88.0) desired = (cur == 4 && maxRtt >= 110.0) ? 4 : 3;
-            else if (maxRtt > 48.0) desired = (cur >= 3 && maxRtt >= 70.0) ? 3 : 2;
-            else if (maxRtt >= 32.0) desired = Math.Min(cur, 2);
+            if (maxRtt > 135.0) desired = 4;
+            else if (maxRtt > 92.0) desired = (cur == 4 && maxRtt >= 115.0) ? 4 : 3;
+            else if (maxRtt > 52.0) desired = (cur >= 3 && maxRtt >= 75.0) ? 3 : 2;
+            else if (cur == 2 && maxRtt >= 44.0) desired = 2;
             else desired = 1;
 
             desired = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, desired));
@@ -1483,6 +1611,45 @@ namespace TABCoopMod.Sync
             _lastDelayAdjustTicks = now;
             InputDelayTicks = desired;
             ModLogger.Info($"[AdaptiveDelay] InputDelayTicks {cur} -> {desired} (smoothedRtt={maxRtt:F1}ms)");
+        }
+
+        private static void LogPeriodicLatencyStats()
+        {
+            if (!IsSessionActive || !IsInSyncedLevel || Transport == null) return;
+            double now = DXHelper_Environment.Ticks;
+            if (now - _lastLatencyStatsLogTicks < 10000.0 && now >= _lastLatencyStatsLogTicks)
+                return;
+            _lastLatencyStatsLogTicks = now;
+
+            double avgMs = 0.0, p95Ms = 0.0, maxMs = 0.0;
+            int count;
+            lock (_cmdE2ELatencySamplesMs)
+            {
+                count = _cmdE2ELatencySamplesMs.Count;
+                if (count > 0)
+                {
+                    var copy = new List<double>(_cmdE2ELatencySamplesMs);
+                    _cmdE2ELatencySamplesMs.Clear();
+                    copy.Sort();
+                    double sum = 0.0;
+                    for (int i = 0; i < copy.Count; i++) sum += copy[i];
+                    avgMs = sum / count;
+                    int p95Idx = Math.Min(count - 1, (int)Math.Floor((count - 1) * 0.95));
+                    p95Ms = copy[p95Idx];
+                    maxMs = copy[count - 1];
+                }
+            }
+
+            var diag = Transport as ITransportDiagnostics;
+            string path = diag != null ? diag.ActivePathSummary : Transport.GetType().Name;
+            double directRtt = diag != null ? diag.ActiveDirectRttMs : -1.0;
+            string statsLine = diag != null ? diag.GetDebugStatsLine() : string.Empty;
+            string role = Transport.IsHost ? "Host" : "Client";
+
+            ModLogger.Info(
+                $"[LatencyStats] role={role} path=\"{path}\" rtt={CurrentSmoothedRttMs:F1}ms directRtt={directRtt:F1}ms " +
+                $"delay={InputDelayTicks}t({InputDelayTicks * 33.3:F0}ms) cmdN={count} cmdAvg={avgMs:F1}ms cmdP95={p95Ms:F1}ms cmdMax={maxMs:F1}ms" +
+                (string.IsNullOrEmpty(statsLine) ? string.Empty : $" | {statsLine}"));
         }
 
         private static void RunEpochHashAndChecksum(int curTick)
@@ -1571,7 +1738,7 @@ namespace TABCoopMod.Sync
 
             if (!IsSessionActive || !IsInSyncedLevel || Transport == null) return;
 
-            Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.TacticalPing, w =>
+            Transport.Broadcast(SendChannel.ReliableCommand, PacketType.TacticalPing, w =>
             {
                 w.Write(pid);
                 w.Write(cell.X);
@@ -1743,6 +1910,20 @@ namespace TABCoopMod.Sync
                     // The heartbeat arrived: allow the simulation to advance up to this tick. The
                     // commands themselves are executed by FlushDueTurnCommands at the tick boundary.
                     _networkGate.MarkReady(targetTick);
+                    if (targetTick > _clientHostPausedTick)
+                        _clientHostPauseKeepaliveUntilTicks = -1.0;
+                    break;
+                }
+
+                case PacketType.HostPauseKeepalive:
+                {
+                    if (Transport.IsHost) break;
+                    int hostTick = r.ReadInt32();
+                    bool hostInModal = r.ReadBoolean();
+                    bool hostSessionPaused = r.ReadBoolean();
+                    _clientHostPausedTick = hostTick;
+                    _clientHostInModalPause = hostInModal || hostSessionPaused;
+                    _clientHostPauseKeepaliveUntilTicks = DXHelper_Environment.Ticks + 1500.0;
                     break;
                 }
 
@@ -1863,7 +2044,7 @@ namespace TABCoopMod.Sync
                     // If Host, relay to other clients in 3-player session
                     if (Transport != null && Transport.IsHost && Transport.ConnectedPeers.Count > 2)
                     {
-                        Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.TacticalPing, w =>
+                        Transport.Broadcast(SendChannel.ReliableCommand, PacketType.TacticalPing, w =>
                         {
                             w.Write(pid);
                             w.Write(cellX);
@@ -1879,6 +2060,12 @@ namespace TABCoopMod.Sync
                     if (Transport == null || Transport.IsHost) break;
                     uint seq = r.ReadUInt32();
                     long hostTs = r.ReadInt64();
+                    if (r.BaseStream.Position + 4 <= r.BaseStream.Length)
+                    {
+                        float hostRtt = r.ReadSingle();
+                        if (hostRtt >= 0f && hostRtt < 5000f)
+                            CurrentSmoothedRttMs = hostRtt;
+                    }
                     Transport.SendToPeer(1, SendChannel.UnreliableSequenced, PacketType.RttPong, w =>
                     {
                         w.Write(seq);
@@ -1949,6 +2136,16 @@ namespace TABCoopMod.Sync
             w.Write((ushort)bucketLen);
             for (int i = 0; i < bucketLen; i++)
                 w.Write(d.PosBuckets[i]);
+
+            int lifeLen = d.LifeBuckets?.Length ?? 0;
+            w.Write((ushort)lifeLen);
+            for (int i = 0; i < lifeLen; i++)
+                w.Write(d.LifeBuckets[i]);
+
+            int entLen = d.EntityBuckets?.Length ?? 0;
+            w.Write((ushort)entLen);
+            for (int i = 0; i < entLen; i++)
+                w.Write(d.EntityBuckets[i]);
         }
 
         private static TickDigestRecord ReadDigestReport(BinaryReader r)
@@ -1977,26 +2174,46 @@ namespace TABCoopMod.Sync
                 FullHash = r.ReadUInt64(),
             };
             string summary = r.BaseStream.Position < r.BaseStream.Length ? r.ReadString() : string.Empty;
-            if (r.BaseStream.Position + 2 <= r.BaseStream.Length)
-            {
-                ushort bucketLen = r.ReadUInt16();
-                if (bucketLen > 0 && r.BaseStream.Position + bucketLen * 8L <= r.BaseStream.Length)
-                {
-                    d.PosBuckets = new ulong[bucketLen];
-                    for (int i = 0; i < bucketLen; i++)
-                        d.PosBuckets[i] = r.ReadUInt64();
-                }
-            }
+            d.PosBuckets = ReadBucketArray(r);
+            d.LifeBuckets = ReadBucketArray(r);
+            d.EntityBuckets = ReadBucketArray(r);
             return new TickDigestRecord { Digest = d, Summary = summary };
+        }
+
+        private static ulong[] ReadBucketArray(BinaryReader r)
+        {
+            if (r.BaseStream.Position + 2 > r.BaseStream.Length) return null;
+            ushort bucketLen = r.ReadUInt16();
+            if (bucketLen > 0 && r.BaseStream.Position + bucketLen * 8L <= r.BaseStream.Length)
+            {
+                var arr = new ulong[bucketLen];
+                for (int i = 0; i < bucketLen; i++)
+                    arr[i] = r.ReadUInt64();
+                return arr;
+            }
+            return null;
         }
 
         private static ushort ComputeDiffBucketMask(
             in StateHasher.LevelStateSnapshotDigest host,
             in StateHasher.LevelStateSnapshotDigest client)
         {
-            if (host.PosBuckets == null || client.PosBuckets == null ||
-                host.PosBuckets.Length != StateHasher.BucketCount ||
-                client.PosBuckets.Length != StateHasher.BucketCount)
+            return DiffMask(host.PosBuckets, client.PosBuckets);
+        }
+
+        private static ushort ComputeLifeOrEntityDiffBucketMask(
+            in StateHasher.LevelStateSnapshotDigest host,
+            in StateHasher.LevelStateSnapshotDigest client)
+        {
+            return (ushort)(DiffMask(host.LifeBuckets, client.LifeBuckets)
+                | DiffMask(host.EntityBuckets, client.EntityBuckets));
+        }
+
+        private static ushort DiffMask(ulong[] a, ulong[] b)
+        {
+            if (a == null || b == null ||
+                a.Length != StateHasher.BucketCount ||
+                b.Length != StateHasher.BucketCount)
             {
                 return 0xFFFF;
             }
@@ -2004,7 +2221,7 @@ namespace TABCoopMod.Sync
             ushort mask = 0;
             for (int i = 0; i < StateHasher.BucketCount; i++)
             {
-                if (host.PosBuckets[i] != client.PosBuckets[i])
+                if (a[i] != b[i])
                     mask |= (ushort)(1 << i);
             }
             return mask;
@@ -2025,6 +2242,7 @@ namespace TABCoopMod.Sync
                 var client = kv.Value.Digest;
                 string clientSummary = kv.Value.Summary;
                 resolvedPeers.Add(senderId);
+                _verifiedChecksumCycles++;
 
                 if (host.FullHash == client.FullHash)
                 {
@@ -2094,8 +2312,11 @@ namespace TABCoopMod.Sync
                         _divergedSinceTicks = -1.0;
                     }
                 }
+                bool earlyEconBypass = !IsStrictMode && !_econEarlyBypassUsed
+                    && _verifiedChecksumCycles <= 3 && _consecutiveEconMismatch >= EconReloadStreak;
+                bool cooldownElapsed = (now - _lastAutoResyncTicks >= AutoResyncCooldownMs) || earlyEconBypass;
                 bool canReloadNow = EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport
-                    && (now - _lastAutoResyncTicks >= AutoResyncCooldownMs);
+                    && cooldownElapsed;
 
                 bool triggerHardDesync = IsStrictMode
                     ? (hardCoreDiff || projDiff)
@@ -2121,11 +2342,16 @@ namespace TABCoopMod.Sync
                         _desyncDumped = true;
                         DumpHostEntitiesOnDesync(tick);
                     }
-                    TrySendPosDriftSync(senderId, tick, applyLifeCorrection: false, applyPosCorrection: false, bucketMask: ComputeDiffBucketMask(in host, in client));
+                    TrySendPosDriftSync(senderId, tick, applyLifeCorrection: false, applyPosCorrection: false, bucketMask: ComputeDiffBucketMask(in host, in client), includeStatic: false);
                     GameBridge.ShowTopBanner("State Drift Detected (see log)", Color.Orange, 2500);
 
-                    if (EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport && (now - _lastAutoResyncTicks >= AutoResyncCooldownMs))
+                    if (EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport && cooldownElapsed)
                     {
+                        if (earlyEconBypass)
+                        {
+                            _econEarlyBypassUsed = true;
+                            ModLogger.Warn($"[CoopSessionManager] Early-epoch Econ divergence (cycle={_verifiedChecksumCycles}): bypassing resync cooldown once.");
+                        }
                         _lastAutoResyncTicks = now;
                         ResetTieredResyncState();
                         ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after HARD DESYNC at Tick {tick} (Life={lifeDiff}, Aggro={aggroDiff}, Entity={entityDiff}, Econ={econDiff}, Proj={projDiff}).");
@@ -2151,9 +2377,11 @@ namespace TABCoopMod.Sync
                         bool applyPos = applyLife && (now - _lastFullPosAlignSentTicks >= AsyncSoftPosAlignCooldownMs);
                         if (applyPos)
                             _lastFullPosAlignSentTicks = now;
-                        // HP/entity diffs are not localized by position buckets, so send the full sample set.
-                        ushort mask = (lifeDiff || entityDiff) ? (ushort)0 : ComputeDiffBucketMask(in host, in client);
-                        TrySendPosDriftSync(senderId, tick, applyLifeCorrection: applyLife, applyPosCorrection: applyPos, bucketMask: mask);
+                        ushort lifeEntMask = (lifeDiff || entityDiff) ? ComputeLifeOrEntityDiffBucketMask(in host, in client) : (ushort)0;
+                        ushort posMask = (posDiff && applyPos) ? ComputeDiffBucketMask(in host, in client) : (ushort)0;
+                        ushort mask = (ushort)(lifeEntMask | posMask);
+                        if (mask == 0 && (lifeDiff || entityDiff)) mask = 0xFFFF;
+                        TrySendPosDriftSync(senderId, tick, applyLifeCorrection: applyLife, applyPosCorrection: applyPos, bucketMask: mask, includeStatic: (lifeDiff || entityDiff));
                     }
                     continue;
                 }
@@ -2168,7 +2396,7 @@ namespace TABCoopMod.Sync
                     {
                         _lastFullPosAlignSentTicks = now;
                         _lastPosSyncSentTicks = now;
-                        TrySendPosDriftSync(senderId, tick, applyLifeCorrection: EnableAsyncPosAlign, applyPosCorrection: EnableAsyncPosAlign, bucketMask: ComputeDiffBucketMask(in host, in client));
+                        TrySendPosDriftSync(senderId, tick, applyLifeCorrection: EnableAsyncPosAlign, applyPosCorrection: EnableAsyncPosAlign, bucketMask: ComputeDiffBucketMask(in host, in client), includeStatic: false);
                     }
                     continue;
                 }
@@ -2188,7 +2416,7 @@ namespace TABCoopMod.Sync
                     if (now - _lastPosSyncSentTicks >= 2000.0)
                     {
                         _lastPosSyncSentTicks = now;
-                        TrySendPosDriftSync(senderId, tick, applyLifeCorrection: false, applyPosCorrection: false, bucketMask: ComputeDiffBucketMask(in host, in client));
+                        TrySendPosDriftSync(senderId, tick, applyLifeCorrection: false, applyPosCorrection: false, bucketMask: ComputeDiffBucketMask(in host, in client), includeStatic: false);
                     }
                     if (EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport && (now - _lastAutoResyncTicks >= AutoResyncCooldownMs))
                     {
@@ -2215,7 +2443,7 @@ namespace TABCoopMod.Sync
                     {
                         _lastFullPosAlignSentTicks = now;
                         _lastPosSyncSentTicks = now;
-                        TrySendPosDriftSync(senderId, tick, applyLifeCorrection: EnableAsyncPosAlign, applyPosCorrection: EnableAsyncPosAlign, bucketMask: ComputeDiffBucketMask(in host, in client));
+                        TrySendPosDriftSync(senderId, tick, applyLifeCorrection: EnableAsyncPosAlign, applyPosCorrection: EnableAsyncPosAlign, bucketMask: ComputeDiffBucketMask(in host, in client), includeStatic: false);
                     }
                 }
             }
@@ -2349,6 +2577,11 @@ namespace TABCoopMod.Sync
 
                 DXEntity maxEnt = item.MaxDeltaEntityId != 0 ? game?.GetEntityByID(item.MaxDeltaEntityId) : null;
                 string maxType = maxEnt != null ? maxEnt.GetType().Name : "None";
+                if (!_driftOnsetLogged && item.MaxDelta >= 0.05f && maxEnt != null)
+                {
+                    _driftOnsetLogged = true;
+                    ModLogger.Info($"[DriftOnset] First observed pos drift at Tick={item.Tick}: EntityId={item.MaxDeltaEntityId}, Type={maxType}, Pos=({maxEnt.Position.X:F3},{maxEnt.Position.Y:F3}), MaxDelta={item.MaxDelta:F4}, Drifted001={item.Drifted001}, Rms={item.RmsDelta:F4}");
+                }
 
                 ModLogger.Info(
                     $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}(pos={(item.ApplyPosCorrection ? 1 : 0)}:{appliedCount}/{item.ComparedCount}) " +
@@ -2379,7 +2612,7 @@ namespace TABCoopMod.Sync
             }
         }
 
-        private static void TrySendPosDriftSync(byte targetPlayerId, int tick, bool applyLifeCorrection, bool applyPosCorrection, ushort bucketMask)
+        private static void TrySendPosDriftSync(byte targetPlayerId, int tick, bool applyLifeCorrection, bool applyPosCorrection, ushort bucketMask, bool includeStatic = true)
         {
             if (Transport == null || !Transport.IsHost) return;
             if (!_tickPosCache.TryGetValue(tick, out var samples) || samples == null || samples.Count == 0)
@@ -2390,25 +2623,19 @@ namespace TABCoopMod.Sync
             if (Interlocked.CompareExchange(ref _posSyncBuildInFlight, 1, 0) != 0)
                 return;
 
-            List<StateHasher.EntityPosSample> filtered;
-            if (effectiveMask == 0xFFFF)
+            List<StateHasher.EntityPosSample> filtered = new List<StateHasher.EntityPosSample>(
+                effectiveMask == 0xFFFF ? samples.Count : (samples.Count / 4 + 16));
+            for (int i = 0; i < samples.Count; i++)
             {
-                filtered = new List<StateHasher.EntityPosSample>(samples);
+                var s = samples[i];
+                if (!includeStatic && !s.IsDynamic) continue;
+                if (effectiveMask == 0xFFFF || (effectiveMask & (1 << (int)(s.Id & 0xFUL))) != 0)
+                    filtered.Add(s);
             }
-            else
+            if (filtered.Count == 0)
             {
-                filtered = new List<StateHasher.EntityPosSample>(samples.Count / 4 + 16);
-                for (int i = 0; i < samples.Count; i++)
-                {
-                    var s = samples[i];
-                    if ((effectiveMask & (1 << (int)(s.Id & 0xFUL))) != 0)
-                        filtered.Add(s);
-                }
-                if (filtered.Count == 0)
-                {
-                    filtered = new List<StateHasher.EntityPosSample>(samples);
-                    effectiveMask = 0xFFFF;
-                }
+                Interlocked.Exchange(ref _posSyncBuildInFlight, 0);
+                return;
             }
 
             ushort sentMask = effectiveMask;
@@ -2779,6 +3006,7 @@ namespace TABCoopMod.Sync
             {
                 IsInSyncedLevel = false;
                 LockstepClock.SetSessionPause(true);
+                if (DXGame.Current != null) DXGame.Current.InputEnabled = false;
 
                 if (!GameBridge.IsSaveLoadable(savPath))
                 {

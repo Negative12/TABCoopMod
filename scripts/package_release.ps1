@@ -1,4 +1,4 @@
-# package_release.ps1
+﻿# package_release.ps1
 # Builds TABCoopMod (Release) and packages a drag-and-drop archive into dist/
 # containing ONLY runtime files + a plain-text user guide (no install scripts).
 
@@ -88,6 +88,9 @@ $guideText = @"
        Steam 界面（Shift+Tab）邀请好友。
      - 客机：直接接受房主的 Steam 邀请即可自动加入（如果当前未启动游戏，
        可通过 Steam 邀请启动并自动接入）。
+     - 自动直连加速：通过 Steam 大厅接头后，Mod 会自动尝试局域网/公网 IPv6/STUN UDP
+       直连升级并在大厅顶部实时显示链路与 RTT；若双方网络受限无法直连，
+       会自动通过隔离后的 Steam 多通道保底。
      - 同机双开本地测试：房主点击【创建本地测试房间】（127.0.0.1:27099），
        另一窗口点击【加入本地房间】即可。
   4. 房间准备与开局：

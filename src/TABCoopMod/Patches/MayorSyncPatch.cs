@@ -62,6 +62,9 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(object __instance)
         {
+            if (TABCoopMod.Sync.CoopSessionManager.IsGameplayInputLocked)
+                return false;
+
             if (!CommandInterceptor.IsInterceptionEnabled
                 || CommandExecutor.IsReplayingCommand
                 || LockstepClock.LoadingLevel

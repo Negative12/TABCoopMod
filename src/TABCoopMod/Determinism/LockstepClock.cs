@@ -810,7 +810,12 @@ namespace TABCoopMod.Determinism
                             if (initHostGame != null)
                             {
                                 if (initHostGame.Paused) initHostGame.Paused = false;
-                                if (!initHostGame.InputEnabled)
+                                bool keepLocked = Sync.CoopSessionManager.IsSessionActive;
+                                if (keepLocked)
+                                {
+                                    initHostGame.InputEnabled = false;
+                                }
+                                else if (!initHostGame.InputEnabled)
                                 {
                                     initHostGame.InputEnabled = true;
                                     ModLogger.Info("[LockstepClock] Restored InputEnabled=true after initial Host level load.");
@@ -828,7 +833,12 @@ namespace TABCoopMod.Determinism
                         if (hostGame != null)
                         {
                             if (hostGame.Paused) hostGame.Paused = false;
-                            if (!hostGame.InputEnabled)
+                            bool keepLocked = Sync.CoopSessionManager.IsSessionActive;
+                            if (keepLocked)
+                            {
+                                hostGame.InputEnabled = false;
+                            }
+                            else if (!hostGame.InputEnabled)
                             {
                                 hostGame.InputEnabled = true;
                                 ModLogger.Info("[LockstepClock] Restored InputEnabled=true after Host snapshot reload (intro-zoom bypass).");
@@ -851,7 +861,12 @@ namespace TABCoopMod.Determinism
                             clientGame.Paused = false;
                             ModLogger.Info("[LockstepClock] Cleared load-time pause on Client (session remains paused until SessionStart).");
                         }
-                        if (!clientGame.InputEnabled)
+                        bool keepLocked = Sync.CoopSessionManager.IsSessionActive;
+                        if (keepLocked)
+                        {
+                            clientGame.InputEnabled = false;
+                        }
+                        else if (!clientGame.InputEnabled)
                         {
                             clientGame.InputEnabled = true;
                             ModLogger.Info("[LockstepClock] Restored InputEnabled=true on Client after snapshot load.");
@@ -1185,6 +1200,7 @@ namespace TABCoopMod.Determinism
             // or when single-tick logic takes >= 8ms.
             double estLogicMs = _diagWorkerLogicMs > 0.0 ? _diagWorkerLogicMs : DiagAvgTickLogicMs;
             bool canOverlapAsync = inCoop
+                && !Testing.TestHarnessConfig.DisableAsyncTick
                 && !Testing.DeterministicReplayVerifier.IsRunning
                 && __instance.GameSpeed <= 1.05
                 && (maxTicksThisFrame == 1 || DiagAvgFrameMs < 28.0 || estLogicMs >= 8.0);
@@ -1364,7 +1380,6 @@ namespace TABCoopMod.Determinism
                         double workerMs = (System.Diagnostics.Stopwatch.GetTimestamp() - launchTs) * swMs;
                         _diagWorkerLogicMs = _diagWorkerLogicMs <= 0.0 ? workerMs : _diagWorkerLogicMs * 0.9 + workerMs * 0.1;
                         DiagAvgTickLogicMs = _diagWorkerLogicMs;
-                        LockstepClock.LogicTickActive = false;
 
                         try
                         {
@@ -1389,6 +1404,11 @@ namespace TABCoopMod.Determinism
                         catch (Exception ex)
                         {
                             ModLogger.Warn($"[LockstepClock] Async UpdatePhysics continuation error: {ex}");
+                        }
+                        finally
+                        {
+                            LockstepClock.AllowPhysicsThisFrame = false;
+                            LockstepClock.LogicTickActive = false;
                         }
                     }, System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously);
                     _fTaskLogic.SetValue(__instance, cont);

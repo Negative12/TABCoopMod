@@ -75,8 +75,11 @@ namespace TABCoopMod.Core
         private static FieldInfo _fieldAudioCurrent;
         private static MethodInfo _methodAudioPickWeightedVoice;
         private static MethodInfo _methodAudioPlayUniqueList;
+        private static MethodInfo _methodAudioPlay2DSoundList;
         private static PropertyInfo _propDefParamsSoundsGeneric;
         private static PropertyInfo _propDefParamsSoundsAttack;
+        private static PropertyInfo _propDefParamsSoundsCreation;
+        private static PropertyInfo _propDefParamsSoundsSelected;
 
         private static Type _typeZombie;
         private static PropertyInfo _propZombieAttackCC;
@@ -336,6 +339,10 @@ namespace TABCoopMod.Core
                     ? AccessTools.Method(TypeZXSystemAudio, ObfuscatedSymbols.Method_Audio_PlayUnique,
                         new[] { typeof(ZXSoundCategory), typeof(ZXUniqueSoundType), typeof(List<string>) })
                     : null;
+                _methodAudioPlay2DSoundList = TypeZXSystemAudio != null
+                    ? AccessTools.Method(TypeZXSystemAudio, ObfuscatedSymbols.Method_Audio_Play2DSound,
+                        new[] { typeof(ZXSoundCategory), typeof(List<string>) })
+                    : null;
 
                 _methodLevelStateAvailFood = AccessTools.Method(typeof(ZXLevelState), ObfuscatedSymbols.Method_ZXLevelState_AvailFood, Type.EmptyTypes);
                 _methodLevelStateAvailWorkers = AccessTools.Method(typeof(ZXLevelState), ObfuscatedSymbols.Method_ZXLevelState_AvailWorkers, Type.EmptyTypes);
@@ -347,6 +354,7 @@ namespace TABCoopMod.Core
                 Check(_fieldAudioCurrent, "ZXSystemAudio.Current");
                 Check(_methodAudioPickWeightedVoice, "ZXSystemAudio.PickWeightedVoice");
                 Check(_methodAudioPlayUniqueList, "ZXSystemAudio.PlayUnique(List)");
+                Check(_methodAudioPlay2DSoundList, "ZXSystemAudio.Play2DSound(List)");
                 Check(_methodLevelStateAvailFood, "ZXLevelState.AvailFood");
                 Check(_methodLevelStateAvailWorkers, "ZXLevelState.AvailWorkers");
                 Check(_methodLevelStateAvailEnergy, "ZXLevelState.AvailEnergy");
@@ -2903,6 +2911,49 @@ namespace TABCoopMod.Core
                 else if (_methodAudioPlayUniqueList != null)
                 {
                     _methodAudioPlayUniqueList.Invoke(audio, new object[] { ZXSoundCategory.UnitVoices, ZXUniqueSoundType.EntityVoice, list });
+                }
+            }
+            catch { }
+            finally
+            {
+                Determinism.LockstepClock.ExitAudioContext();
+            }
+        }
+
+        public static void PlayLocalBuildOrOrderFeedback(Type targetEntityType, bool preferCreationSound, DXEntity fallbackExecutor = null)
+        {
+            if (DXScene.Current == null || _methodAudioPlay2DSoundList == null || _methodEntityGetDefaultParams == null)
+                return;
+
+            Determinism.LockstepClock.EnterAudioContext();
+            try
+            {
+                object audio = _fieldAudioCurrent?.GetValue(null);
+                if (audio == null) return;
+
+                DXEntity sampleEntity = targetEntityType != null ? GetEntityTemplateByType(targetEntityType)?.Entity : null;
+                if (sampleEntity == null) sampleEntity = fallbackExecutor;
+                if (sampleEntity == null) return;
+
+                object defParams = _methodEntityGetDefaultParams.Invoke(sampleEntity, null);
+                if (defParams == null) return;
+
+                if (_propDefParamsSoundsCreation == null || _propDefParamsSoundsSelected == null)
+                {
+                    Type dpType = defParams.GetType();
+                    _propDefParamsSoundsCreation = dpType.GetProperty("SoundsOnCreation", BindingFlags.Public | BindingFlags.Instance);
+                    _propDefParamsSoundsSelected = dpType.GetProperty("SoundsOnSelected", BindingFlags.Public | BindingFlags.Instance);
+                }
+
+                var list = (preferCreationSound
+                    ? _propDefParamsSoundsCreation?.GetValue(defParams, null) as List<string>
+                    : _propDefParamsSoundsSelected?.GetValue(defParams, null) as List<string>);
+                if ((list == null || list.Count == 0))
+                    list = _propDefParamsSoundsSelected?.GetValue(defParams, null) as List<string>;
+
+                if (list != null && list.Count > 0)
+                {
+                    _methodAudioPlay2DSoundList.Invoke(audio, new object[] { ZXSoundCategory.Effects, list });
                 }
             }
             catch { }

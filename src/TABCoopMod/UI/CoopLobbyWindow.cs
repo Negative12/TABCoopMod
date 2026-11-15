@@ -44,6 +44,7 @@ namespace TABCoopMod.UI
         private static bool _isClosing;
         private static bool _needsRefresh;
         private static bool _subscribed;
+        private static double _lastLobbyStatusRefreshTicks = -100000.0;
 
         // Reopen tracking when Host closes waiting room temporarily to use singleplayer menus,
         // or when players return to Main Menu from a match.
@@ -210,6 +211,15 @@ namespace TABCoopMod.UI
                     if (!CoopSessionManager.IsSessionActive)
                     {
                         TriggerLocalProbeIfDue(force: false);
+                    }
+                    else
+                    {
+                        double nowLobby = DXHelper_Environment.Ticks;
+                        if (nowLobby - _lastLobbyStatusRefreshTicks >= 700.0 || nowLobby < _lastLobbyStatusRefreshTicks)
+                        {
+                            _lastLobbyStatusRefreshTicks = nowLobby;
+                            _needsRefresh = true;
+                        }
                     }
                     if (_needsRefresh)
                     {
@@ -793,9 +803,15 @@ namespace TABCoopMod.UI
                 return $"当前玩家: {persona} ({steamTag})   |   状态: 未加入房间";
             }
 
-            string mode = CoopSessionManager.Transport is LocalTcpLoopbackTransport ? "本地回环 (127.0.0.1:27099)" : "Steam P2P 大厅";
+            string mode = CoopSessionManager.Transport is LocalTcpLoopbackTransport ? "本地回环" : "Steam P2P";
+            var diag = CoopSessionManager.Transport as ITransportDiagnostics;
+            string pathText = diag != null ? diag.ActivePathSummary : mode;
+            double showRtt = (diag != null && diag.ActiveDirectRttMs > 0.0)
+                ? diag.ActiveDirectRttMs
+                : CoopSessionManager.CurrentSmoothedRttMs;
+            string rttText = showRtt > 0.0 ? $"{showRtt:F0}ms" : "--";
             string role = CoopSessionManager.Transport.IsHost ? "房主 P1" : $"客机 P{CoopSessionManager.Transport.LocalPlayerId}";
-            return $"当前玩家: {persona}   |   角色: {role}   |   网络: {mode}";
+            return $"当前玩家: {persona}  |  角色: {role}  |  链路: {pathText}  |  RTT: {rttText}";
         }
 
         private static void OpenHostSingleplayerMenu(string hostHint, Func<bool> openMenuAction, bool rollSeed)

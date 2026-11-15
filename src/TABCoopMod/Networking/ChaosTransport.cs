@@ -69,7 +69,7 @@ namespace TABCoopMod.Networking
     /// Timing uses the engine's monotonic Ticks clock; jitter/loss use a seeded xorshift PRNG so a
     /// given seed reproduces the same delivery pattern.
     /// </summary>
-    public sealed class ChaosTransport : INetworkTransport
+    public sealed class ChaosTransport : INetworkTransport, ITransportDiagnostics
     {
         private sealed class PendingPacket
         {
@@ -112,6 +112,11 @@ namespace TABCoopMod.Networking
         public bool IsHost => _inner.IsHost;
         public byte LocalPlayerId => _inner.LocalPlayerId;
         public IReadOnlyList<PeerInfo> ConnectedPeers => _inner.ConnectedPeers;
+
+        public bool IsDirectConnected => (_inner as ITransportDiagnostics)?.IsDirectConnected ?? false;
+        public string ActivePathSummary => (_inner as ITransportDiagnostics)?.ActivePathSummary ?? "Local Loopback (Chaos)";
+        public double ActiveDirectRttMs => (_inner as ITransportDiagnostics)?.ActiveDirectRttMs ?? 0.0;
+        public string GetDebugStatsLine() => (_inner as ITransportDiagnostics)?.GetDebugStatsLine() ?? "ChaosTransport";
 
         public event Action<byte, PacketType, BinaryReader> OnPacketReceived;
         public event Action<PeerInfo> OnPeerConnected;
@@ -162,7 +167,7 @@ namespace TABCoopMod.Networking
             }
 
             double deliverAt = DXHelper_Environment.Ticks + delay;
-            if (channel == SendChannel.ReliableOrdered)
+            if (channel != SendChannel.UnreliableSequenced)
             {
                 if (deliverAt < _lastReliableDeliverAt)
                     deliverAt = _lastReliableDeliverAt;

@@ -55,6 +55,7 @@ namespace TABCoopMod.Commands
         public string MayorId { get; set; } = string.Empty;
         public byte MayorOptionIndex { get; set; }
         public bool IsMayorFinalDecision { get; set; }
+        public uint TraceId { get; set; }
 
         public void WriteTo(BinaryWriter w)
         {
@@ -92,6 +93,7 @@ namespace TABCoopMod.Commands
             w.Write(IsMayorFinalDecision);
             w.Write(GameSpeed);
             w.Write(MayorId ?? string.Empty);
+            w.Write(TraceId);
         }
 
         public static NetCommand ReadFrom(BinaryReader r)
@@ -127,6 +129,8 @@ namespace TABCoopMod.Commands
             cmd.IsMayorFinalDecision = r.ReadBoolean();
             cmd.GameSpeed = r.ReadSingle();
             cmd.MayorId = r.ReadString();
+            if (r.BaseStream.Position + 4 <= r.BaseStream.Length)
+                cmd.TraceId = r.ReadUInt32();
 
             return cmd;
         }
@@ -148,14 +152,28 @@ namespace TABCoopMod.Commands
         [ThreadStatic]
         public static bool IsReplayingCommand;
 
+        /// <summary>
+        /// True while replaying a command originally issued by the local player in a live co-op session,
+        /// allowing 0ms-predicted build/order SFX to suppress duplicate replay Effects audio.
+        /// </summary>
+        [ThreadStatic]
+        public static bool IsReplayingLocalBuild;
+
         public static void Execute(NetCommand netCmd)
         {
             if (netCmd == null || netCmd.Type == NetCommandType.None)
                 return;
 
             bool prevReplaying = IsReplayingCommand;
+            bool prevLocalBuild = IsReplayingLocalBuild;
             bool prevDet = LockstepClock.InDeterministicContext;
             IsReplayingCommand = true;
+            IsReplayingLocalBuild = TABCoopMod.Sync.CoopSessionManager.IsSessionActive
+                && netCmd.PlayerId == TABCoopMod.Patches.CommandInterceptor.LocalPlayerId
+                && (netCmd.Type == NetCommandType.PlaceBuilding
+                    || netCmd.Type == NetCommandType.ExecuteCommand
+                    || netCmd.Type == NetCommandType.CancelCurrentOrder
+                    || netCmd.Type == NetCommandType.CancelQueuedOrder);
             LockstepClock.InDeterministicContext = true;
 
             // Save local Shift key state so we can simulate the sender's Shift modifier accurately
@@ -248,6 +266,7 @@ namespace TABCoopMod.Commands
                 }
 
                 LockstepClock.InDeterministicContext = prevDet;
+                IsReplayingLocalBuild = prevLocalBuild;
                 IsReplayingCommand = prevReplaying;
             }
         }

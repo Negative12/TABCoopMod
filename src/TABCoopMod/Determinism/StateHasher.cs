@@ -49,6 +49,8 @@ namespace TABCoopMod.Determinism
             public long PosChecksum, CoarsePosChecksum, LifeChecksum, ZombieAggroChecksum, ProjectileChecksum, ProductionChecksum, ReservationChecksum;
             public int ProjectileCount, QueuedOrderCount, AggroZombieCount;
             public ulong[] PosBuckets;
+            public ulong[] LifeBuckets;
+            public ulong[] EntityBuckets;
             public ulong HardHash;
             public ulong FullHash;
 
@@ -72,6 +74,8 @@ namespace TABCoopMod.Determinism
             public long ProjectileChecksum;
             public long ProductionChecksum;
             public ulong[] PosBuckets;
+            public ulong[] LifeBuckets;
+            public ulong[] EntityBuckets;
             public List<EntityPosSample> DynamicPositions;
 
             public void Reset(bool allocateBuckets, List<EntityPosSample> dynamicOut)
@@ -87,6 +91,8 @@ namespace TABCoopMod.Determinism
                 ProjectileChecksum = 0;
                 ProductionChecksum = 0;
                 PosBuckets = allocateBuckets ? new ulong[BucketCount] : null;
+                LifeBuckets = allocateBuckets ? new ulong[BucketCount] : null;
+                EntityBuckets = allocateBuckets ? new ulong[BucketCount] : null;
                 DynamicPositions = dynamicOut;
             }
         }
@@ -244,14 +250,21 @@ namespace TABCoopMod.Determinism
             if (acc.DynamicPositions != null && (isDynamic || lifeValue > 0))
                 acc.DynamicPositions.Add(new EntityPosSample { Id = entity.ID, X = px, Y = py, Life = lifeValue, IsDynamic = isDynamic });
 
+            int bucketIdx = (int)(entity.ID & (ulong)(BucketCount - 1));
             long posMix = (long)entity.ID ^ (qx * 73856093L) ^ (qy * 19349663L);
             acc.PosChecksum += posMix;
-            acc.PosBuckets[(int)(entity.ID & (ulong)(BucketCount - 1))] += unchecked((ulong)posMix);
+            if (acc.PosBuckets != null)
+                acc.PosBuckets[bucketIdx] += unchecked((ulong)posMix);
 
             long cx = (long)Math.Floor(px * 0.5f);
             long cy = (long)Math.Floor(py * 0.5f);
             acc.CoarsePosChecksum += (long)entity.ID ^ (cx * 73856093L) ^ (cy * 19349663L);
-            acc.LifeChecksum += (long)entity.ID ^ (lifeValue * 83492791L);
+            long lifeMix = (long)entity.ID ^ (lifeValue * 83492791L);
+            acc.LifeChecksum += lifeMix;
+            if (acc.LifeBuckets != null)
+                acc.LifeBuckets[bucketIdx] += unchecked((ulong)lifeMix);
+            if (acc.EntityBuckets != null)
+                acc.EntityBuckets[bucketIdx] += unchecked((ulong)((long)entity.ID * 2654435761L) ^ 0x9E3779B97F4A7C15UL);
 
             if (isDynamic && (flags & FlagZombie) != 0)
             {
@@ -307,6 +320,8 @@ namespace TABCoopMod.Determinism
             digest.ProjectileChecksum = acc.ProjectileChecksum;
             digest.ProductionChecksum = acc.ProductionChecksum;
             digest.PosBuckets = acc.PosBuckets;
+            digest.LifeBuckets = acc.LifeBuckets;
+            digest.EntityBuckets = acc.EntityBuckets;
 
             Mix(acc.EntityCount);
             Mix(acc.ProjectileCount);

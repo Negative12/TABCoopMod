@@ -58,7 +58,18 @@ namespace TABCoopMod.Patches
             [HarmonyPrefix]
             public static bool Prefix(DXKeys __0, ref bool __result)
             {
-                if (__0 != DXKeys.Space || !CanIntercept()) return true;
+                if (__0 != DXKeys.Space) return true;
+                if (CoopSessionManager.IsGameplayInputLocked)
+                {
+                    __result = true;
+                    return false;
+                }
+                if (CoopSessionManager.IsGameplayInputLocked)
+                {
+                    __result = true;
+                    return false;
+                }
+                if (!CanIntercept()) return true;
 
                 PauseSyncController.RequestPause(!IsCurrentlyPaused());
                 __result = true;
@@ -77,6 +88,8 @@ namespace TABCoopMod.Patches
             [HarmonyPrefix]
             public static bool Prefix(DXButton __instance)
             {
+                if (CoopSessionManager.IsGameplayInputLocked && IsPauseButton(__instance))
+                    return false;
                 if (!CanIntercept() || !IsPauseButton(__instance)) return true;
 
                 // Preserve DXButton's native activation debounce while skipping the local Paused toggle.
@@ -114,6 +127,11 @@ namespace TABCoopMod.Patches
                     default: return true;
                 }
 
+                if (CoopSessionManager.IsGameplayInputLocked)
+                {
+                    __result = true;
+                    return false;
+                }
                 if (!CanIntercept()) return true;
 
                 float speed = (float)Math.Max(0.0, Math.Min(20.0, DXGame.Current.GameSpeed + delta));

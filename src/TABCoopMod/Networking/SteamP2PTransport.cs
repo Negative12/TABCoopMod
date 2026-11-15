@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Net;
 using Steamworks;
 using TABCoopMod.Core;
 
@@ -8,10 +11,16 @@ namespace TABCoopMod.Networking
 {
     /// <summary>
     /// Steamworks P2P Networking & Lobby Transport built on top of the game's embedded Steamworks.NET (v10.0.0.0).
-    /// Supports Steam Lobby creation, Friend Invite overlay, and P2P packet relaying (Channel 0 Reliable, Channel 1 Unreliable).
+    /// Supports Steam Lobby creation, Friend Invite overlay, isolated P2P channels (ch2 ReliableCommand,
+    /// ch0 ReliableOrdered, ch1 UnreliableSequenced), and automatic Direct UDP Fast-Path upgrade.
     /// </summary>
-    public sealed class SteamP2PTransport : INetworkTransport
+    public sealed class SteamP2PTransport : INetworkTransport, ITransportDiagnostics
     {
+        private struct HeldCommand
+        {
+            public PacketType Type;
+            public byte[] Payload;
+        }
         private static Callback<GameLobbyJoinRequested_t> _globalCbLobbyJoinRequested;
         private static Action<string> _globalInviteHandler;
         private static bool _startupLobbyChecked;
@@ -89,11 +98,74 @@ namespace TABCoopMod.Networking
         private readonly Dictionary<byte, CSteamID> _playerToSteamId = new Dictionary<byte, CSteamID>();
         private byte _nextPlayerId = 2;
 
+        private DirectFastPathManager _direct;
+        private readonly ConcurrentQueue<Action> _mainThreadActions = new ConcurrentQueue<Action>();
+        private readonly Dictionary<byte, long> _cutoverPendingTs = new Dictionary<byte, long>();
+        private readonly Dictionary<byte, List<HeldCommand>> _cutoverHoldQueue = new Dictionary<byte, List<HeldCommand>>();
+
         public bool IsActive { get; private set; }
         public bool IsHost { get; private set; }
         public byte LocalPlayerId { get; private set; } = 1;
         public CSteamID CurrentLobbyId => _currentLobbyId;
         public IReadOnlyList<PeerInfo> ConnectedPeers => _peers;
+
+        public string ActivePathSummary
+        {
+            get
+            {
+                if (_direct != null && _direct.TryGetActiveSummary(out string directSummary, out _, out bool isDirect) && isDirect)
+                    return directSummary;
+
+                try
+                {
+                    foreach (var kv in _playerToSteamId)
+                    {
+                        if (kv.Key == LocalPlayerId || !kv.Value.IsValid()) continue;
+                        if (SteamNetworking.GetP2PSessionState(kv.Value, out P2PSessionState_t state))
+                        {
+                            if (state.m_bConnectionActive != 0)
+                                return state.m_bUsingRelay != 0 ? "Steam Relay" : "Steam Direct";
+                            if (state.m_bConnecting != 0)
+                                return "Steam Connecting";
+                        }
+                    }
+                }
+                catch { }
+                return IsActive ? "Steam Idle" : "Offline";
+            }
+        }
+
+        public bool IsDirectConnected => _direct != null && _direct.TryGetActiveSummary(out _, out _, out bool isDirect) && isDirect;
+
+        public double ActiveDirectRttMs => _direct != null && _direct.TryGetActiveSummary(out _, out double rtt, out bool isDirect) && isDirect ? rtt : -1.0;
+
+        public string GetDebugStatsLine()
+        {
+            string directStats = _direct != null ? _direct.GetDebugStatsLine() : "DirectUDP(off)";
+            string steamStats = GetP2PDebugStats();
+            return $"{directStats} | {steamStats}";
+        }
+
+        public string GetP2PDebugStats()
+        {
+            try
+            {
+                var parts = new List<string>();
+                foreach (var kv in _playerToSteamId)
+                {
+                    if (kv.Key == LocalPlayerId || !kv.Value.IsValid()) continue;
+                    if (SteamNetworking.GetP2PSessionState(kv.Value, out P2PSessionState_t st))
+                    {
+                        parts.Add($"P{kv.Key}(relay={st.m_bUsingRelay},act={st.m_bConnectionActive},qBytes={st.m_nBytesQueuedForSend},qPkt={st.m_nPacketsQueuedForSend},err={st.m_eP2PSessionError})");
+                    }
+                }
+                return parts.Count > 0 ? "SteamP2P[" + string.Join("; ", parts) + "]" : "SteamP2P[no-remote]";
+            }
+            catch
+            {
+                return "SteamP2P[err]";
+            }
+        }
 
         public event Action<byte, PacketType, BinaryReader> OnPacketReceived;
         public event Action<PeerInfo> OnPeerConnected;
@@ -125,6 +197,8 @@ namespace TABCoopMod.Networking
             _playerToSteamId[1] = mySteamId;
             _peers.Add(new PeerInfo { PlayerId = 1, PlayerName = myName, SteamId64 = mySteamId.m_SteamID, IsReady = true });
 
+            InitializeDirectFastPath(true);
+
             SteamNetworking.AllowP2PPacketRelay(true);
             SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypeFriendsOnly, maxPlayers);
             IsActive = true;
@@ -138,6 +212,7 @@ namespace TABCoopMod.Networking
             LocalPlayerId = 0;
             _peers.Clear();
             _playerToSteamId.Clear();
+            InitializeDirectFastPath(false);
             SteamNetworking.AllowP2PPacketRelay(true);
 
             if (ulong.TryParse(targetAddressOrSteamId, out ulong steamOrLobbyId))
@@ -217,6 +292,9 @@ namespace TABCoopMod.Networking
             {
                 _playerToSteamId.Remove(disconnectedPlayerId);
                 _peers.RemoveAll(p => p.PlayerId == disconnectedPlayerId);
+                _cutoverPendingTs.Remove(disconnectedPlayerId);
+                _cutoverHoldQueue.Remove(disconnectedPlayerId);
+                _direct?.RemovePeer(disconnectedPlayerId);
                 ModLogger.Info($"[SteamP2PTransport] Steam lobby member left: SteamID={leftSteamId.m_SteamID} -> PlayerId={disconnectedPlayerId}");
                 OnPeerDisconnected?.Invoke(disconnectedPlayerId);
             }
@@ -224,7 +302,7 @@ namespace TABCoopMod.Networking
 
         private void SendHandshakeToHost()
         {
-            SendToSteamUser(_hostSteamId, SendChannel.ReliableOrdered, PacketType.HandshakeRequest, w =>
+            SendToSteamUser(_hostSteamId, SendChannel.ReliableCommand, PacketType.HandshakeRequest, w =>
             {
                 w.Write(SteamFriends.GetPersonaName() ?? "Client");
                 w.Write("0.1.0");
@@ -244,6 +322,9 @@ namespace TABCoopMod.Networking
             {
                 if (kv.Value == param.m_steamIDRemote)
                 {
+                    _cutoverPendingTs.Remove(kv.Key);
+                    _cutoverHoldQueue.Remove(kv.Key);
+                    _direct?.RemovePeer(kv.Key);
                     OnPeerDisconnected?.Invoke(kv.Key);
                     break;
                 }
@@ -255,33 +336,99 @@ namespace TABCoopMod.Networking
             if (!IsActive) return;
             if (_playerToSteamId.TryGetValue(targetPlayerId, out var remoteSteamId))
             {
-                SendToSteamUser(remoteSteamId, channel, type, writePayload);
+                byte[] payload = SerializePayload(writePayload);
+                SendToPlayerWithRouting(targetPlayerId, remoteSteamId, channel, type, payload);
             }
         }
 
         public void Broadcast(SendChannel channel, PacketType type, Action<BinaryWriter> writePayload)
         {
             if (!IsActive) return;
+            byte[] payload = SerializePayload(writePayload);
             if (IsHost)
             {
                 foreach (var kv in _playerToSteamId)
                 {
                     if (kv.Key != LocalPlayerId)
                     {
-                        SendToSteamUser(kv.Value, channel, type, writePayload);
+                        SendToPlayerWithRouting(kv.Key, kv.Value, channel, type, payload);
                     }
                 }
             }
             else if (_hostSteamId.IsValid())
             {
-                SendToSteamUser(_hostSteamId, channel, type, writePayload);
+                SendToPlayerWithRouting(1, _hostSteamId, channel, type, payload);
             }
+        }
+
+        private static byte[] SerializePayload(Action<BinaryWriter> writePayload)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms))
+            {
+                writePayload?.Invoke(w);
+                return ms.ToArray();
+            }
+        }
+
+        private byte[] BuildFrameFromPayload(PacketType type, byte[] payload)
+        {
+            int plen = payload?.Length ?? 0;
+            byte[] frame = new byte[8 + plen];
+            frame[0] = 0x54; // 'T'
+            frame[1] = 0x42; // 'B'
+            frame[2] = (byte)type;
+            frame[3] = LocalPlayerId;
+            Buffer.BlockCopy(BitConverter.GetBytes(plen), 0, frame, 4, 4);
+            if (plen > 0)
+                Buffer.BlockCopy(payload, 0, frame, 8, plen);
+            return frame;
+        }
+
+        private void SendToPlayerWithRouting(byte targetPlayerId, CSteamID targetSteamId, SendChannel channel, PacketType type, byte[] payload)
+        {
+            // Transport signaling/fallback packets always travel on Steam control plane.
+            bool isSignaling =
+                type == PacketType.HandshakeRequest ||
+                type == PacketType.HandshakeAccept ||
+                type == PacketType.DirectEndpointExchange ||
+                type == PacketType.DirectCutoverSync ||
+                type == PacketType.DirectFallbackBatch;
+
+            if (!isSignaling && _direct != null && _direct.TrySendPacket(targetPlayerId, channel, type, payload))
+                return;
+
+            if (!isSignaling && channel == SendChannel.ReliableCommand && _cutoverPendingTs.TryGetValue(targetPlayerId, out long sentTs))
+            {
+                double waitMs = (Stopwatch.GetTimestamp() - sentTs) * 1000.0 / Stopwatch.Frequency;
+                if (waitMs < 1500.0)
+                {
+                    if (!_cutoverHoldQueue.TryGetValue(targetPlayerId, out var q))
+                    {
+                        q = new List<HeldCommand>();
+                        _cutoverHoldQueue[targetPlayerId] = q;
+                    }
+                    q.Add(new HeldCommand { Type = type, Payload = payload });
+                    return;
+                }
+
+                // Cutover barrier timed out; release held commands cleanly over Steam.
+                FlushCutoverHoldQueueOverSteam(targetPlayerId, targetSteamId);
+            }
+
+            SendToSteamUserPayload(targetSteamId, channel, type, payload);
         }
 
         private void SendToSteamUser(CSteamID targetSteamId, SendChannel channel, PacketType type, Action<BinaryWriter> writePayload)
         {
-            byte[] frame = LocalTcpLoopbackTransport.BuildFrame(LocalPlayerId, type, writePayload);
-            var sendType = channel == SendChannel.ReliableOrdered
+            byte[] payload = SerializePayload(writePayload);
+            SendToSteamUserPayload(targetSteamId, channel, type, payload);
+        }
+
+        private void SendToSteamUserPayload(CSteamID targetSteamId, SendChannel channel, PacketType type, byte[] payload)
+        {
+            byte[] frame = BuildFrameFromPayload(type, payload);
+            var sendType = channel != SendChannel.UnreliableSequenced
                 ? EP2PSend.k_EP2PSendReliable
                 : EP2PSend.k_EP2PSendUnreliableNoDelay;
 
@@ -296,8 +443,36 @@ namespace TABCoopMod.Networking
             {
                 SteamAPI.RunCallbacks();
 
-                for (int ch = 0; ch <= 1; ch++)
+                while (_mainThreadActions.TryDequeue(out var act))
                 {
+                    try { act(); }
+                    catch (Exception ex) { ModLogger.Warn($"[SteamP2PTransport] Main-thread action failed: {ex.Message}"); }
+                }
+
+                CheckExpiredCutoverBarriers();
+
+                if (_direct != null)
+                {
+                    while (_direct.TryDequeueIncoming(out var directPkt))
+                    {
+                        using (var ms = new MemoryStream(directPkt.Payload, false))
+                        using (var reader = new BinaryReader(ms))
+                        {
+                            OnPacketReceived?.Invoke(directPkt.SenderId, directPkt.Type, reader);
+                        }
+                    }
+                }
+
+                int[] pollChannels =
+                {
+                    (int)SendChannel.ReliableCommand,
+                    (int)SendChannel.UnreliableSequenced,
+                    (int)SendChannel.ReliableOrdered
+                };
+
+                for (int ci = 0; ci < pollChannels.Length; ci++)
+                {
+                    int ch = pollChannels[ci];
                     while (SteamNetworking.IsP2PPacketAvailable(out uint msgSize, ch))
                     {
                         byte[] buf = new byte[msgSize];
@@ -344,7 +519,7 @@ namespace TABCoopMod.Networking
                 _peers.RemoveAll(p => p.PlayerId == assignedId);
                 _peers.Add(peer);
 
-                SendToPeer(assignedId, SendChannel.ReliableOrdered, PacketType.HandshakeAccept, w =>
+                SendToSteamUser(remoteSteamId, SendChannel.ReliableCommand, PacketType.HandshakeAccept, w =>
                 {
                     w.Write(assignedId);
                     w.Write((byte)_peers.Count);
@@ -358,6 +533,8 @@ namespace TABCoopMod.Networking
                 });
 
                 ModLogger.Info($"[SteamP2PTransport] Accepted Steam peer {clientName} ({remoteSteamId.m_SteamID}) -> PlayerId={assignedId}");
+                _direct?.SetLocalPlayerId(LocalPlayerId);
+                SendDirectCandidatesToPeer(assignedId);
                 OnPeerConnected?.Invoke(peer);
                 return;
             }
@@ -380,8 +557,27 @@ namespace TABCoopMod.Networking
                     if (p.SteamId64 != 0)
                         _playerToSteamId[p.PlayerId] = new CSteamID(p.SteamId64);
                 }
+                _direct?.SetLocalPlayerId(LocalPlayerId);
+                SendDirectCandidatesToPeer(1);
                 ModLogger.Info($"[SteamP2PTransport] Joined Host Lobby! Assigned LocalPlayerId={LocalPlayerId}");
                 OnPeerConnected?.Invoke(_peers.Find(p => p.PlayerId == LocalPlayerId));
+                return;
+            }
+
+            byte resolvedSender = senderId != 0 ? senderId : ResolvePlayerIdBySteamId(remoteSteamId);
+            if (pktType == PacketType.DirectEndpointExchange)
+            {
+                HandleDirectEndpointExchange(resolvedSender, reader);
+                return;
+            }
+            if (pktType == PacketType.DirectCutoverSync)
+            {
+                HandleDirectCutoverSync(resolvedSender, reader);
+                return;
+            }
+            if (pktType == PacketType.DirectFallbackBatch)
+            {
+                HandleDirectFallbackBatch(resolvedSender, reader);
                 return;
             }
 
@@ -407,9 +603,263 @@ namespace TABCoopMod.Networking
             }
         }
 
+        private void InitializeDirectFastPath(bool isHost)
+        {
+            DisposeDirectOnly();
+            try
+            {
+                _direct = new DirectFastPathManager(isHost);
+                _direct.SetLocalPlayerId(LocalPlayerId);
+                _direct.LocalCandidatesUpdated = (cands, token) =>
+                    _mainThreadActions.Enqueue(() => BroadcastDirectCandidatesToAll(cands, token));
+                _direct.PeerDirectCutoverNeeded = (peerId, _) =>
+                    _mainThreadActions.Enqueue(() => SendCutoverBarrierToPeer(peerId));
+                _direct.PeerFallbackTriggered = (peerId, msgs) =>
+                    _mainThreadActions.Enqueue(() => SendFallbackBatchViaSteam(peerId, msgs));
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[SteamP2PTransport] DirectFastPath init skipped (Steam P2P fallback active): {ex.Message}");
+                _direct = null;
+            }
+        }
+
+        private void DisposeDirectOnly()
+        {
+            _cutoverPendingTs.Clear();
+            _cutoverHoldQueue.Clear();
+            while (_mainThreadActions.TryDequeue(out _)) { }
+            try { _direct?.Dispose(); } catch { }
+            _direct = null;
+        }
+
+        private byte ResolvePlayerIdBySteamId(CSteamID remoteSteamId)
+        {
+            foreach (var kv in _playerToSteamId)
+            {
+                if (kv.Value == remoteSteamId) return kv.Key;
+            }
+            return 0;
+        }
+
+        private void SendDirectCandidatesToPeer(byte targetPlayerId)
+        {
+            if (_direct == null || targetPlayerId == 0 || targetPlayerId == LocalPlayerId) return;
+            if (!_playerToSteamId.TryGetValue(targetPlayerId, out var steamId) || !steamId.IsValid()) return;
+            var cands = _direct.GetLocalCandidatesSnapshot();
+            SendDirectCandidatesPayload(steamId, cands, _direct.SessionToken);
+        }
+
+        private void BroadcastDirectCandidatesToAll(IReadOnlyList<DirectEndpointCandidate> cands, ulong token)
+        {
+            if (!IsActive || _direct == null || cands == null) return;
+            if (IsHost)
+            {
+                foreach (var kv in _playerToSteamId)
+                {
+                    if (kv.Key != LocalPlayerId && kv.Value.IsValid())
+                        SendDirectCandidatesPayload(kv.Value, cands, token);
+                }
+            }
+            else if (LocalPlayerId != 0 && _hostSteamId.IsValid())
+            {
+                SendDirectCandidatesPayload(_hostSteamId, cands, token);
+            }
+        }
+
+        private void SendDirectCandidatesPayload(CSteamID targetSteamId, IReadOnlyList<DirectEndpointCandidate> cands, ulong token)
+        {
+            if (cands == null || cands.Count == 0) return;
+            SendToSteamUser(targetSteamId, SendChannel.ReliableCommand, PacketType.DirectEndpointExchange, w =>
+            {
+                w.Write(token);
+                int maxCount = Math.Min(cands.Count, 24);
+                w.Write((byte)maxCount);
+                for (int i = 0; i < maxCount; i++)
+                {
+                    var c = cands[i];
+                    byte[] ipBytes = c.Address.GetAddressBytes();
+                    w.Write((byte)c.Kind);
+                    w.Write((byte)ipBytes.Length);
+                    w.Write(ipBytes);
+                    w.Write((ushort)c.Port);
+                }
+            });
+        }
+
+        private void HandleDirectEndpointExchange(byte senderId, BinaryReader reader)
+        {
+            if (_direct == null || senderId == 0) return;
+            ulong token = reader.ReadUInt64();
+            byte count = reader.ReadByte();
+            var list = new List<DirectEndpointCandidate>(count);
+            for (int i = 0; i < count; i++)
+            {
+                var kind = (DirectCandidateKind)reader.ReadByte();
+                byte ipLen = reader.ReadByte();
+                byte[] ipBytes = reader.ReadBytes(ipLen);
+                ushort port = reader.ReadUInt16();
+                if (ipBytes.Length == 4 || ipBytes.Length == 16)
+                {
+                    list.Add(new DirectEndpointCandidate
+                    {
+                        Kind = kind,
+                        Address = new IPAddress(ipBytes),
+                        Port = port
+                    });
+                }
+            }
+            _direct.SetRemotePeerCandidates(senderId, token, list);
+        }
+
+        private void SendCutoverBarrierToPeer(byte peerId)
+        {
+            if (!IsActive || _direct == null || peerId == 0 || peerId == LocalPlayerId) return;
+            if (_cutoverPendingTs.ContainsKey(peerId) || _direct.IsPeerDirectActive(peerId)) return;
+            if (!_playerToSteamId.TryGetValue(peerId, out var steamId) || !steamId.IsValid()) return;
+
+            _cutoverPendingTs[peerId] = Stopwatch.GetTimestamp();
+            if (!_cutoverHoldQueue.ContainsKey(peerId))
+                _cutoverHoldQueue[peerId] = new List<HeldCommand>();
+
+            SendToSteamUser(steamId, SendChannel.ReliableCommand, PacketType.DirectCutoverSync, w => w.Write((byte)0));
+        }
+
+        private void HandleDirectCutoverSync(byte senderId, BinaryReader reader)
+        {
+            if (senderId == 0) return;
+            byte phase = reader.ReadByte();
+            if (phase == 0)
+            {
+                if (_playerToSteamId.TryGetValue(senderId, out var steamId) && steamId.IsValid())
+                {
+                    SendToSteamUser(steamId, SendChannel.ReliableCommand, PacketType.DirectCutoverSync, w => w.Write((byte)1));
+                }
+                return;
+            }
+
+            // Phase 1: Remote peer ACKed our barrier; all earlier Steam ReliableCommand packets have arrived.
+            _cutoverPendingTs.Remove(senderId);
+            _direct?.EnableDirectTxAfterBarrier(senderId, true);
+
+            if (_cutoverHoldQueue.TryGetValue(senderId, out var held) && held.Count > 0)
+            {
+                _playerToSteamId.TryGetValue(senderId, out var steamId);
+                for (int i = 0; i < held.Count; i++)
+                {
+                    var item = held[i];
+                    if (_direct == null || !_direct.TrySendPacket(senderId, SendChannel.ReliableCommand, item.Type, item.Payload))
+                    {
+                        if (steamId.IsValid())
+                            SendToSteamUserPayload(steamId, SendChannel.ReliableCommand, item.Type, item.Payload);
+                    }
+                }
+                held.Clear();
+            }
+        }
+
+        private void CheckExpiredCutoverBarriers()
+        {
+            if (_cutoverPendingTs.Count == 0) return;
+            long now = Stopwatch.GetTimestamp();
+            List<byte> expired = null;
+            foreach (var kv in _cutoverPendingTs)
+            {
+                double waitMs = (now - kv.Value) * 1000.0 / Stopwatch.Frequency;
+                if (waitMs >= 1500.0)
+                {
+                    if (expired == null) expired = new List<byte>();
+                    expired.Add(kv.Key);
+                }
+            }
+            if (expired == null) return;
+            for (int i = 0; i < expired.Count; i++)
+            {
+                byte peerId = expired[i];
+                if (_playerToSteamId.TryGetValue(peerId, out var steamId) && steamId.IsValid())
+                    FlushCutoverHoldQueueOverSteam(peerId, steamId);
+                else
+                {
+                    _cutoverPendingTs.Remove(peerId);
+                    _cutoverHoldQueue.Remove(peerId);
+                }
+            }
+        }
+
+        private void FlushCutoverHoldQueueOverSteam(byte peerId, CSteamID steamId)
+        {
+            _cutoverPendingTs.Remove(peerId);
+            if (_cutoverHoldQueue.TryGetValue(peerId, out var held) && held.Count > 0)
+            {
+                for (int i = 0; i < held.Count; i++)
+                    SendToSteamUserPayload(steamId, SendChannel.ReliableCommand, held[i].Type, held[i].Payload);
+                held.Clear();
+            }
+        }
+
+        private void SendFallbackBatchViaSteam(byte peerId, List<DirectFastPathManager.FallbackMessage> msgs)
+        {
+            if (!IsActive || msgs == null || msgs.Count == 0) return;
+            if (!_playerToSteamId.TryGetValue(peerId, out var steamId) || !steamId.IsValid()) return;
+
+            var cmdMsgs = new List<DirectFastPathManager.FallbackMessage>();
+            var bulkMsgs = new List<DirectFastPathManager.FallbackMessage>();
+            for (int i = 0; i < msgs.Count; i++)
+            {
+                if (msgs[i].Channel == SendChannel.ReliableCommand) cmdMsgs.Add(msgs[i]);
+                else bulkMsgs.Add(msgs[i]);
+            }
+
+            if (cmdMsgs.Count > 0)
+                SendFallbackSlice(steamId, SendChannel.ReliableCommand, cmdMsgs);
+            if (bulkMsgs.Count > 0)
+                SendFallbackSlice(steamId, SendChannel.ReliableOrdered, bulkMsgs);
+        }
+
+        private void SendFallbackSlice(CSteamID steamId, SendChannel steamChannel, List<DirectFastPathManager.FallbackMessage> msgs)
+        {
+            SendToSteamUser(steamId, steamChannel, PacketType.DirectFallbackBatch, w =>
+            {
+                w.Write((ushort)msgs.Count);
+                for (int i = 0; i < msgs.Count; i++)
+                {
+                    var m = msgs[i];
+                    w.Write(m.MsgId);
+                    w.Write((byte)m.Channel);
+                    w.Write((byte)m.Type);
+                    byte[] payload = m.Payload ?? Array.Empty<byte>();
+                    w.Write(payload.Length);
+                    if (payload.Length > 0) w.Write(payload);
+                }
+            });
+        }
+
+        private void HandleDirectFallbackBatch(byte senderId, BinaryReader reader)
+        {
+            ushort count = reader.ReadUInt16();
+            for (int i = 0; i < count; i++)
+            {
+                uint msgId = reader.ReadUInt32();
+                var channel = (SendChannel)reader.ReadByte();
+                var innerType = (PacketType)reader.ReadByte();
+                int len = reader.ReadInt32();
+                byte[] payload = len > 0 ? reader.ReadBytes(len) : Array.Empty<byte>();
+
+                if (_direct != null && _direct.WasMessageDeliveredViaDirect(senderId, channel, msgId))
+                    continue;
+
+                using (var ms = new MemoryStream(payload, false))
+                using (var innerReader = new BinaryReader(ms))
+                {
+                    OnPacketReceived?.Invoke(senderId, innerType, innerReader);
+                }
+            }
+        }
+
         public void Dispose()
         {
             IsActive = false;
+            DisposeDirectOnly();
             if (_currentLobbyId.IsValid())
             {
                 try { SteamMatchmaking.LeaveLobby(_currentLobbyId); } catch { }
