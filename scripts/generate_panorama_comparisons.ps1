@@ -1,11 +1,16 @@
 param(
-    [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
-    [string]$OutputDir = "<repo_root>\reports",
+    [string]$GameDir = "",
+    [string]$OutputDir = "",
     [int]$Resolution = 2048,
     [int]$BootTimeoutSec = 45
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "_resolve_paths.ps1")
+$GameDir = Resolve-TabGameDir $GameDir
+if ([string]::IsNullOrWhiteSpace($OutputDir)) {
+    $OutputDir = Join-Path (Resolve-TabRepoRoot) "reports"
+}
 
 function Invoke-Control {
     param([int]$Port, [string]$Cmd, [hashtable]$CmdArgs = @{})

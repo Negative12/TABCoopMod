@@ -8,18 +8,20 @@
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts/run_chaos_two_instance.ps1 `
-#       -SavePath "%USERPROFILE%\Documents\My Games\They Are Billions\Saves\test.zxsav" `
+#       -SavePath "$env:USERPROFILE\Documents\My Games\They Are Billions\Saves\test.zxsav" `
 #       -Chaos "latency=120;jitter=30;loss=0.02;disconnect=4000-5000;seed=42"
 
 param(
     [Parameter(Mandatory=$true)][string]$SavePath,
     [string]$Chaos = "latency=120;jitter=30;loss=0.02;disconnect=4000-5000;seed=42",
-    [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
+    [string]$GameDir = "",
     [int]$TimeoutSeconds = 240,
     [int]$HoldSeconds = 0
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "_resolve_paths.ps1")
+$GameDir = Resolve-TabGameDir $GameDir
 $exe = Join-Path $GameDir "TheyAreBillions.exe"
 if (-not (Test-Path $exe)) { Write-Error "Game exe not found: $exe"; exit 2 }
 if (-not (Test-Path $SavePath)) { Write-Error "Save not found: $SavePath"; exit 2 }

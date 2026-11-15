@@ -4,18 +4,20 @@
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts/run_game_with_control.ps1 `
-#       -SavePath "%USERPROFILE%\Documents\My Games\They Are Billions\Saves\1_Backup.zxsav"
+#       -SavePath "$env:USERPROFILE\Documents\My Games\They Are Billions\Saves\1_Backup.zxsav"
 
 param(
     [string]$SavePath = "",
     [int]$ControlPort = 27901,
-    [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
+    [string]$GameDir = "",
     [string]$ShotDir = "",
     [switch]$NoAutoLoad,
     [switch]$AutoShotOff
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "_resolve_paths.ps1")
+$GameDir = Resolve-TabGameDir $GameDir
 $exe = Join-Path $GameDir "TheyAreBillions.exe"
 if (-not (Test-Path $exe)) { Write-Error "Game exe not found: $exe"; exit 2 }
 

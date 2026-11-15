@@ -5,12 +5,15 @@
 # and optionally tiles Host (left) and Client (right) side-by-side if Windowed (e.g. 1280x720).
 
 param(
-    [string]$SavePath = "%USERPROFILE%\Documents\My Games\They Are Billions\Saves\1_Backup.zxsav",
-    [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
+    [string]$SavePath = "",
+    [string]$GameDir = "",
     [switch]$TileSideBySide
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "_resolve_paths.ps1")
+$GameDir = Resolve-TabGameDir $GameDir
+if ([string]::IsNullOrWhiteSpace($SavePath)) { $SavePath = Resolve-TabSavePath "1_Backup.zxsav" }
 $exe = Join-Path $GameDir "TheyAreBillions.exe"
 $hostLog = Join-Path $GameDir "TABCoopMod.host.log"
 $clientLog = Join-Path $GameDir "TABCoopMod.client.log"

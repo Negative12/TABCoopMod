@@ -1,10 +1,8 @@
 # 00 — 开发指南、工程铁律与踩坑手册 (Development Guide)
 
-> **工作区路径**: `<repo_root>`
-> **本机游戏路径**: `<SteamDir>\steamapps\common\They Are Billions`
 > **目标游戏版本**: `TheyAreBillions.exe` v1.0.14.29 (x64, .NET Framework 4.6)
 
-本文档为所有人类开发者与 AI Agent（Antigravity / Claude Code / Codex）的**工程规范与工具链手册**，规定必须遵守的铁律、构建部署方法及实机验证过的 CLR / HarmonyX 避坑要点。
+本文档为所有人类开发者提供**工程规范与工具链手册**，规定必须遵守的铁律、构建部署方法及实机验证过的 CLR / HarmonyX 避坑要点。
 
 ---
 
@@ -28,7 +26,7 @@
 | **.NET SDK** | `.NET SDK 10.0.100` | Mod 主工程目标框架 `net46` / `x64`（`<AllowUnsafeBlocks>true</AllowUnsafeBlocks>`）；MCP 服务端为 `net10.0`。 |
 | **游戏存档目录** | `%USERPROFILE%\Documents\My Games\They Are Billions\Saves` | 存档由 `.zxsav`（加密 ZIP）+ `.zxcheck`（校验文本，与 `.zxsav` 文件名绑定）成对组成。 |
 | **Mod 运行日志** | `<游戏目录>\TABCoopMod.log` | `ModLogger` 路径基于 `typeof(ModLogger).Assembly.Location`；多开可通过环境变量 `TABCOOP_LOG_NAME` 分离日志。 |
-| **依赖库说明** | `lib/` + `System.ValueTuple.dll` | `TABCoopMod.csproj` 引用 `lib/`（`<Private>False</Private>`，不复制到游戏目录）及游戏目录的 `System.ValueTuple.dll`，**不要改动引用配置**。 |
+| **依赖库说明** | `lib/`（由 `extract_sdk.ps1` 导出） | `TABCoopMod.csproj` 统一从 `lib/` 引用游戏与引擎程序集（`<Private>False</Private>`，不复制到游戏目录）；运行构建前请先执行 `scripts/extract_sdk.ps1`。 |
 
 ---
 

@@ -3,12 +3,16 @@
 # to the They Are Billions game directory WITHOUT modifying TheyAreBillions.exe.
 
 param(
-    [string]$WorkspaceDir = "<repo_root>",
-    [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions"
+    [string]$WorkspaceDir = "",
+    [string]$GameDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+. (Join-Path $PSScriptRoot "_resolve_paths.ps1")
+if ([string]::IsNullOrWhiteSpace($WorkspaceDir)) { $WorkspaceDir = Resolve-TabRepoRoot }
+$GameDir = Resolve-TabGameDir $GameDir
 
 Write-Host "[1/3] Building TABCoopMod (Release)..."
 dotnet build "$WorkspaceDir\src\TABCoopMod\TABCoopMod.csproj" -c Release

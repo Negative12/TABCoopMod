@@ -1,84 +1,140 @@
-# TABCoopMod — 《亿万僵尸》(They Are Billions) 2-3人 Steam P2P 联机 Mod
+# TABCoopMod — 《亿万僵尸》(They Are Billions) 2~3 人 Steam P2P 合作联机 Mod
 
-> **工作空间路径**: `<repo_root>`
-> **本机游戏路径**: `<SteamDir>\steamapps\common\They Are Billions`
-> **目标游戏版本**: `TheyAreBillions.exe` v1.0.14.29 (64-bit, .NET Framework 4.6)
+`TABCoopMod` 是为即时战略游戏《亿万僵尸》（They Are Billions, Steam x64 v1.0.14.29）打造的无服务器合作联机 Mod。通过 `.NET AppDomainManager` 运行时注入与 HarmonyX 内存补丁（不修改游戏 exe/dll 磁盘字节），支持 **2~3 名玩家** 基于 Steam P2P 大厅共同游玩生存模式、战役与自定义地图。
 
 ---
 
-## 🚀 接手 Agent 请先读这两份
+## 核心特性
 
-1. **[`AGENTS.md`](AGENTS.md)**（或 [`CLAUDE.md`](CLAUDE.md)）—— 铁律、环境事实、代码地图、给 Agent 的工作方式建议
-2. **[`docs/06_PROJECT_STATUS.md`](docs/06_PROJECT_STATUS.md)** —— 当前门禁验收报告（Gate A1/A2/B1/B2/C/D 全通过）、已知边界与下一步任务
+### 执政官共控模式（Archon Mode，当前默认玩法）
+- **同阵营共控，操作完全独立**：2~3 名玩家共同管理同一个人类基地、共享资源与科技，但每位玩家拥有**完全独立的摄像机视角、鼠标框选、编队热键与建造上下文**。
+- **传统 RTS 等候大厅**：主菜单内置【多人合作模式】（快捷键 `K`），支持 Steam 好友房创建/邀请自动加入，以及 `127.0.0.1:27099` 本地双开测试；客机准备门控、房主复用原版【读取存档 / 新建生存游戏 / 自定义地图】界面及重返大厅功能。
+- **协同交互体验**：
+  - 小地图实时渲染队友彩色视野框（P1 蓝 / P2 绿 / P3 橙）。
+  - `Alt + 左键` 地面与小地图同步战术信号打点（Ping）。
+  - 空格或按钮同步冻结暂停（支持暂停期间微操），恢复时显示 3 秒顶居中倒计时。
+  - 本地建造幽灵占位框、资源预扣防透支与 0ms 单位语音即时确认。
+  - 市长二选一按 ID 确定性同步，杜绝双端重复领奖。
+- **多人新生存局均衡预设**：房主可在大厅切换【联机均衡】与【原版】预设，针对 2P/3P 自动扩展生存地图尺寸（`280` / `304` 格）、初始巡逻兵力与指挥中心工人，并修正非 2 的幂次地图尺寸下的感染村镇/遗迹生成边界。
+- **确定性同步与自愈**：30Hz 锁步状态哈希校验与 `Auto-resync` 自动快照重建恢复。
 
-`.agents/skills/` 与 `.claude/skills/` 下均维护了三个专用 skill：`tab-reverse-engineering`、`tab-build-and-test`、`tab-lockstep-sync`。
+> 远期规划（Phase 4）：独立基地模式（多指挥中心生成、独立资源账本与单位所有权隔离）。
 
-## 构建与部署速查
+---
+
+## 多人新生存局平衡性对比展示（4 场景同种子全景）
+
+开启【联机均衡】预设后，模组会针对 2P / 3P 协同扩张效率自动扩图（`256 → 280 / 304`）、补充初始兵力与工人、按面积配平资源/游荡僵尸与波次强度，并修正非 2 的幂次地图尺寸下的感染村镇生成边界。
+
+- **交互式全景对比报告**：[`reports/panorama_comparison.html`](reports/panorama_comparison.html)（下载或本地打开可缩放对比同种子全图与各项数值）
+- **定量指标数据（JSON）**：[`reports/panorama_metrics.json`](reports/panorama_metrics.json)
+
+| 场景 (`Seed`) | 档位 (`NCells` / 可玩宽) | 初始单位与额外工人 | 游荡僵尸总量 | 感染村镇建筑 | 巨人 / 变异体 |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **BR 100% 暗黑荒原** (`202601`) | Vanilla `256` (`148`) | `4R + 1S` (`+0W`) | `5,198` | `7` | `1 / 1` |
+| **BR 100% 暗黑荒原** (`202601`) | **2P `280` (`164`)** / **3P `304` (`178`)** | `6R + 1S` (`+2W`) / `6R + 2S` (`+3W, +1F`) | `9,849` / `11,485` | `7` / `7` | `1/1` / `1/1` |
+| **DS 120% 干旱高地** (`202602`) | Vanilla `256` vs **2P `280`** | `4R + 1S` → `6R + 1S` (`+2W`) | `13,067` → `17,370` | `64` → `55` | `2/6` → `2/8` |
+| **FA 120% 寒冰荒原** (`202603`) | Vanilla `256` vs **3P `304`** | `4R + 1S` → `6R + 2S` (`+3W, +1F`) | `9,769` → `17,448` | `3` → `7` | `0/0` → `0/0` |
+| **VO 900% 剧毒荒原** (`202604`) | Vanilla `256` vs **2P `280`** / **3P `304`** | `6R + 1S` (`+2W`) / `6R + 2S` (`+3W, +1F`) | `15,652` → `22,295` / `25,952` | `81` → `95` / `115` | `6/12` → `6/15` / `9/18` |
+
+<details>
+<summary>展开查看 4 场景同种子全景对比图（Vanilla vs 2P / 3P）</summary>
+
+### BR 100% Standard Survival (`Seed 202601`)
+| Vanilla (`256`) | Co-op 2P (`280`) | Co-op 3P (`304`) |
+| :---: | :---: | :---: |
+| ![BR Vanilla](reports/panoramas/br_100_vanilla.jpg) | ![BR 2P](reports/panoramas/br_100_coop2p.jpg) | ![BR 3P](reports/panoramas/br_100_coop3p.jpg) |
+
+### DS 120% Arid Highlands (`Seed 202602`)
+| Vanilla (`256`) | Co-op 2P (`280`) |
+| :---: | :---: |
+| ![DS Vanilla](reports/panoramas/ds_120_vanilla.jpg) | ![DS 2P](reports/panoramas/ds_120_coop2p.jpg) |
+
+### FA 120% Frozen Tundra (`Seed 202603`)
+| Vanilla (`256`) | Co-op 3P (`304`) |
+| :---: | :---: |
+| ![FA Vanilla](reports/panoramas/fa_120_vanilla.jpg) | ![FA 3P](reports/panoramas/fa_120_coop3p.jpg) |
+
+### VO 900% Caustic Nightmare (`Seed 202604`)
+| Vanilla (`256`) | Co-op 2P (`280`) | Co-op 3P (`304`) |
+| :---: | :---: | :---: |
+| ![VO Vanilla](reports/panoramas/vo_900_vanilla.jpg) | ![VO 2P](reports/panoramas/vo_900_coop2p.jpg) | ![VO 3P](reports/panoramas/vo_900_coop3p.jpg) |
+
+</details>
+
+---
+
+## 玩家安装与联机指南
+
+### 前置要求
+- Steam 正版《They Are Billions》（**64 位版本 `TheyAreBillions.exe` v1.0.14.29**）
+- 联机所有玩家需安装**完全相同的 Mod 版本**
+
+### 安装步骤
+1. 完全关闭游戏。
+2. 在 Steam 中右键《They Are Billions》→ **管理** → **浏览本地文件**，打开游戏根目录。
+3. **备份**游戏根目录中原有的 `TheyAreBillions.exe.config`（例如重命名为 `TheyAreBillions.exe.config.bak`）。
+4. 将发行压缩包（如 `TABCoopMod-v0.1.0.zip`）中的所有文件**直接解压到游戏根目录**，提示替换 `TheyAreBillions.exe.config` 时选择覆盖。
+5. 通过 Steam 正常启动游戏，主菜单出现【多人合作模式】即安装成功。
+
+### 卸载步骤
+1. 关闭游戏，删除根目录下的 `TABCoopMod.dll`、`TABCoopMod.pdb`、`0Harmony.dll`、`steam_appid.txt`、`TABCoopMod.log` 与 `TABCoopMod_使用说明.txt`。
+2. 还原之前备份的 `TheyAreBillions.exe.config.bak`（或通过 Steam “验证游戏文件的完整性”恢复原版配置）。
+
+---
+
+## 开发者构建与源码结构
+
+### 环境要求
+- Windows x64 + PowerShell
+- .NET SDK（推荐 .NET 8/10 SDK，主 Mod 目标框架为 `net46` / `x64`，MCP 测试服务端为 `net10.0`）
+- 本机已安装 Steam 版《They Are Billions》
+
+### 初始化 SDK 引用与构建部署
 
 ```powershell
+# 1. 首次克隆后，从本机游戏主程序导出编译期只读引用库到 lib/（不会修改游戏文件）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/extract_sdk.ps1
+
+# 2. 构建 Release 版本 Mod
 dotnet build src/TABCoopMod/TABCoopMod.csproj -c Release
 
-# 先关游戏进程，否则 0Harmony.dll 被占用导致部署失败
-Get-Process *TheyAreBillions* -ErrorAction SilentlyContinue | Stop-Process -Force
-powershell -ExecutionPolicy Bypass -File scripts/install_mod.ps1
+# 3. 打包面向玩家的纯解压发行压缩包（输出至 dist/）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1
 
-# 日志
-# "<SteamDir>\steamapps\common\They Are Billions\TABCoopMod.log"
+# （可选）开发机快速部署/卸载到本机游戏目录（部署前请确保游戏已关闭）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_mod.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall_mod.ps1
 ```
 
----
+> 脚本默认自动从 Steam 注册表与 `libraryfolders.vdf` 探测游戏安装路径，也可显式传入 `-GameDir "<路径>"` 或设置环境变量 `$env:TAB_GAME_DIR`。
 
-## 1. 项目简介
-
-`TABCoopMod` 是为单机即时战略游戏《亿万僵尸》（They Are Billions）构建的无服务器（Steam P2P）多人合作联机 Mod，支持 **2~3 名玩家** 共同进行生存模式（Survival）与战役/自定义关卡。
-
-项目分两大演进阶段：
-1. **第一阶段（当前核心目标）—— 执政官模式（Archon Mode / 共控一族）**：
-   2-3 名玩家共同操控同一个人类帝国基地，共享视野、资源与科技，但每位玩家拥有**完全独立的摄像机视角、独立的鼠标框选、独立的控制面板与独立编队**。支持小地图队友视野框实时渲染、小地图信号打点（Ping）、同步冻结暂停微操与 3 秒恢复倒计时、市长按 ID 确定性同步。
-2. **第二阶段（Phase 4 远期规划）—— 独立基地模式（Independent Bases Mode）**：
-   开局在地图不同区域生成 2-3 座独立指挥中心（Command Center），Mod 层面维护各自独立的资源账本、供电网络与单位控制权，共同抵御多路尸潮。
-
----
-
-## 2. 文档索引（Documentation Index）
-
-| 文档路径 | 类别 | 核心内容说明 |
-| :--- | :--- | :--- |
-| [`docs/00_DEV_GUIDE.md`](docs/00_DEV_GUIDE.md) | 工程规范 | **开发指南、铁律与踩坑手册**：绝对铁律、工具链命令、CLR / HarmonyX 实机深坑与标准 SOP。 |
-| [`docs/01_PRD_AND_GAMEPLAY.md`](docs/01_PRD_AND_GAMEPLAY.md) | 产品规范 | **产品需求与玩法交互设计**：执政官模式交互细节、暂停/倍速/市长同步规则与独立基地规划。 |
-| [`docs/02_ARCHITECTURE_DESIGN.md`](docs/02_ARCHITECTURE_DESIGN.md) | 架构设计 | **核心技术架构设计**：`AppDomainManager` 注入、确定性沙盒、指令拦截与回放、内存存档流与 Auto-resync。 |
-| [`docs/03_REVERSE_ENGINEERING_MAP.md`](docs/03_REVERSE_ENGINEERING_MAP.md) | 逆向参考 | **逆向工程符号映射字典**：与 `ObfuscatedSymbols.cs` 同步的混淆符号表、坐标/视野结论与原版引擎 Bug 索引。 |
-| [`docs/04_NETWORK_PROTOCOL.md`](docs/04_NETWORK_PROTOCOL.md) | 协议规范 | **网络通信协议与状态校验规范**：`INetworkTransport`、8 字节包头、`NetCommand` 载荷与 `StateHasher` v2 算法。 |
-| [`docs/05_DEVELOPMENT_ROADMAP.md`](docs/05_DEVELOPMENT_ROADMAP.md) | 路线图 | **分阶段开发路线图与门禁**：Phase 0 ~ Phase 4 完成度、实际源码交付物与待验收项。 |
-| [`docs/06_PROJECT_STATUS.md`](docs/06_PROJECT_STATUS.md) | 实时状态 | **当前项目状态与门禁验收报告**：Gate A1/A2/B1/B2/C/D 实测结果、工程边界与下一步优先级。 |
-| [`docs/07_TESTING_AND_MCP.md`](docs/07_TESTING_AND_MCP.md) | 测试工具 | **自动化测试台与 MCP 操作指南**：17 个 MCP 工具、双进程回放验证、Loopback/Chaos 联机脚本与存档库。 |
-| [`docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md`](docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md) | 专题备忘 | **经典 RTS 同步机制对比与后续可复用优化评估**：引擎底层差异复盘与三梯度改造工程量评估。 |
-| [`docs/09_MULTIPLAYER_BALANCE_DESIGN.md`](docs/09_MULTIPLAYER_BALANCE_DESIGN.md) | 平衡设计 | **多人执政官模式生存新局平衡性设计论证与实测**：`280`/`304` 扩图、出兵/村庄/尸潮配平、Transpiler 边界修正与同种子全景对比。 |
-| [`docs/archive/`](docs/archive/ROOT_CAUSE_POSTMORTEMS.md) | 历史归档 | **疑难根因复盘与会话演进日志**：已解决的技术难题深挖档案（`ROOT_CAUSE_POSTMORTEMS.md`）与 S1~S6 里程碑记录。 |
-
----
-
-## 3. 目录结构
+### 目录结构
 
 ```text
-<repo_root>\
-├── README.md                           # 项目总览与文档导航
-├── AGENTS.md / GEMINI.md / CLAUDE.md   # Agent 工作规则与代码地图
-├── .gitignore                          # 忽略提取的二进制库、编译产物、截图与日志
-├── docs/                               # 规范、架构、字典、状态与历史归档
-├── scripts/                            # SDK 提取、反编译、构建部署、回放与 Chaos 测试脚本
-├── lib/                                # 提取出的游戏与引擎引用程序集 (由 extract_sdk.ps1 生成)
+TABCoopMod/
+├── README.md                           # 项目简介、玩家安装与开发构建指南
+├── docs/                               # 工程规范、架构设计、协议与验收报告
+├── scripts/                            # SDK 提取、构建部署、打包与双开回归测试脚本
+├── lib/                                # 本地提取的只读引用程序集（由 extract_sdk.ps1 生成，已 gitignore）
 └── src/
     ├── TABCoopMod/                     # Mod 主工程 (.NET Framework 4.6, x64)
-    └── TABCoopMod.Mcp/                 # 独立 MCP stdio 服务端 (.NET 10)
+    └── TABCoopMod.Mcp/                 # 独立自动化控制/MCP stdio 服务端 (.NET 10)
 ```
 
 ---
 
-## 4. 快速初始化 SDK 引用库
+## 技术文档索引
 
-首次克隆或进入工作区时，运行以下命令从本机《亿万僵尸》主程序中解密并导出未混淆的引擎核心库到 `lib/`：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<repo_root>/scripts/extract_sdk.ps1"
-```
+| 文档 | 内容说明 |
+| :--- | :--- |
+| [`docs/00_DEV_GUIDE.md`](docs/00_DEV_GUIDE.md) | 工程铁律、CLR / HarmonyX 踩坑手册与工具链规范 |
+| [`docs/01_PRD_AND_GAMEPLAY.md`](docs/01_PRD_AND_GAMEPLAY.md) | 执政官模式玩法设计、状态划分与协同规则 |
+| [`docs/02_ARCHITECTURE_DESIGN.md`](docs/02_ARCHITECTURE_DESIGN.md) | 注入机制、确定性沙盒、指令回放与内存快照流 |
+| [`docs/03_REVERSE_ENGINEERING_MAP.md`](docs/03_REVERSE_ENGINEERING_MAP.md) | 逆向符号映射表与原生引擎行为说明 |
+| [`docs/04_NETWORK_PROTOCOL.md`](docs/04_NETWORK_PROTOCOL.md) | 传输抽象、包头协议、`NetCommand` 与 `StateHasher` v2 |
+| [`docs/05_DEVELOPMENT_ROADMAP.md`](docs/05_DEVELOPMENT_ROADMAP.md) | 分阶段里程碑与源码交付物清单 |
+| [`docs/06_PROJECT_STATUS.md`](docs/06_PROJECT_STATUS.md) | 当前门禁实测状态与下一步待办 |
+| [`docs/07_TESTING_AND_MCP.md`](docs/07_TESTING_AND_MCP.md) | 自动化回放验证、Chaos 故障注入与控制通道测试指南 |
+| [`docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md`](docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md) | 经典 RTS 同步机制对比与后续优化评估 |
+| [`docs/09_MULTIPLAYER_BALANCE_DESIGN.md`](docs/09_MULTIPLAYER_BALANCE_DESIGN.md) | 多人执政官生存新局平衡性设计与数值模型 |

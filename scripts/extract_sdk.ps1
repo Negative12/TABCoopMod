@@ -3,12 +3,18 @@
 # from TheyAreBillions.exe in memory without modifying any game files on disk.
 
 param(
-    [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
-    [string]$OutDir = "<repo_root>\lib"
+    [string]$GameDir = "",
+    [string]$OutDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+. (Join-Path $PSScriptRoot "_resolve_paths.ps1")
+$GameDir = Resolve-TabGameDir $GameDir
+if ([string]::IsNullOrWhiteSpace($OutDir)) {
+    $OutDir = Join-Path (Resolve-TabRepoRoot) "lib"
+}
 
 if (-not (Test-Path "$GameDir\TheyAreBillions.exe")) {
     throw "TheyAreBillions.exe not found at: $GameDir"
@@ -48,7 +54,10 @@ foreach ($kv in $map.GetEnumerator()) {
     Write-Host ("  -> {0,-25} ({1,10:N0} bytes)" -f $kv.Key, $bytes.Length)
 }
 
-# Copy read-only reference of TheyAreBillions.exe and SlimDX.dll for MSBuild compile-time reference
+# Copy read-only reference of TheyAreBillions.exe, SlimDX.dll and System.ValueTuple.dll for MSBuild compile-time reference
 Copy-Item "$GameDir\TheyAreBillions.exe" (Join-Path $OutDir "TheyAreBillions.exe") -Force
 Copy-Item "$GameDir\SlimDX.dll" (Join-Path $OutDir "SlimDX.dll") -Force
+if (Test-Path "$GameDir\System.ValueTuple.dll") {
+    Copy-Item "$GameDir\System.ValueTuple.dll" (Join-Path $OutDir "System.ValueTuple.dll") -Force
+}
 Write-Host "SDK extraction completed successfully!"

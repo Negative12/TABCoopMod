@@ -1,11 +1,13 @@
 param(
-    [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
+    [string]$GameDir = "",
     [string]$SaveName = "1_Backup",
     [int]$BootTimeoutSec = 45,
     [int]$LoadTimeoutSec = 60
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "_resolve_paths.ps1")
+$GameDir = Resolve-TabGameDir $GameDir
 
 function Invoke-Control {
     param(

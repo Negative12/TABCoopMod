@@ -44,7 +44,7 @@
 ```powershell
 # 自动读档进入关卡（推荐）
 powershell -ExecutionPolicy Bypass -File scripts/run_game_with_control.ps1 `
-    -SavePath "%USERPROFILE%\Documents\My Games\They Are Billions\Saves\6666.zxsav"
+    -SavePath "$env:USERPROFILE\Documents\My Games\They Are Billions\Saves\6666.zxsav"
 
 # 手动进游戏后再开控制通道
 powershell -ExecutionPolicy Bypass -File scripts/run_game_with_control.ps1 -NoAutoLoad
@@ -90,11 +90,11 @@ powershell -ExecutionPolicy Bypass -File scripts/control_smoke.ps1 -Port 27901
 ```powershell
 # 战役档 120 tick 验证
 powershell -ExecutionPolicy Bypass -File scripts/run_replay_verify.ps1 `
-    -SavePath "%USERPROFILE%\Documents\My Games\They Are Billions\Saves\1_Backup.zxsav" -Ticks 120
+    -SavePath "$env:USERPROFILE\Documents\My Games\They Are Billions\Saves\1_Backup.zxsav" -Ticks 120
 
 # 生存大档 180 tick 验证（可选 -ShotCam "cx,cy,w,h" 与 -RevealMap 采集可视化截图）
 powershell -ExecutionPolicy Bypass -File scripts/run_replay_verify.ps1 `
-    -SavePath "%USERPROFILE%\Documents\My Games\They Are Billions\Saves\6666.zxsav" -Ticks 180
+    -SavePath "$env:USERPROFILE\Documents\My Games\They Are Billions\Saves\6666.zxsav" -Ticks 180
 ```
 - 辅助对比脚本：
   - `scripts/compare_hashes.ps1`：逐 tick 比对 `coop_replay_run1/2.timeline` 的 `hash/entities/pos/life/proj/prod/resv`。
@@ -105,12 +105,12 @@ powershell -ExecutionPolicy Bypass -File scripts/run_replay_verify.ps1 `
 ```powershell
 # 洁净回环 65s 同步验证
 powershell -ExecutionPolicy Bypass -File scripts/run_chaos_two_instance.ps1 `
-    -SavePath "%USERPROFILE%\Documents\My Games\They Are Billions\Saves\6666.zxsav" `
+    -SavePath "$env:USERPROFILE\Documents\My Games\They Are Billions\Saves\6666.zxsav" `
     -Chaos "" -TimeoutSeconds 90 -HoldSeconds 65
 
 # 带延迟 / 抖动 / 丢包 / 断连的故障注入压测
 powershell -ExecutionPolicy Bypass -File scripts/run_chaos_two_instance.ps1 `
-    -SavePath "%USERPROFILE%\Documents\My Games\They Are Billions\Saves\1_Backup.zxsav" `
+    -SavePath "$env:USERPROFILE\Documents\My Games\They Are Billions\Saves\1_Backup.zxsav" `
     -Chaos "latency=120;jitter=30;loss=0.02;disconnect=4000-5000;seed=42" -TimeoutSeconds 90 -HoldSeconds 60
 ```
 - 日志自动分离为 `<游戏目录>\TABCoopMod.host.log` 与 `TABCoopMod.client.log`。
@@ -137,4 +137,4 @@ powershell -ExecutionPolicy Bypass -File scripts/run_chaos_two_instance.ps1 `
 | 操作后画面无变化 | 存档处于暂停态（先 `set_paused{paused:false}`），或建造坐标/资源不合法被游戏拒绝。 |
 | 协议细节（ControlServer） | 仅监听 `127.0.0.1` 换行 JSON，单请求 10s 超时（示例：`{"id":1,"tool":"game_state","args":{}}`）。 |
 | 等候大厅端到端测试（[`verify_lobby_flow.ps1`](../scripts/verify_lobby_flow.ps1)） | 双开无 `TABCOOP_TEST`（控制端口 `27901`/`27902`），验证 `open_lobby`、`lobby_state`、`lobby_action`（`probe`/`host_loopback`/`join_loopback`/`toggle_ready`/`open_new_survival`/`close_top_modal`/`load_save`/`return_to_menu`）、动态随机种子滚动、读档同步与方案 A 退回大厅全流程并保存截图。 |
-| 生存新局平衡与全景图测试 | [`verify_new_survival_balance.ps1`](../scripts/verify_new_survival_balance.ps1) 验证大厅 `Co-op Balanced` / `Vanilla` 切换同步及开局实测一致；[`generate_panorama_comparisons.ps1`](../scripts/generate_panorama_comparisons.ps1) 调用 `ControlServer` 扩展指令 `start_survival`、`capture_panorama` 与 `map_metrics` 生成 4 场景同种子全景图及 [`panorama_metrics.json`](../reports/panorama_metrics.json) / [`panorama_comparison.html`](../reports/panorama_comparison.html)。 |
+| 生存新局平衡与全景图测试 | [`verify_new_survival_balance.ps1`](../scripts/verify_new_survival_balance.ps1) 验证大厅 `Co-op Balanced` / `Vanilla` 切换同步及开局实测一致；[`generate_panorama_comparisons.ps1`](../scripts/generate_panorama_comparisons.ps1) 调用 `ControlServer` 扩展指令 `start_survival`、`capture_panorama` 与 `map_metrics` 生成 4 场景同种子全景图及 `reports/panorama_metrics.json` / `reports/panorama_comparison.html`。 |

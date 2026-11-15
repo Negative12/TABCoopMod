@@ -1,10 +1,12 @@
 param(
-    [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
+    [string]$GameDir = "",
     [int]$BootTimeoutSec = 45,
     [int]$LoadTimeoutSec = 90
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "_resolve_paths.ps1")
+$GameDir = Resolve-TabGameDir $GameDir
 
 function Invoke-Control {
     param([int]$Port, [string]$Cmd, [hashtable]$Params = @{})

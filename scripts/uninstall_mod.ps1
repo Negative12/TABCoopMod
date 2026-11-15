@@ -2,11 +2,14 @@
 # Cleanly removes TABCoopMod files and restores the original TheyAreBillions.exe.config.
 
 param(
-    [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions"
+    [string]$GameDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+. (Join-Path $PSScriptRoot "_resolve_paths.ps1")
+$GameDir = Resolve-TabGameDir $GameDir
 
 $configPath = "$GameDir\TheyAreBillions.exe.config"
 $backupPath = "$GameDir\TheyAreBillions.exe.config.bak"

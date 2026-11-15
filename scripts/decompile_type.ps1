@@ -1,18 +1,22 @@
 # decompile_type.ps1
 # Helper script for AI Agents to decompile any class/struct/enum from TheyAreBillions.exe or DXVision.dll on demand.
 # Usage:
-#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<repo_root>/scripts/decompile_type.ps1" -Assembly "TheyAreBillions.exe" -TypeName "ZX.Commands.Train"
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/decompile_type.ps1 -Assembly "TheyAreBillions.exe" -TypeName "ZX.Commands.Train"
 
 param(
     [Parameter(Mandatory=$true)]
     [string]$TypeName,
 
     [string]$Assembly = "TheyAreBillions.exe",
-    [string]$WorkspaceDir = "<repo_root>"
+    [string]$WorkspaceDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+if ([string]::IsNullOrWhiteSpace($WorkspaceDir)) {
+    $WorkspaceDir = Split-Path -Parent $PSScriptRoot
+}
 
 $libDir = Join-Path $WorkspaceDir "lib"
 $targetAsm = Join-Path $libDir $Assembly

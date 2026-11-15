@@ -4,7 +4,7 @@
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts/run_replay_verify.ps1 `
-#       -SavePath "%USERPROFILE%\Documents\My Games\They Are Billions\Saves\test.zxsav" -Ticks 200
+#       -SavePath "$env:USERPROFILE\Documents\My Games\They Are Billions\Saves\test.zxsav" -Ticks 200
 
 param(
     [Parameter(Mandatory=$true)][string]$SavePath,
@@ -12,11 +12,13 @@ param(
     [ValidateSet("twoproc","inproc")][string]$RunMode = "twoproc",
     [string]$ShotCam = "",
     [switch]$RevealMap,
-    [string]$GameDir = "<SteamDir>\steamapps\common\They Are Billions",
+    [string]$GameDir = "",
     [int]$TimeoutSeconds = 180
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "_resolve_paths.ps1")
+$GameDir = Resolve-TabGameDir $GameDir
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
 $ShotDir = Join-Path $RepoRoot "tabcoop_shots"
