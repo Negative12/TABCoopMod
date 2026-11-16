@@ -108,6 +108,13 @@ namespace TABCoopMod.Core
         private static MethodInfo _methodLevelSysCapturePanorama;
         private static MethodInfo _methodLevelSysEnterGameView;
         private static MethodInfo _mInitLevel;
+        private static PropertyInfo _propLevelStateEndStatus;
+        private static FieldInfo _fieldLevelSysGameEnded;
+        private static FieldInfo _fieldLevelSysScreenAnim;
+        private static MethodInfo _methodLevelSysTriggerGameEnd;
+        private static MethodInfo _methodLevelSysShowSurvivalEnd;
+        private static MethodInfo _methodLevelSysShowCampaignEnd;
+        private static MethodInfo _methodGameShowMayorSelection;
         private static Type _typeZXGameState;
         private static PropertyInfo _propRandomParamsNCells;
         private static PropertyInfo _propRandomParamsFactorDuration;
@@ -388,6 +395,25 @@ namespace TABCoopMod.Core
                 _mInitLevel = TypeZXSystemGameLevel != null
                     ? AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_InitLevel, new[] { typeof(DXLevel) })
                     : null;
+                _propLevelStateEndStatus = AccessTools.Property(typeof(ZXLevelState), "EndStatus");
+                _fieldLevelSysGameEnded = TypeZXSystemGameLevel != null
+                    ? AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_GameEndedFlag)
+                    : null;
+                _fieldLevelSysScreenAnim = TypeZXSystemGameLevel != null
+                    ? AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_ScreenAnim)
+                    : null;
+                _methodLevelSysTriggerGameEnd = TypeZXSystemGameLevel != null
+                    ? AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_TriggerGameEnd, new[] { typeof(bool) })
+                    : null;
+                _methodLevelSysShowSurvivalEnd = TypeZXSystemGameLevel != null
+                    ? AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_ShowSurvivalEnd, new[] { typeof(bool), typeof(bool) })
+                    : null;
+                _methodLevelSysShowCampaignEnd = TypeZXSystemGameLevel != null
+                    ? AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_ShowCampaignEnd, new[] { typeof(bool), typeof(bool) })
+                    : null;
+                _methodGameShowMayorSelection = TypeZXGame != null
+                    ? AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_ZXGame_ShowMayorSelection, Type.EmptyTypes)
+                    : null;
                 _typeZXGameState = typeof(ZXGameState);
 
                 if (_typeZXRandomLevelParams != null)
@@ -466,6 +492,13 @@ namespace TABCoopMod.Core
                 Check(_propLevelStateExtraFood, "ZXLevelState.CommandCenterExtraFood");
                 Check(_methodLevelSysCapturePanorama, "ZXSystemGameLevel.CapturePanorama");
                 Check(_methodLevelSysEnterGameView, "ZXSystemGameLevel.EnterGameView");
+                Check(_propLevelStateEndStatus, "ZXLevelState.EndStatus");
+                Check(_fieldLevelSysGameEnded, "ZXSystemGameLevel.GameEndedFlag");
+                Check(_fieldLevelSysScreenAnim, "ZXSystemGameLevel.ScreenAnim");
+                Check(_methodLevelSysTriggerGameEnd, "ZXSystemGameLevel.TriggerGameEnd");
+                Check(_methodLevelSysShowSurvivalEnd, "ZXSystemGameLevel.ShowSurvivalEnd");
+                Check(_methodLevelSysShowCampaignEnd, "ZXSystemGameLevel.ShowCampaignEnd");
+                Check(_methodGameShowMayorSelection, "ZXGame.ShowMayorSelection");
                 Check(_typeZXGameState, "Type ZXGameState");
 
                 if (missingCount == 0)
@@ -2580,6 +2613,131 @@ namespace TABCoopMod.Core
             catch (Exception ex)
             {
                 ModLogger.Error("[GameBridge] ReturnToMainMenu failed", ex);
+                return false;
+            }
+        }
+
+        /// <summary>Returns ZXLevelState.EndStatus as integer (0=Playing, 1=Won, 2=Lost).</summary>
+        public static int GetLevelEndStatus()
+        {
+            try
+            {
+                object ls = CurrentLevelState;
+                if (ls == null || _propLevelStateEndStatus == null) return 0;
+                object val = _propLevelStateEndStatus.GetValue(ls);
+                return val != null ? Convert.ToInt32(val) : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        /// <summary>True when either ZXLevelState.EndStatus != Playing or ZXSystemGameLevel.GameEndedFlag is set.</summary>
+        public static bool IsLevelEnded()
+        {
+            if (CurrentLevelState == null) return false;
+            if (GetLevelEndStatus() != 0) return true;
+            try
+            {
+                object lvlSys = LevelSystemInstance;
+                if (lvlSys != null && _fieldLevelSysGameEnded != null)
+                {
+                    object f = _fieldLevelSysGameEnded.GetValue(lvlSys);
+                    if (f is bool b && b) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        public static bool IsCurrentLevelSystemEnabled()
+        {
+            try
+            {
+                var sys = CurrentGameSystem as DXSystem;
+                return sys != null && sys.Enabled;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static void ClearScreenTransitionEffect()
+        {
+            try
+            {
+                _fieldLevelSysScreenAnim?.SetValue(null, null);
+            }
+            catch { }
+        }
+
+        public static bool TriggerGameEnd(bool won)
+        {
+            try
+            {
+                object lvlSys = LevelSystemInstance;
+                if (lvlSys == null || _methodLevelSysTriggerGameEnd == null) return false;
+                _methodLevelSysTriggerGameEnd.Invoke(lvlSys, new object[] { won });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error("[GameBridge] TriggerGameEnd failed", ex);
+                return false;
+            }
+        }
+
+        public static bool ShowSyncedGameEnd(bool won)
+        {
+            try
+            {
+                object ls = CurrentLevelState;
+                object lvlSys = LevelSystemInstance;
+                if (ls == null || lvlSys == null) return false;
+                if (IsLevelEnded()) return false;
+
+                if (_propLevelStateEndStatus != null)
+                {
+                    object endVal = Enum.ToObject(_propLevelStateEndStatus.PropertyType, won ? 1 : 2);
+                    _propLevelStateEndStatus.SetValue(ls, endVal);
+                }
+                _fieldLevelSysGameEnded?.SetValue(lvlSys, true);
+
+                bool isCampaign = false;
+                try
+                {
+                    var campaignCur = AccessTools.Method(typeof(ZXCampaign), ObfuscatedSymbols.Method_GetCurrentSingleton, Type.EmptyTypes)?.Invoke(null, null);
+                    isCampaign = campaignCur != null;
+                }
+                catch { }
+
+                MethodInfo showMethod = isCampaign ? _methodLevelSysShowCampaignEnd : _methodLevelSysShowSurvivalEnd;
+                if (showMethod == null) return false;
+                showMethod.Invoke(lvlSys, new object[] { won, true });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error("[GameBridge] ShowSyncedGameEnd failed", ex);
+                return false;
+            }
+        }
+
+        public static bool TriggerMayorPopup()
+        {
+            try
+            {
+                object game = _mZXGameCurrent?.Invoke(null, null);
+                if (game == null || CurrentLevelState == null || _methodGameShowMayorSelection == null) return false;
+                SetChoosingMayor(true);
+                _methodGameShowMayorSelection.Invoke(game, null);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error("[GameBridge] TriggerMayorPopup failed", ex);
                 return false;
             }
         }

@@ -25,10 +25,17 @@ namespace TABCoopMod.Patches
         private static DXObject _activeMayorModal;
         private static int _lastDispatchedMayorLevel;
         private static int _lastDispatchedMayorTick = -1;
+        private static int _remoteMayorCommittedForCount = -1;
 
         internal static void SetActiveMayorWindow(DXObject modal)
         {
             _activeMayorModal = modal;
+            ModLogger.Info($"[MayorSync] Tracked open mayor selection modal (inModal={DXModalScreen.IsInModal}).");
+        }
+
+        internal static void NotifyRemoteMayorCommitted(int currentMayorCount)
+        {
+            _remoteMayorCommittedForCount = currentMayorCount;
         }
 
         public static void CloseActiveMayorWindow()
@@ -50,6 +57,19 @@ namespace TABCoopMod.Patches
             _activeMayorModal = null;
             _lastDispatchedMayorLevel = 0;
             _lastDispatchedMayorTick = -1;
+            _remoteMayorCommittedForCount = -1;
+        }
+
+        internal static bool IsRemoteMayorCommittedForCurrentCount()
+        {
+            if (_remoteMayorCommittedForCount < 0) return false;
+            int cur = GameBridge.GetLevelCollectionCount("MayorStates");
+            if (cur > _remoteMayorCommittedForCount)
+            {
+                _remoteMayorCommittedForCount = -1;
+                return false;
+            }
+            return true;
         }
 
         public static MethodBase TargetMethod()
@@ -125,9 +145,9 @@ namespace TABCoopMod.Patches
             __state = !DXModalScreen.IsInModal;
             if (CommandInterceptor.IsInterceptionEnabled
                 && GameBridge.CurrentLevelState != null
-                && !GameBridge.IsChoosingMayor())
+                && (!GameBridge.IsChoosingMayor() || MayorSyncPatch.IsRemoteMayorCommittedForCurrentCount()))
             {
-                ModLogger.Info("[MayorSync] Suppressed stale ShowMayorSelection popup (already chosen).");
+                ModLogger.Info("[MayorSync] Suppressed stale ShowMayorSelection popup (already chosen or committed).");
                 return false;
             }
             return true;

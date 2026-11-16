@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using DXVision;
 using HarmonyLib;
@@ -907,6 +908,140 @@ namespace TABCoopMod.Determinism
                 ModLogger.Error("[LockstepClock] OnLevelLoadComplete failed", ex);
             }
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsFinite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static float QuantizeScalar(float value, double scale, double invScale)
+        {
+            double rounded = Math.Round((double)value * scale, MidpointRounding.ToEven) * invScale;
+            float q = (float)rounded;
+            return q == 0f ? 0f : q;
+        }
+
+        internal static float QuantizeCoord(float value)
+        {
+            int scaleInt = Testing.TestHarnessConfig.PhysicsQuantScale;
+            if (scaleInt <= 0 || !IsFinite(value)) return value;
+            double scale = scaleInt;
+            return QuantizeScalar(value, scale, 1.0 / scale);
+        }
+
+        /// <summary>
+        /// Quantizes active dynamic bodies' positions and velocities to a fixed binary grid (default 1/256 cell)
+        /// at the end of each physics step so Chipmunk floating-point mantissa tail differences cannot accumulate
+        /// across steps or trigger cpBBTree / broadphase boundary splits between peers.
+        /// </summary>
+        internal static void QuantizePhysicsBodiesPostStep()
+        {
+            int scaleInt = Testing.TestHarnessConfig.PhysicsQuantScale;
+            if (scaleInt <= 0) return;
+
+            var bodies = DXPhysicWorld.Bodies;
+            if (bodies == null || bodies.Count == 0) return;
+
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            double scale = scaleInt;
+            double invScale = 1.0 / scale;
+            int nCells = DXWorldGrid.NCells;
+            float maxCoord = nCells > 1 ? nCells - (float)invScale : float.MaxValue;
+            int modified = 0;
+
+            int dynTotal = 0;
+
+            lock (DXGame.SyncLogic)
+            {
+                int count = bodies.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    DXPhysicBody body = bodies[i];
+                    if (body == null || body.Handle == IntPtr.Zero) continue;
+
+                    DXEntity ent = body.GameEntity;
+                    if (ent == null || ent.Disposed) continue;
+                    if (ent.PhysicalType != DXBodyType.Dynamic) continue;
+                    if ((ent.ID & 0x8000000000000000UL) != 0UL) continue;
+                    dynTotal++;
+
+                    PointF rawPhysPos = body.PhysicPosition;
+                    bool posValid = IsFinite(rawPhysPos.X) && IsFinite(rawPhysPos.Y);
+                    PointF rawPhysVel = body.PhysicVelocity;
+                    bool velValid = IsFinite(rawPhysVel.X) && IsFinite(rawPhysVel.Y);
+
+                    bool anyChanged = false;
+
+                    if (posValid)
+                    {
+                        float qx = QuantizeScalar(rawPhysPos.X, scale, invScale);
+                        float qy = QuantizeScalar(rawPhysPos.Y, scale, invScale);
+                        if (nCells > 1)
+                        {
+                            if (rawPhysPos.X >= 0f && qx < 0f) qx = 0f;
+                            else if (rawPhysPos.X < nCells && qx >= nCells) qx = maxCoord;
+                            if (rawPhysPos.Y >= 0f && qy < 0f) qy = 0f;
+                            else if (rawPhysPos.Y < nCells && qy >= nCells) qy = maxCoord;
+                        }
+                        var qPos = new PointF(qx, qy);
+
+                        if (rawPhysPos.X != qx || rawPhysPos.Y != qy)
+                        {
+                            body.PhysicPosition = qPos;
+                            anyChanged = true;
+                        }
+
+                        // Keep LastPositionComputed / ent.LastPosition untouched when the body moved this step
+                        // so RenderVisualInterpolationPatch continues interpolating cleanly; only sync Last*
+                        // when snapping an already-stationary body onto the grid.
+                        bool wasStationary = body.LastPositionComputed == body.PositionComputed && body.PositionComputed == rawPhysPos;
+                        if (body.PositionComputed.X != qx || body.PositionComputed.Y != qy)
+                        {
+                            body.PositionComputed = qPos;
+                            anyChanged = true;
+                        }
+                        if (wasStationary && (body.LastPositionComputed.X != qx || body.LastPositionComputed.Y != qy))
+                        {
+                            body.LastPositionComputed = qPos;
+                        }
+
+                        PointF entPos = ent.Position;
+                        if (entPos.X != qx || entPos.Y != qy)
+                        {
+                            ent.Position = qPos;
+                            anyChanged = true;
+                        }
+                        if (wasStationary && (ent.LastPosition.X != qx || ent.LastPosition.Y != qy))
+                        {
+                            ent.LastPosition = qPos;
+                        }
+                    }
+
+                    if (velValid)
+                    {
+                        float qvx = QuantizeScalar(rawPhysVel.X, scale, invScale);
+                        float qvy = QuantizeScalar(rawPhysVel.Y, scale, invScale);
+                        var qVel = new PointF(qvx, qvy);
+
+                        if (rawPhysVel.X != qvx || rawPhysVel.Y != qvy)
+                        {
+                            body.PhysicVelocity = qVel;
+                            anyChanged = true;
+                        }
+                        if (body.Velocity.X != qvx || body.Velocity.Y != qvy)
+                        {
+                            body.Velocity = qVel;
+                            anyChanged = true;
+                        }
+                    }
+
+                    if (anyChanged) modified++;
+                }
+            }
+
+            DeterministicSandboxPatches.DiagPhysQuantTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            DeterministicSandboxPatches.DiagPhysQuantModified += modified;
+            DeterministicSandboxPatches.DiagPhysQuantDynTotal += dynTotal;
+        }
     }
 
     /// <summary>
@@ -1048,6 +1183,9 @@ namespace TABCoopMod.Determinism
         internal static long DiagTickPostDrainTicks;
         internal static long DiagPhysFor1Ticks;
         internal static long DiagPhysFor2Ticks;
+        internal static long DiagPhysQuantTicks;
+        internal static long DiagPhysQuantModified;
+        internal static long DiagPhysQuantDynTotal;
         internal static long DiagRngGlobalCalls;
         internal static long DiagRngGenCalls;
         internal static long DiagRngCtorCalls;
@@ -1067,6 +1205,9 @@ namespace TABCoopMod.Determinism
         [HarmonyPrefix]
         public static bool UpdateGameLogic_Prefix(DXGame __instance)
         {
+            if (!_inSingleTickStep)
+                RenderVisualInterpolationPatch.ExitVisualSceneUpdate(__instance);
+
             if (!LockstepClock.IsDeterministicModeActive) return true;
 
             if (_inSingleTickStep)
@@ -1144,6 +1285,14 @@ namespace TABCoopMod.Determinism
                     if (LockstepClock.TickGate == null || LockstepClock.TickGate.IsTickReady(pausedTick))
                         Sync.CoopSessionManager.FlushDueTurnCommands(pausedTick);
                 }
+                LockstepClock.ResetHostTickPacing();
+                LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate);
+                LockstepClock.AllowPhysicsThisFrame = false;
+                return false;
+            }
+
+            if (__instance.Paused || !Core.GameBridge.IsCurrentLevelSystemEnabled() || Core.GameBridge.IsLevelEnded())
+            {
                 LockstepClock.ResetHostTickPacing();
                 LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate);
                 LockstepClock.AllowPhysicsThisFrame = false;
@@ -1324,6 +1473,8 @@ namespace TABCoopMod.Determinism
             }
 
             DiagLastRanTicks = ticksRan;
+            if (ticksRan > 0)
+                RenderVisualInterpolationPatch.OnLogicTickCompleted(ticksRan);
             if (isHost && !LockstepClock.PausedBySession && ticksRan < maxTicksThisFrame)
                 LockstepClock.RefundHostRealTimeTicks(__instance.GameSpeed, maxTicksThisFrame - ticksRan);
 
@@ -1345,11 +1496,14 @@ namespace TABCoopMod.Determinism
             double drainMs = DiagTickPostDrainTicks * _swTickToMs / tc;
             double pFor1Ms = DiagPhysFor1Ticks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
             double pFor2Ms = DiagPhysFor2Ticks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
+            double pQuantMs = DiagPhysQuantTicks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
+            long pQuantMod = DiagPhysQuantModified / Math.Max(1, DiagPhysStepWindowCount);
+            long pQuantDyn = DiagPhysQuantDynTotal / Math.Max(1, DiagPhysStepWindowCount);
             if (Testing.TestHarnessConfig.Enabled)
             {
                 ModLogger.Info($"[Perf] tick={game.IAIterationInt} frame={DiagAvgFrameMs:F1}ms logic={DiagAvgTickLogicMs:F1}ms(wait={_diagAsyncWaitMs:F1}ms) phys={DiagAvgPhysicsMs:F1}ms(x{DiagPhysStepWindowCount}/60t) " +
                     $"| movSync={movMs:F2}ms({DiagTickMovableSyncCalls / tc}/t) pullSync={pullMs:F2}ms({DiagTickPullSyncCalls / Math.Max(1, DiagPhysStepWindowCount)}/p) " +
-                    $"physFor1={pFor1Ms:F2}ms physFor2={pFor2Ms:F2}ms path={pathMs:F2}ms({DiagTickPathfindCalls / tc}/t) coopTick={hashMs:F2}ms drain={drainMs:F2}ms " +
+                    $"physFor1={pFor1Ms:F2}ms physFor2={pFor2Ms:F2}ms quant={pQuantMs:F2}ms({pQuantMod}/{pQuantDyn}) path={pathMs:F2}ms({DiagTickPathfindCalls / tc}/t) coopTick={hashMs:F2}ms drain={drainMs:F2}ms " +
                     $"| calls/t: rngG={DiagRngGlobalCalls / tc} gen={DiagRngGenCalls / tc} ctor={DiagRngCtorCalls / tc} guid={DiagGuidCalls / tc} post={DiagPostWrapCalls / tc} want={DiagLastWantedTicks} ran={ranThisFrame}");
             }
             DiagTickMovableSyncTicks = 0; DiagTickMovableSyncCalls = 0;
@@ -1357,6 +1511,8 @@ namespace TABCoopMod.Determinism
             DiagTickPathfindTicks = 0; DiagTickPathfindCalls = 0;
             DiagTickHashTicks = 0; DiagTickPostDrainTicks = 0;
             DiagPhysFor1Ticks = 0; DiagPhysFor2Ticks = 0;
+            DiagPhysQuantTicks = 0; DiagPhysQuantModified = 0;
+            DiagPhysQuantDynTotal = 0;
             DiagRngGlobalCalls = 0; DiagRngGenCalls = 0; DiagRngCtorCalls = 0; DiagGuidCalls = 0; DiagPostWrapCalls = 0;
             DiagTickWindowCount = 0; DiagPhysStepWindowCount = 0;
         }
@@ -1487,6 +1643,7 @@ namespace TABCoopMod.Determinism
                     Sync.CoopSessionManager.OnSimulationTickCompleted(__instance.IAIterationInt);
                     DiagTickHashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tHashStart;
                 }
+                RenderVisualInterpolationPatch.OnLogicTickCompleted(1);
 
                 List<Action> deferred = null;
                 lock (_deferredAsyncLock)
@@ -1581,6 +1738,7 @@ namespace TABCoopMod.Determinism
                 DXPhysicWorld.TimeLastBodyPosition = DXPhysicWorld.TimeBodyPosition;
                 if (didStep && DXPhysicWorld.NUpdates != __state && !LockstepClock.LoadingLevel)
                 {
+                    LockstepClock.QuantizePhysicsBodiesPostStep();
                     if (_asyncTickInFlight)
                     {
                         _asyncPhysicsStepped = true;
@@ -1595,45 +1753,48 @@ namespace TABCoopMod.Determinism
         }
 
         // Prevent DXEntity.UpdateSceneObjectParallel from mutating authoritative Entity.Position and
-        // triggering DXWorldGrid.SetNewCellFor; visual-only interpolation is projected cleanly inside
-        // RenderVisualInterpolationPatch around CSprite / CSelectable scene updates.
+        // triggering DXWorldGrid.SetNewCellFor; when inside RenderVisualInterpolationPatch's scene pass,
+        // return the thread's already-projected visual position so DXEntity.Position = InterpolatedPosition
+        // becomes a zero-work no-op.
         [HarmonyPatch(typeof(DXPhysicBody), nameof(DXPhysicBody.InterpolatedPosition), MethodType.Getter)]
         [HarmonyPrefix]
         public static bool InterpolatedPosition_Prefix(DXPhysicBody __instance, ref PointF __result)
         {
             if (!LockstepClock.IsDeterministicModeActive) return true;
+            if (RenderVisualInterpolationPatch.TryGetProjectedEntityPos(__instance?.GameEntity, out PointF visualPos))
+            {
+                __result = visualPos;
+                return false;
+            }
             __result = __instance.PositionComputed;
             return false;
         }
 
         // Remember which thread runs the frame loop; DXRandomCtorPatch uses it to keep the
         // level-loading worker's seed sequence synced while the UI thread stays off that counter.
-        // Flush any overlapped async tick before sampling interpolation alpha or camera delta.
+        // Accumulate wall-clock dtMs FIRST, then flush any completed async tick so OnPhysicsStepCompleted
+        // preserves exact overshoot without jumping frame 1 of the next physics interval.
         [HarmonyPatch(typeof(DXGame), "StartFrame")]
         [HarmonyPrefix]
         public static void StartFrame_CaptureMainThread()
         {
             if (LockstepClock.MainThreadId == 0) LockstepClock.CaptureMainThread();
-            FlushPendingAsyncTick(DXGame.Current);
             RenderVisualInterpolationPatch.UpdateFrameAlpha();
+            FlushPendingAsyncTick(DXGame.Current);
         }
     }
 
     /// <summary>
-    /// Isolates visual sprite/selection-ring smoothing from deterministic simulation state.
-    /// Hooks CSprite and CSelectable parallel visual updates (called inside SetCamera for viewport
-    /// entities while logic threads are idle), temporarily projecting Body's frame-interpolated
-    /// position onto DXEntity._Position (bypassing Entity.set_Position and DXWorldGrid.SetNewCellFor)
-    /// so unit visuals and selection rings glide at render FPS while authoritative Entity.Position stays discrete.
+    /// Isolates visual scene interpolation, resync snap smoothing, and visual GameTime
+    /// from deterministic simulation state across the entire DXGame.SetCamera scene-update pass
+    /// (covering CSprite, CSelectable, CShadow, custom components, and isometric Z-sorting).
     /// </summary>
-    [HarmonyPatch]
     public static class RenderVisualInterpolationPatch
     {
         public struct RestoreState
         {
             public DXEntity Entity;
             public PointF OrigPos;
-            public bool Active;
         }
 
         private struct VisualSnapEntry
@@ -1650,18 +1811,48 @@ namespace TABCoopMod.Determinism
         private static readonly double _swToMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         private static long _lastStartFrameWallTs;
         private static double _accumPhysicsElapsedMs;
-        private static double _currentPhysicsSpanMs = LockstepClock.MsPerPhysicsTick;
+        private static double _accumLogicElapsedMs;
+        private static double _visualGameTimeRemainderMs;
         private static volatile bool _hasPhysicsStep;
         private static volatile float _frameInterpAlpha = -1f;
+
         private static readonly ConcurrentDictionary<ulong, VisualSnapEntry> _visualSnapOffsets =
             new ConcurrentDictionary<ulong, VisualSnapEntry>();
         private static readonly List<ulong> _staleVisualSnapIds = new List<ulong>();
         private static volatile bool _hasVisualSnapOffsets;
+
         private static long _currentFrameTimestamp;
 
         private static bool _posAccessorsCompiled;
         private static Func<DXEntity, PointF> _fastGetRawPos;
         private static Action<DXEntity, PointF> _fastSetRawPos;
+
+        private static volatile bool _inSetCamera;
+        private static volatile bool _inVisualSceneUpdate;
+        private static double _savedAuthGameTime;
+        private static bool _hasSavedVisualGameTime;
+        private static readonly List<RestoreState> _projectedRestoreList = new List<RestoreState>(2048);
+
+        internal static bool InSetCamera => _inSetCamera;
+
+        internal static void BeginSetCamera() => _inSetCamera = true;
+        internal static void EndSetCamera(DXGame game)
+        {
+            _inSetCamera = false;
+            ExitVisualSceneUpdate(game);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryGetProjectedEntityPos(DXEntity ent, out PointF pos)
+        {
+            if (_inVisualSceneUpdate && ent != null && _fastGetRawPos != null)
+            {
+                pos = _fastGetRawPos(ent);
+                return true;
+            }
+            pos = default;
+            return false;
+        }
 
         public static void RecordVisualSnapOffset(ulong entityId, float offsetX, float offsetY)
         {
@@ -1740,29 +1931,51 @@ namespace TABCoopMod.Determinism
         {
             _hasPhysicsStep = false;
             _accumPhysicsElapsedMs = 0.0;
-            _currentPhysicsSpanMs = LockstepClock.MsPerPhysicsTick;
+            _accumLogicElapsedMs = 0.0;
+            _visualGameTimeRemainderMs = 0.0;
             _lastStartFrameWallTs = 0;
             _frameInterpAlpha = -1f;
             _hasVisualSnapOffsets = false;
             _visualSnapOffsets.Clear();
             _currentFrameTimestamp = 0;
+            _inSetCamera = false;
+            _inVisualSceneUpdate = false;
+            _hasSavedVisualGameTime = false;
+        }
+
+        internal static void OnLogicTickCompleted(int ticksRan)
+        {
+            if (ticksRan <= 0) return;
+            if (ticksRan > 1)
+            {
+                _accumLogicElapsedMs = 0.0;
+            }
+            else
+            {
+                _accumLogicElapsedMs -= LockstepClock.MsPerLogicTick;
+                if (_accumLogicElapsedMs < 0.0) _accumLogicElapsedMs = 0.0;
+                if (_accumLogicElapsedMs > LockstepClock.MsPerLogicTick * 0.95)
+                    _accumLogicElapsedMs = LockstepClock.MsPerLogicTick * 0.95;
+            }
+            _visualGameTimeRemainderMs = _accumLogicElapsedMs;
         }
 
         internal static void OnPhysicsStepCompleted()
         {
-            double prevSpan = _currentPhysicsSpanMs > 1.0 ? _currentPhysicsSpanMs : LockstepClock.MsPerPhysicsTick;
-            double overshoot = _hasPhysicsStep ? (_accumPhysicsElapsedMs - prevSpan) : 0.0;
-            if (overshoot < 0.0) overshoot = 0.0;
-            if (overshoot > LockstepClock.MsPerLogicTick * 0.9) overshoot = LockstepClock.MsPerLogicTick * 0.9;
+            if (_hasPhysicsStep)
+            {
+                _accumPhysicsElapsedMs -= LockstepClock.MsPerPhysicsTick;
+                if (_accumPhysicsElapsedMs < 0.0) _accumPhysicsElapsedMs = 0.0;
+                if (_accumPhysicsElapsedMs > LockstepClock.MsPerPhysicsTick * 0.95)
+                    _accumPhysicsElapsedMs = LockstepClock.MsPerPhysicsTick * 0.95;
+            }
+            else
+            {
+                _accumPhysicsElapsedMs = 0.0;
+                _hasPhysicsStep = true;
+            }
 
-            double rem = DXGame.Current != null ? (DXGame.Current.GameTime - DXPhysicWorld.LastGameTimeUpdatePhysics) : 0.0;
-            if (rem < 0.0 || rem > LockstepClock.MsPerPhysicsTick) rem = 0.0;
-            int ticksToNext = Math.Max(1, (int)Math.Ceiling((LockstepClock.MsPerPhysicsTick - rem - 0.001) / LockstepClock.MsPerLogicTick));
-            _currentPhysicsSpanMs = ticksToNext * LockstepClock.MsPerLogicTick;
-
-            _accumPhysicsElapsedMs = overshoot;
-            _hasPhysicsStep = true;
-            float a = (float)(_accumPhysicsElapsedMs / _currentPhysicsSpanMs);
+            float a = (float)(_accumPhysicsElapsedMs / LockstepClock.MsPerPhysicsTick);
             _frameInterpAlpha = a < 0f ? 0f : (a > 1f ? 1f : a);
         }
 
@@ -1772,6 +1985,8 @@ namespace TABCoopMod.Determinism
             double dtMs = _lastStartFrameWallTs > 0 ? (nowTs - _lastStartFrameWallTs) * _swToMs : 0.0;
             _lastStartFrameWallTs = nowTs;
             _currentFrameTimestamp = nowTs;
+
+            var game = DXGame.Current;
 
             if (_hasVisualSnapOffsets)
             {
@@ -1790,9 +2005,15 @@ namespace TABCoopMod.Determinism
                 || Testing.DeterministicReplayVerifier.IsRunning
                 || LockstepClock.LoadingLevel
                 || !_hasPhysicsStep
-                || DXGame.IsInDesigner)
+                || DXGame.IsInDesigner
+                || game == null
+                || game.Disposing
+                || DXScene.Current == null
+                || !(DXScene.Current.RootObject is DXIsometricGridObject)
+                || Core.GameBridge.IsGameLoading())
             {
                 _frameInterpAlpha = -1f;
+                _visualGameTimeRemainderMs = 0.0;
                 return;
             }
 
@@ -1800,93 +2021,174 @@ namespace TABCoopMod.Determinism
             if (_fastGetRawPos == null || _fastSetRawPos == null)
             {
                 _frameInterpAlpha = -1f;
+                _visualGameTimeRemainderMs = 0.0;
                 return;
             }
 
-            var game = DXGame.Current;
             if (!LockstepClock.PausedBySession && game != null && !game.Paused && game.GameSpeed > 0.001)
             {
                 double clampedDt = dtMs < 0.0 ? 0.0 : (dtMs > 100.0 ? 100.0 : dtMs);
-                _accumPhysicsElapsedMs += clampedDt * game.GameSpeed;
-                double maxAccum = _currentPhysicsSpanMs + LockstepClock.MsPerLogicTick;
-                if (_accumPhysicsElapsedMs > maxAccum)
-                    _accumPhysicsElapsedMs = maxAccum;
+                double scaledDt = clampedDt * game.GameSpeed;
+
+                _accumPhysicsElapsedMs += scaledDt;
+                double maxPhysAccum = LockstepClock.MsPerPhysicsTick * 1.35;
+                if (_accumPhysicsElapsedMs > maxPhysAccum)
+                    _accumPhysicsElapsedMs = maxPhysAccum;
+
+                _accumLogicElapsedMs += scaledDt;
+                double maxLogicAccum = LockstepClock.MsPerLogicTick * 1.35;
+                if (_accumLogicElapsedMs > maxLogicAccum)
+                    _accumLogicElapsedMs = maxLogicAccum;
+                _visualGameTimeRemainderMs = Math.Min(LockstepClock.MsPerLogicTick * 0.98, _accumLogicElapsedMs);
+            }
+            else
+            {
+                _visualGameTimeRemainderMs = 0.0;
             }
 
-            float a = (float)(_accumPhysicsElapsedMs / _currentPhysicsSpanMs);
+            float a = (float)(_accumPhysicsElapsedMs / LockstepClock.MsPerPhysicsTick);
             _frameInterpAlpha = a < 0f ? 0f : (a > 1f ? 1f : a);
         }
 
-        private static IEnumerable<MethodBase> TargetMethods()
+        internal static void EnterVisualSceneUpdate(DXGame game)
         {
-            var asm = GameBridge.GameAssembly;
-            if (asm == null) yield break;
-
-            var mSprite = AccessTools.Method(asm.GetType("ZX.Components.CSprite"), "#=zyeyG75rdugKq", Type.EmptyTypes);
-            if (mSprite != null) yield return mSprite;
-
-            var mSel = AccessTools.Method(asm.GetType("ZX.Components.CSelectable"), "#=zyeyG75rdugKq", Type.EmptyTypes);
-            if (mSel != null) yield return mSel;
-        }
-
-        [HarmonyPrefix]
-        public static void Prefix(object __instance, out RestoreState __state)
-        {
-            __state = default;
-            float alpha = _frameInterpAlpha;
-            if (alpha < 0f || __instance == null || _fastGetRawPos == null || _fastSetRawPos == null)
-                return;
-            if (LockstepClock.IsSimulationThreadActive || LockstepClock.InPhysicsStep)
+            if (!LockstepClock.IsDeterministicModeActive
+                || Testing.DeterministicReplayVerifier.IsRunning
+                || LockstepClock.LoadingLevel
+                || DXGame.IsInDesigner
+                || game == null
+                || game.Disposing
+                || DXScene.Current == null
+                || !(DXScene.Current.RootObject is DXIsometricGridObject)
+                || Core.GameBridge.IsGameLoading())
                 return;
 
-            DXEntity ent = (__instance as DXComponent)?.Entity;
+            EnsureRawPosAccessors();
+            if (_fastGetRawPos == null || _fastSetRawPos == null) return;
 
-            if (ent == null || ent.PhysicalType != DXBodyType.Dynamic || DXGame.IsInDesigner)
-                return;
-
-            var body = ent.Body;
-            if (body == null) return;
-
-            PointF lastPos = body.LastPositionComputed;
-            PointF curPos = body.PositionComputed;
-            float snapOffX = 0f, snapOffY = 0f;
-            if (_hasVisualSnapOffsets && _visualSnapOffsets.TryGetValue(ent.ID, out var snap))
+            _inVisualSceneUpdate = true;
+            _hasSavedVisualGameTime = false;
+            if (!LockstepClock.PausedBySession && !game.Paused && game.GameSpeed > 0.001 && _visualGameTimeRemainderMs >= 1.0)
             {
-                double ageMs = (_currentFrameTimestamp - snap.StartTimestamp) * _swToMs;
-                if (ageMs < 0.0) ageMs = 0.0;
-                if (ageMs < VisualSnapExpireMs)
+                _savedAuthGameTime = game.GameTime;
+                _hasSavedVisualGameTime = true;
+                LockstepClock.SetDeterministicGameTime(game, _savedAuthGameTime + _visualGameTimeRemainderMs);
+            }
+
+            float alpha = _frameInterpAlpha;
+            if (alpha < 0f) return;
+
+            bool physLockTaken = false;
+            try
+            {
+                // DXPhysicWorld.Clear() / UnloadLevel runs on a background loader thread under
+                // DXPhysicWorld.Sync while Window_Paint can still pump SetCamera fade frames.
+                // Never stall teardown or race against Bodies shrinking mid-iteration.
+                Monitor.TryEnter(DXPhysicWorld.Sync, ref physLockTaken);
+                if (!physLockTaken) return;
+
+                var bodies = DXPhysicWorld.Bodies;
+                if (bodies == null || bodies.Count == 0) return;
+
+                _projectedRestoreList.Clear();
+                bool hasSnaps = _hasVisualSnapOffsets;
+                long nowTs = _currentFrameTimestamp;
+                int count = bodies.Count;
+
+                for (int i = 0; i < count; i++)
                 {
-                    float decay = (float)Math.Exp(-ageMs / VisualSnapTauMs);
-                    snapOffX = snap.OffsetX * decay;
-                    snapOffY = snap.OffsetY * decay;
+                    if (i >= bodies.Count) break;
+                    var body = bodies[i];
+                    if (body == null || body.Handle == IntPtr.Zero) continue;
+                    var ent = body.GameEntity;
+                    if (ent == null || ent.Disposed || ent.PhysicalType != DXBodyType.Dynamic) continue;
+                    if (ent.SceneObject == null) continue;
+
+                    PointF lastPos = body.LastPositionComputed;
+                    PointF curPos = body.PositionComputed;
+
+                    float snapOffX = 0f, snapOffY = 0f;
+                    if (hasSnaps && _visualSnapOffsets.TryGetValue(ent.ID, out var snap))
+                    {
+                        double ageMs = (nowTs - snap.StartTimestamp) * _swToMs;
+                        if (ageMs < 0.0) ageMs = 0.0;
+                        if (ageMs < VisualSnapExpireMs)
+                        {
+                            float decay = (float)Math.Exp(-ageMs / VisualSnapTauMs);
+                            snapOffX = snap.OffsetX * decay;
+                            snapOffY = snap.OffsetY * decay;
+                        }
+                    }
+
+                    if (lastPos == curPos && snapOffX == 0f && snapOffY == 0f)
+                        continue;
+
+                    PointF origPos = _fastGetRawPos(ent);
+                    float ddx = origPos.X - curPos.X;
+                    float ddy = origPos.Y - curPos.Y;
+                    if (ddx * ddx + ddy * ddy > 0.01f) continue;
+
+                    PointF basePos = lastPos == curPos
+                        ? curPos
+                        : new PointF(
+                            lastPos.X + (curPos.X - lastPos.X) * alpha,
+                            lastPos.Y + (curPos.Y - lastPos.Y) * alpha);
+                    PointF interpPos = new PointF(basePos.X + snapOffX, basePos.Y + snapOffY);
+                    if (interpPos == origPos) continue;
+
+                    _projectedRestoreList.Add(new RestoreState { Entity = ent, OrigPos = origPos });
+                    _fastSetRawPos(ent, interpPos);
                 }
             }
-            if (lastPos == curPos && snapOffX == 0f && snapOffY == 0f) return;
-
-            PointF origPos = _fastGetRawPos(ent);
-            float ddx = origPos.X - curPos.X;
-            float ddy = origPos.Y - curPos.Y;
-            if (ddx * ddx + ddy * ddy > 0.01f) return;
-
-            PointF basePos = lastPos == curPos
-                ? curPos
-                : new PointF(
-                    lastPos.X + (curPos.X - lastPos.X) * alpha,
-                    lastPos.Y + (curPos.Y - lastPos.Y) * alpha);
-            PointF interpPos = new PointF(basePos.X + snapOffX, basePos.Y + snapOffY);
-            if (interpPos == origPos) return;
-
-            __state.Entity = ent;
-            __state.OrigPos = origPos;
-            __state.Active = true;
-            _fastSetRawPos(ent, interpPos);
+            finally
+            {
+                if (physLockTaken)
+                    Monitor.Exit(DXPhysicWorld.Sync);
+            }
         }
 
-        [HarmonyFinalizer]
-        public static void Finalizer(RestoreState __state)
+        internal static void ExitVisualSceneUpdate(DXGame game)
         {
-            if (__state.Active && __state.Entity != null && _fastSetRawPos != null)
-                _fastSetRawPos(__state.Entity, __state.OrigPos);
+            if (!_inVisualSceneUpdate) return;
+            _inVisualSceneUpdate = false;
+
+            if (_fastSetRawPos != null && _projectedRestoreList.Count > 0)
+            {
+                for (int i = 0; i < _projectedRestoreList.Count; i++)
+                {
+                    var item = _projectedRestoreList[i];
+                    if (item.Entity != null)
+                        _fastSetRawPos(item.Entity, item.OrigPos);
+                }
+                _projectedRestoreList.Clear();
+            }
+
+            if (_hasSavedVisualGameTime && game != null)
+            {
+                LockstepClock.SetDeterministicGameTime(game, _savedAuthGameTime);
+                _hasSavedVisualGameTime = false;
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(DXGame), "SetCamera")]
+    public static class SetCameraVisualPassPatch
+    {
+        [HarmonyPrefix]
+        public static void Prefix() => RenderVisualInterpolationPatch.BeginSetCamera();
+
+        [HarmonyFinalizer]
+        public static void Finalizer(DXGame __instance) => RenderVisualInterpolationPatch.EndSetCamera(__instance);
+    }
+
+    [HarmonyPatch(typeof(DXWorldGrid), nameof(DXWorldGrid.UpdateVisibleCells), new[] { typeof(RectangleF), typeof(int) })]
+    public static class UpdateVisibleCellsVisualPassPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            if (RenderVisualInterpolationPatch.InSetCamera)
+                RenderVisualInterpolationPatch.EnterVisualSceneUpdate(DXGame.Current);
         }
     }
 

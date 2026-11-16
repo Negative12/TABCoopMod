@@ -282,6 +282,8 @@ namespace TABCoopMod.Testing
                 ["countdownActive"] = PauseSyncController.CountdownActive,
                 ["mayorCount"] = GameBridge.GetLevelCollectionCount("MayorStates"),
                 ["levelLoaded"] = ls != null,
+                ["endStatus"] = GameBridge.GetLevelEndStatus(),
+                ["levelEnded"] = GameBridge.IsLevelEnded(),
                 ["gameMode"] = gameMode?.ToString(),
                 ["inCampaign"] = inCampaign is bool ic && ic,
                 ["difficulty"] = difficulty?.ToString(),
@@ -721,6 +723,13 @@ namespace TABCoopMod.Testing
                 case "return_to_menu":
                     bool r = GameBridge.ReturnToMainMenu();
                     return new Dictionary<string, object> { ["ok"] = r };
+                case "trigger_game_end":
+                    bool won = GetBool(args, "won", false);
+                    bool endOk = GameBridge.TriggerGameEnd(won);
+                    return new Dictionary<string, object> { ["ok"] = endOk, ["won"] = won, ["endStatus"] = GameBridge.GetLevelEndStatus() };
+                case "trigger_mayor_popup":
+                    bool popOk = GameBridge.TriggerMayorPopup();
+                    return new Dictionary<string, object> { ["ok"] = popOk, ["inModal"] = DXVision.GUI.DXModalScreen.IsInModal };
                 case "load_save":
                     if (!Sync.CoopSessionManager.CanHostStartGame)
                         return new Dictionary<string, object> { ["ok"] = false, ["error"] = "cannot start before clients are ready" };

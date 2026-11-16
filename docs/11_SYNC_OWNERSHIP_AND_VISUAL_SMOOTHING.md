@@ -1,11 +1,11 @@
 # 11 — 控制权差分对齐与单位移动视觉平滑优化分析
 
-> **整理日期**: 2026-11-15  
-> **定位**: 本文档归档关于“按最后操控者差分切换异步位置对齐方向”、“移动指令本机先行计算的边界与替代方案”以及“单位移动视觉帧率低/非连续感底层根因与渲染插值层修复方案”的技术讨论结论，作为后续优化排期与实现的参考依据。
+> **整理日期**: 2026-11-15（**2026-11-16 已完成代码落地与自动化联调回归**）  
+> **定位**: 本文档归档关于“按最后操控者差分切换异步位置对齐方向”、“移动指令本机先行计算的边界与替代方案”以及“单位移动视觉帧率低/非连续感底层根因与渲染插值层修复方案”的技术讨论结论，以及对应的工程实现与实测结果。
 
 ---
 
-## 1. 按最后指令人（`PlayerId`）差分对齐单位位置
+## 1. 按最后指令人（`PlayerId`）差分对齐单位位置（✅ 已实装）
 
 ### 1.1 现状与痛点
 - 在当前 `async_align` 模式下（见 [`CoopSessionManager.cs`](../src/TABCoopMod/Sync/CoopSessionManager.cs) 与 [`GameBridge.cs`](../src/TABCoopMod/Core/GameBridge.cs)），位置修正是固定的单向 **Host → Client**：主机定期下发偏差桶内实体的 `(Id, X, Y, Life)`，客机对超过阈值（移动中玩家单位 `1.80f` 格、静止玩家单位 `0.50f` 格）的单位做阻尼拉回与 `600ms` 视觉平滑衰减。
@@ -45,17 +45,18 @@
 2. **权威回合包回传后的二次执行抽搐**：`Tick 103` 权威包到达时，若再次执行则重置寻路/分散目标点造成顿挫；若跳过则一旦有队友指令插入或地形变化，两端指令状态机立即分叉。
 3. **全图寻路网格与随机数流级联污染**：单位移动会实时改写 `DXWorldGrid` 占格、触发 Chipmunk2D 推挤周围刚体，并改变进入僵尸索敌圈的帧号，导致周围未操作的单位和尸潮同步失步。
 
-### 2.3 零副作用替代方案：纯渲染层起步预演（Visual-only Anticipation）
-若需进一步优化点击瞬间的起步跟手度，可在**不触碰 `entity.Position`、`CMovable` 与 `DXPhysicBody`** 的前提下，仅在渲染层实现：
-- 拦截到本地移动指令的 0ms 瞬间，在 `RenderVisualInterpolationPatch` 中为选中单位记录一个朝向目标点的**纯视觉微位移预演**；
-- 在等待 `TargetSimTick` 落盘的 `1~3 ticks`（`33~100ms`）窗口内，让 `SceneObject` 先朝目标方向平滑迈出约 `0.15~0.3` 格；
-- 待 `TargetSimTick` 到达、逻辑层正式起步后，将该视觉预演偏移平滑衰减归零，底层确定性与 `StateChecksum` 完全不受影响。
+### 2.3 零副作用替代方案：0ms 本地反馈与“视觉位移预演”实测回退结论（❌ 视觉前移已撤除）
+- **保留零副作用 0ms 本地反馈**：[`CommandInterceptorPatch.cs`](../src/TABCoopMod/Patches/CommandInterceptorPatch.cs) 保留 0ms 本地地面指示圈（`ShowGroundIndicatorForCommand`）与 0ms 单位语音确认（`PlayUnitCommandVoice`），在不触碰任何逻辑/物理状态的前提下提供即时操作回馈。
+- **纯渲染位移预演（`TriggerMoveAnticipation`）实机回退原因**：
+  - 本轮曾实装在等待 `TargetSimTick` + 首物理步期间对 `SceneObject` 施加最多 `0.28~0.42` 格前向位移并在起步后指数衰减交接的方案；
+  - 实机验证表明：**无论在到达 `ExpectedExecTick` 提前衰减，还是推迟到首物理步再以 `τ=70ms` 衰减，都会出现“向指令方向微移 → 退回/缩回原位 → 再真正起步”的回扯感**——数学根因在于 `PeakOffsetCells / τ ≈ 4~6 格/秒` 超过多数单位刚起步的实际物理速度（以及 Client 在高 RTT/Chaos `cmdAvg=523~592ms` 下超过最大等待保护窗口触发回缩，或首步绕障未达方向点积阈值导致到期归零）。
+  - 因此当前版本已**彻底撤除** `TriggerMoveAnticipation` 假位移，保留纯物理帧间平滑插值与 0ms 地面光圈/语音回馈，确保单位静止态稳固、起步无任何反向回拉。
 
 ---
 
-## 3. 单位移动视觉帧率低 / 非连续感的底层根因与修复方案
+## 3. 单位移动视觉帧率低 / 非连续感的底层根因与修复方案（✅ 已实装）
 
-> **事实澄清**：[`docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md`](08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md) 梯度二中提到的“物理步末浮点坐标/速度量化截断”目前**尚未实装**，当前代码库中所有物理坐标均为原生完整 `float` 精度，因此非连续感**并非**由抹除浮点尾数引起。
+> **与文档 08 目标 5 的协同说明**：[`docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md`](08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md) 梯度二的目标 5（`UpdatePhysics_Exit` 中 `1/256` 格物理坐标/速度量化截断）已同步实装。在实现上，`LockstepClock.QuantizePhysicsBodiesPostStep()` 先于 `OnPhysicsStepCompleted()` 运行：对移动中的刚体保留 `LastPositionComputed` / `LastPosition` 并仅将当前帧端点 `PositionComputed` 对齐到 `1/256` 格点（约 `0.25px` 精度），因此全场景插值 `lerp(LastPositionComputed, PositionComputed, alpha)` 仍保持连续，不会引入额外阶梯感；且软对齐/反向对齐写回坐标同样经 `LockstepClock.QuantizeCoord` 对齐网格。
 
 经过对 `DXVision.dll`（`DXGame` / `DXEntity` / `DXPhysicWorld` / `DXPhysicBody`）、`TheyAreBillions.exe`（`CSprite` / `CSelectable`）与 [`LockstepClock.cs`](../src/TABCoopMod/Determinism/LockstepClock.cs) 的对照排查，单位移动呈现“阶梯感/非连续”的根因来自以下 **4 个具体机制**：
 
@@ -82,10 +83,27 @@ RenderVisualInterpolationPatch.UpdateFrameAlpha(); // 后把刚刚流逝的上�
 - 原版单机通过后台线程 `_TaskGameTime` 每 2ms 刷新 `DXGame.Current.GameTimeInt`，使 `CSprite` 的行走动画进度 `GameTimeInt - TimeAnimationStart` 随高刷渲染连续推进。
 - 为保证确定性，[`LockstepClock.cs`](../src/TABCoopMod/Determinism/LockstepClock.cs) 中的 `GameTimeIsolationPatch` 锁定了 `GameTime` 仅在逻辑 Tick 步进时跳变 `+33.33ms`，导致渲染期读取的动画时间也呈 30Hz 阶梯跳变。
 
-### 3.5 纯渲染插值层修复方案（不动同步协议与确定性物理）
+### 3.5 纯渲染插值层修复方案（不动同步协议与确定性物理）（✅ 已实装）
 1. **扩大位置插值覆盖面至完整场景更新期**：
-   - 将插值投影从单个组件的 `CSprite / CSelectable` 外移到 `SetCamera` 的场景更新外层（覆盖 `DXEntity.UpdateSceneObjectParallel` 与 `UpdateSceneObject`），在进入前统一将可见动态实体的 `_Position` 投影为平滑插值位置，更新结束后统一还原为 `PositionComputed`，使身体贴图、选中圈、脚底阴影 `CShadow` 与 Z 轴深度同步平滑。
+   - 因 `DXEntity.UpdateSceneObjectParallel` 含 `catch when (!DXGame.IsDebuggerAttached)` 过滤异常块无法直接 Harmony IL 重写，改由 [`SetCameraVisualPassPatch`](../src/TABCoopMod/Determinism/LockstepClock.cs)（`DXGame.SetCamera`）与 [`UpdateVisibleCellsVisualPassPatch`](../src/TABCoopMod/Determinism/LockstepClock.cs)（`DXWorldGrid.UpdateVisibleCells` Postfix）在 `DXHelper_Task.For` 场景更新前于主线程将活跃动态实体 `_Position` 批量投影为平滑插值坐标，并令 `DXPhysicBody.InterpolatedPosition` 在场景更新窗口内返回已投影坐标（避免多线程回写 `DXWorldGrid.SetNewCellFor`），随后在 `UpdateGameLogic_Prefix` / `SetCamera` Finalizer 中统一还原，使 `CSprite`、`CSelectable`、脚底阴影 `CShadow` 与 `UpdateSceneObject` Z 轴深度同步平滑。
 2. **修正 `UpdateFrameAlpha` 与 `OnPhysicsStepCompleted` 时序并固定 `83.33ms` 时钟基准**：
-   - 先执行 `UpdateFrameAlpha()` 累加本帧 `dtMs`，再在物理步完成时从累加器扣除 `83.333ms` 保留精确 `overshoot` 余数，消除首帧跳变与末尾 `alpha = 1.0` 平台期停顿。
+   - 在 `StartFrame_CaptureMainThread()` 改为先执行 `RenderVisualInterpolationPatch.UpdateFrameAlpha()` 累加本帧 `dtMs * GameSpeed`，再执行 `FlushPendingAsyncTick()` 触发 `OnPhysicsStepCompleted()` 从累加器扣除固定 `MsPerPhysicsTick`（`83.3333ms`）保留精确 `overshoot` 余数，消除首帧跳变与 2/3-tick 交替拍频造成的 `alpha = 1.0` 平台期停顿。
 3. **渲染期临时提供带插值余数的视觉 `GameTimeInt`**：
-   - 在 `SetCamera` 纯渲染场景更新阶段临时将 `GameTime` 加上当前帧渲染时间余数（逻辑期与物理期仍严格保持 `33.33ms` 确定性步长），恢复高刷下的行走序列帧流畅度。
+   - 随逻辑 tick 同步追踪 `_accumLogicElapsedMs`，在 `SetCamera` 纯渲染场景更新窗口内临时为 `DXGame.GameTime` 叠加 `[0, 32.6ms]` 渲染余数，并在 `ExitVisualSceneUpdate` 精确还原为 `_savedAuthGameTime`，保障高刷下的行走动画帧流畅度而不污染任何逻辑/物理 tick 确定性。
+
+---
+
+## 4. 实现落地与实测验证记录（2026-11-16）
+
+- **代码落点**：
+  - [`CoopSessionManager.cs`](../src/TABCoopMod/Sync/CoopSessionManager.cs)：确定性控制权表 `_unitOwnership`（`OwnershipLeaseTicks=300` / `OwnershipIdleGraceTicks=90`）、客机自控保护（`SelfOwnedHostOverrideThreshold=3.5f`）、随 `StateChecksumReport` 捎带 `CollectClientOwnedActiveUnits`（复用 `dynamicPositions` 同 epoch 采样与主机 `_tickPosCache[rev.Tick]` 同 tick 对比，消除跨端 tick 相位差）及主机 `_incomingReverseAlignQueue`（`0.25f` 死区、`0.65f` 阻尼、`180` tick 冷却、`QuantizeCoord` 与 `RecordVisualSnapOffset`）。
+  - [`LockstepClock.cs`](../src/TABCoopMod/Determinism/LockstepClock.cs) & [`CoopSessionManager.cs`](../src/TABCoopMod/Sync/CoopSessionManager.cs)：全场景插值投影/还原、`StartFrame` 时序调整、固定 `83.33ms` 基准、视觉 `GameTime` 余数，以及退出返回主菜单期间 `EnterVisualSceneUpdate` 场景类型/加载守卫与 `Monitor.TryEnter(DXPhysicWorld.Sync)` 并发清理保护（并已撤除造成回扯的 `TriggerMoveAnticipation` 位移预演）。
+- **实测结果**：
+  - **注入与健康度**：Release `0 警告 0 错误`；`GameBridge 0 missing`，Harmony **`Classes OK=61, failed-tolerant=0`**。
+  - **`1_Backup.zxsav` 120 tick 双进程回放**：`[compare] PASS: 120 ticks identical`，`common=2125, moved(>0.01)=0, maxDx=0, maxDy=0`（视觉时间余数与插值投影对确定性零污染）。
+  - **`900survival.zxsav`（18,074 实体）正常环回双端轮控**：Client 与 Host 依次指挥 8 个可移动单位汇聚及反向行军，暂停对齐至同一 tick 采样：`Round 1 (H=C=4989) maxPeerDiff=0.0000, minPairDist=0.4518`、`Round 2 (H=C=5276) maxPeerDiff=0.0000, minPairDist=0.3441`、**9/9 `StateChecksum MATCH`**、`0 ERRORS`。
+  - **`900survival.zxsav` 恶劣网络模拟（`ChaosTransport`: `latency=150;jitter=50;loss=0.05;seed=99`）**：
+    - 轮次 A（`disconnect=25000-27000`，RTT `418~478ms`，`AdaptiveDelay` 自动升档 `1 -> 4 (smoothedRtt=646.0ms)`，累计丢包 Host `25`/Client `31`）：Host/Client 轮流下达 3 轮移动指令后，最终暂停同 tick `H=C=5689, maxPeerDiff=0.0000, minPairDist=0.3922`，**16/16 `MATCH`**、`0 DRIFT/DESYNC`、`0 ERRORS`、`wait=0.0~0.3ms`。
+    - 轮次 B（`disconnect=45000-47500` 精准命中局内行军阶段 2.5 秒完全断连，RTT `408~538ms`，`cmdMax=2897.8ms`，累计丢包 Host `59`/Client `68`）：断连恢复后无崩溃或卡死，全程 **16/16 `MATCH`**、`0 DRIFT/DESYNC`、`0 ERRORS`、`wait=0.1~0.8ms`。
+  - **2026-11-16 撤除预演 + 返回主菜单修复后双开 Chaos 回归（`1_Backup.zxsav` + `ChaosTransport`: `latency=80;jitter=20;loss=0.01;seed=7`）**：Release `0 警告 0 错误`，`GameBridge 0 missing`，Harmony **`Classes OK=61, failed-tolerant=0`**；客机发起 `move_units` → `cancel_current_order` → `move_units`（3 游侠，`cmdN=3, cmdAvg=383.2ms, rtt=252.2ms, delay=4t`）期间 **6/6 `StateChecksum MATCH`**（Tick `31904~32220`）；随后双端依次调用 `return_to_menu` 均稳定回到大厅（`HostAlive=True, ClientAlive=True`，`roomPhase=InLobby`），全程 `0 ERROR / 0 UnhandledException`。
+  - **待人工桌面确认项**：`CShadow` / 动画序列帧在高刷显示器下的主观连续度，以及撤除位移预演后无“先往前挪再退回”的起步手感与局内退出回大厅稳定性。

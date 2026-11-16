@@ -103,7 +103,8 @@
 ### 4.1 拦截点（`Patches/`）
 - **`CommandInterceptorPatch.cs`**：拦截 `Build`/`EntityBonusCreation` 建造放置、`ZXSystemGameLevel` 群体移动（`#=zQp2M56bpPd9jmiNkVA==` / `#=zgn6bDkSd9MGS3$WvAQ==`）、通用命令 `ZXCommand.#=zfmgzkuw=`、取消当前命令（`#=zWGiN6nrTv8Dp`）与取消队列槽位（`#=z8g7GC7xLrr8j`）。对建造拦截增加 `CanExecuteCommandOnEntity`、`CanPlaceBuildingAtTarget` 与 `_recentLocalBuilds` 短窗面积去重，防止连续误触或资源不足透支排队；所有守卫均排除回放期、生产队列自动推进（`#=zrz2EI1A=`）、确定性逻辑帧内部 AI 调用以及非玩家阵营，且严禁对内部类型调用 `HasComponent<T>()`。
 - **`PauseAndSpeedInputPatch.cs`**：从 `ZXSystemGameLevel.OnKeyDown` / `OnKeyUp` 拦截空格暂停与 `+`/`-` 倍速键，交由 `PauseSyncController` 与 `CommandInterceptor.Dispatch` 处理。
-- **`MayorSyncPatch.cs`**：Hook `ZXMayor.#=zPTw8CXGE0RqF` 与 `ShowMayorSelection`（`MayorModalTrackerPatch`），带四重守卫与 `mayorLevel` / `MayorStates` 幂等去重；先到达的回合选中市长后，自动关闭对端仍打开的市长弹窗并屏蔽过期弹窗，确保每级市长奖励只生效一次。
+- **`MayorSyncPatch.cs`**：Hook `ZXMayor.#=zPTw8CXGE0RqF` 与 `ShowMayorSelection`（`MayorModalTrackerPatch`），带四重守卫与 `mayorLevel` / `MayorStates` 幂等去重；客机收到包含 `MayorVoteOrSelect` 的 `TurnInputBroadcast` 时立即调用 `CloseActiveMayorWindow()` 与 `NotifyRemoteMayorCommitted()` 关闭对端弹窗并抑制未弹出延迟窗口，配合 `OnFrameTick` 在本地模态暂停期主动冲刷已就绪指令，确保单侧点选后对端即时关窗、每级市长奖励只生效一次。
+- **`LevelEndSyncPatch.cs`**：Hook 房主 `TriggerGameEnd` / `ShowCampaignEnd`（并在 `OnFrameTick` 兜底轮询 `IsLevelEnded()`），权威广播 `PacketType.LevelEnded` 使客机同步进入 `游戏结束` 结算且抑制 `HostPauseKeepalive` / `Tick gate waiting` 误报；`LockstepClock` 在 `Paused` / `!CurrentGameSystem.Enabled` / `IsLevelEnded()` 时停步且 `ReturnToMainMenuPatch` 清理结束画面渐变特效 `#=z40N_lqqB8daJ`，防止结束界面退出主线程卡死（`AppHangB1`）。
 
 ### 4.2 无状态回放与暂停微操（`NetCommand.cs` & `CoopSessionManager.cs`）
 - `CommandExecutor` 全量使用 `object` + `GameBridge` 反射，**绝不读取或修改 `CSelectable`**；执行期间临时模拟指令携带的 `IsShiftQueued` 按键状态并带有 `_executionDepth` 递归深度保护。`ExecutePlaceBuilding` 在执行前复用 `CanExecuteCommandOnEntity` + `CanPlaceBuildingAtTarget` 校验资源与格子占用，并在落盘建造后立即调用 `GameBridge.FlushStartFramePostMethods()` 刷新网格占位，保证同 tick 内双方同格并发建造时后一条确定性拒建不重复扣费。

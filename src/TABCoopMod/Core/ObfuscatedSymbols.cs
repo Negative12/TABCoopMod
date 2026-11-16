@@ -111,6 +111,10 @@ namespace TABCoopMod.Core
         public const string Method_LevelSys_ShowTopBanner      = "#=zhWLC3K8=";
         public const string Method_LevelSys_EnqueueNotification= "#=zYWs2Gv9F3GD5";
         public const string Method_LevelSys_RefreshCmdPanel    = "#=zR1qHCYY=";
+        public const string Method_LevelSys_TriggerGameEnd     = "#=zIoSB3Q$9ZjUF";
+        public const string Method_LevelSys_ShowSurvivalEnd    = "#=zuY2pslm6MYCZNwXKL0J6wWQ=";
+        public const string Method_LevelSys_ShowCampaignEnd    = "#=z50KAckqpQjxWzdXGV4uLSoo=";
+        public const string Field_LevelSys_GameEndedFlag       = "#=zbcjZqBFFSY96";
 
         // ====================================================================
         // 6. ZX.Commands.ZXCommand & Build & Train Members

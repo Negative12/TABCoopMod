@@ -47,8 +47,13 @@ namespace TABCoopMod.Testing
         /// <summary>Optional resync cooldown override in ms (-1 uses policy default).</summary>
         public static int ResyncCooldownMs { get; private set; }
 
+        public const int DefaultPhysicsQuantScale = 256;
+
         /// <summary>When true (TABCOOP_DISABLE_ASYNC_TICK=1), forces synchronous single-thread simulation ticks even in co-op.</summary>
         public static bool DisableAsyncTick { get; private set; }
+
+        /// <summary>Physics step-end quantization grid inverse step (e.g. 256 => 1/256 cell). 0 disables.</summary>
+        public static int PhysicsQuantScale { get; private set; } = DefaultPhysicsQuantScale;
 
         /// <summary>True when the MCP control server is enabled (TABCOOP_CONTROL_PORT set).</summary>
         public static bool ControlEnabled => ControlPort > 0;
@@ -82,6 +87,7 @@ namespace TABCoopMod.Testing
             ResyncMode = Env("TABCOOP_RESYNC_MODE") ?? "async_align";
             ResyncCooldownMs = ParseInt(Env("TABCOOP_RESYNC_COOLDOWN_MS"), -1);
             DisableAsyncTick = Env("TABCOOP_DISABLE_ASYNC_TICK") == "1";
+            PhysicsQuantScale = Math.Max(0, ParseInt(Env("TABCOOP_PHYSICS_QUANT"), DefaultPhysicsQuantScale));
 
             string logDir = null;
             try { logDir = Path.GetDirectoryName(ModLogger.LogFilePath); } catch { }
@@ -93,7 +99,7 @@ namespace TABCoopMod.Testing
 
             if (Enabled)
             {
-                ModLogger.Info($"[TestHarness] enabled: replaySave={ReplaySave ?? "(none)"}, ticks={ReplayTicks}, run={ReplayRun}, gate={TickGate}, intercept={Intercept}, scenario={Scenario}, role={Role}, chaos={ChaosSpec ?? "(none)"}");
+                ModLogger.Info($"[TestHarness] enabled: replaySave={ReplaySave ?? "(none)"}, ticks={ReplayTicks}, run={ReplayRun}, gate={TickGate}, intercept={Intercept}, scenario={Scenario}, role={Role}, chaos={ChaosSpec ?? "(none)"}, physQuant={PhysicsQuantScale}");
             }
         }
 

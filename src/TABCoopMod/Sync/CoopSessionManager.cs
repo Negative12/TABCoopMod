@@ -94,6 +94,13 @@ namespace TABCoopMod.Sync
         public const double AsyncSoftPosAlignCooldownMs = 8000.0;
         public const int EntityPosRealignCooldownTicks = 180;
 
+        // Per-owner differential alignment (docs/11 Section 1)
+        public const int OwnershipLeaseTicks = 300;               // 10s max lease
+        public const int OwnershipIdleGraceTicks = 90;            // 3s idle grace after last order
+        public const float SelfOwnedHostOverrideThreshold = 3.5f; // Client skips Host soft nudges < 3.5 cells for own units
+        public const float ReverseAlignMinThreshold = 0.25f;      // Keep Host/Client owned squad within ~0.2-0.3 cells
+        public const int MaxReverseAlignUnitsPerReport = 64;
+
         // Tiered reload policy (async_align). Positions / HP / aggro / projectiles are corrected or
         // re-derived continuously without pausing; only irreversible divergence forces a full reload.
         private const int EconReloadStreak = 3;              // ~6s persistent resource/production/time mismatch
@@ -200,6 +207,28 @@ namespace TABCoopMod.Sync
         {
             public StateHasher.LevelStateSnapshotDigest Digest;
             public string Summary;
+            public List<OwnedUnitPosSample> OwnedUnits;
+        }
+
+        private struct UnitOwnershipEntry
+        {
+            public byte PlayerId;
+            public int LastOrderTick;
+        }
+
+        public struct OwnedUnitPosSample
+        {
+            public ulong Id;
+            public float X;
+            public float Y;
+        }
+
+        private sealed class PendingReverseAlignApply
+        {
+            public int Generation;
+            public byte SenderPlayerId;
+            public int Tick;
+            public List<OwnedUnitPosSample> Units;
         }
 
         private sealed class PosSyncReceiveBuffer
@@ -259,6 +288,11 @@ namespace TABCoopMod.Sync
             new ConcurrentQueue<OutgoingPosSyncBatch>();
         private static readonly ConcurrentQueue<PendingPosAlignApply> _incomingPosAlignQueue =
             new ConcurrentQueue<PendingPosAlignApply>();
+        private static readonly ConcurrentQueue<PendingReverseAlignApply> _incomingReverseAlignQueue =
+            new ConcurrentQueue<PendingReverseAlignApply>();
+        private static readonly object _unitOwnershipSync = new object();
+        private static readonly Dictionary<ulong, UnitOwnershipEntry> _unitOwnership =
+            new Dictionary<ulong, UnitOwnershipEntry>();
         private static volatile int _asyncGeneration;
         private static int _posSyncBuildInFlight;
 
@@ -278,6 +312,9 @@ namespace TABCoopMod.Sync
         private static double _clientHostPauseKeepaliveUntilTicks = -1.0;
         private static int _clientHostPausedTick = -1;
         private static bool _clientHostInModalPause;
+        private static bool _levelEndedSynced;
+        public static bool IsReceivingRemoteLevelEnd { get; private set; }
+        public static bool IsLevelEndedSynced => _levelEndedSynced;
         private static uint _nextTraceSeq;
         private static readonly Dictionary<uint, long> _localCmdSentTs = new Dictionary<uint, long>();
         private static readonly List<double> _cmdE2ELatencySamplesMs = new List<double>();
@@ -309,6 +346,8 @@ namespace TABCoopMod.Sync
             _clientHostPauseKeepaliveUntilTicks = -1.0;
             _clientHostPausedTick = -1;
             _clientHostInModalPause = false;
+            _levelEndedSynced = false;
+            IsReceivingRemoteLevelEnd = false;
             lock (_localCmdSentTs) _localCmdSentTs.Clear();
             lock (_cmdE2ELatencySamplesMs) _cmdE2ELatencySamplesMs.Clear();
             _lastLatencyStatsLogTicks = -100000.0;
@@ -321,7 +360,10 @@ namespace TABCoopMod.Sync
             _posSyncIncoming.Clear();
             while (_outgoingPosSyncQueue.TryDequeue(out _)) { }
             while (_incomingPosAlignQueue.TryDequeue(out _)) { }
+            while (_incomingReverseAlignQueue.TryDequeue(out _)) { }
+            lock (_unitOwnershipSync) _unitOwnership.Clear();
             CommandInterceptor.ClearPendingLocalBuilds();
+            Patches.MayorSyncPatch.ResetTracking();
         }
 
         public static int RollNewGameSeed()
@@ -666,6 +708,8 @@ namespace TABCoopMod.Sync
             CommandExecutor.IsReplayingCommand = false;
             PauseSyncController.CancelCountdown();
             LockstepClock.SetSessionPause(false);
+            RenderVisualInterpolationPatch.ExitVisualSceneUpdate(DXGame.Current);
+            RenderVisualInterpolationPatch.Reset();
 
             ResetSyncTrackingState();
             AllyStates.Clear();
@@ -1174,13 +1218,160 @@ namespace TABCoopMod.Sync
                             }
                         }
                     }
+                    RecordDeterministicCommandOwnership(cmd, nextSimTick);
                     CommandExecutor.Execute(cmd);
                 }
             }
         }
 
+        private static void RecordDeterministicCommandOwnership(NetCommand cmd, int simTick)
+        {
+            if (cmd == null || cmd.PlayerId == 0 || cmd.ExecutorEntityIds == null || cmd.ExecutorEntityIds.Length == 0)
+                return;
+            if (cmd.Type != NetCommandType.GroupMoveOrPatrol
+                && cmd.Type != NetCommandType.ExecuteCommand
+                && cmd.Type != NetCommandType.CancelCurrentOrder)
+                return;
+
+            var game = DXGame.Current;
+            if (game == null) return;
+            Type movableType = GameBridge.TypeCMovable;
+
+            lock (_unitOwnershipSync)
+            {
+                if (_unitOwnership.Count > 512)
+                {
+                    var stale = new List<ulong>();
+                    foreach (var kv in _unitOwnership)
+                    {
+                        int age = simTick - kv.Value.LastOrderTick;
+                        if (age < 0 || age > OwnershipLeaseTicks)
+                            stale.Add(kv.Key);
+                    }
+                    for (int i = 0; i < stale.Count; i++)
+                        _unitOwnership.Remove(stale[i]);
+                }
+
+                for (int i = 0; i < cmd.ExecutorEntityIds.Length; i++)
+                {
+                    ulong id = cmd.ExecutorEntityIds[i];
+                    DXEntity e = game.GetEntityByID(id);
+                    if (e == null || e.Disposed || e.PhysicalType != DXBodyType.Dynamic) continue;
+                    if (!GameBridge.IsPlayerEntity(e)) continue;
+                    if (movableType != null && !GameBridge.HasComponent(e, movableType)) continue;
+                    _unitOwnership[id] = new UnitOwnershipEntry { PlayerId = cmd.PlayerId, LastOrderTick = simTick };
+                }
+            }
+        }
+
+        private static bool TryGetActiveUnitOwner(ulong entityId, int curTick, DXEntity entity, out byte ownerPlayerId)
+        {
+            ownerPlayerId = 0;
+            if (entity == null || entity.Disposed) return false;
+
+            UnitOwnershipEntry entry;
+            lock (_unitOwnershipSync)
+            {
+                if (!_unitOwnership.TryGetValue(entityId, out entry))
+                    return false;
+            }
+
+            int age = curTick - entry.LastOrderTick;
+            if (age < 0 || age > OwnershipLeaseTicks)
+            {
+                lock (_unitOwnershipSync) _unitOwnership.Remove(entityId);
+                return false;
+            }
+
+            if (age > OwnershipIdleGraceTicks && !GameBridge.IsEntityActivelyMoving(entity))
+            {
+                lock (_unitOwnershipSync) _unitOwnership.Remove(entityId);
+                return false;
+            }
+
+            ownerPlayerId = entry.PlayerId;
+            return ownerPlayerId > 0;
+        }
+
+        private static List<OwnedUnitPosSample> CollectClientOwnedActiveUnits(int curTick, List<StateHasher.EntityPosSample> dynamicPositions)
+        {
+            if (Transport == null || Transport.IsHost || !EnableAsyncPosAlign || dynamicPositions == null || dynamicPositions.Count == 0)
+                return null;
+            var game = DXGame.Current;
+            if (game == null) return null;
+
+            byte localPid = Transport.LocalPlayerId;
+            if (localPid <= 1) return null;
+
+            Dictionary<ulong, UnitOwnershipEntry> ownedSnapshot = null;
+            List<ulong> expired = null;
+
+            lock (_unitOwnershipSync)
+            {
+                if (_unitOwnership.Count == 0) return null;
+                foreach (var kv in _unitOwnership)
+                {
+                    int age = curTick - kv.Value.LastOrderTick;
+                    if (age < 0 || age > OwnershipLeaseTicks)
+                    {
+                        if (expired == null) expired = new List<ulong>();
+                        expired.Add(kv.Key);
+                        continue;
+                    }
+                    if (kv.Value.PlayerId != localPid) continue;
+
+                    DXEntity e = game.GetEntityByID(kv.Key);
+                    if (e == null || e.Disposed || e.PhysicalType != DXBodyType.Dynamic)
+                    {
+                        if (expired == null) expired = new List<ulong>();
+                        expired.Add(kv.Key);
+                        continue;
+                    }
+                    if (age > OwnershipIdleGraceTicks && !GameBridge.IsEntityActivelyMoving(e))
+                    {
+                        if (expired == null) expired = new List<ulong>();
+                        expired.Add(kv.Key);
+                        continue;
+                    }
+
+                    if (ownedSnapshot == null) ownedSnapshot = new Dictionary<ulong, UnitOwnershipEntry>(16);
+                    ownedSnapshot[kv.Key] = kv.Value;
+                }
+
+                if (expired != null)
+                {
+                    for (int i = 0; i < expired.Count; i++)
+                        _unitOwnership.Remove(expired[i]);
+                }
+            }
+
+            if (ownedSnapshot == null || ownedSnapshot.Count == 0)
+                return null;
+
+            var result = new List<OwnedUnitPosSample>(Math.Min(ownedSnapshot.Count, MaxReverseAlignUnitsPerReport));
+            for (int i = 0; i < dynamicPositions.Count && result.Count < MaxReverseAlignUnitsPerReport; i++)
+            {
+                var s = dynamicPositions[i];
+                if (!s.IsDynamic || !ownedSnapshot.ContainsKey(s.Id)) continue;
+                result.Add(new OwnedUnitPosSample
+                {
+                    Id = s.Id,
+                    X = s.X,
+                    Y = s.Y
+                });
+            }
+
+            return result.Count > 0 ? result : null;
+        }
+
         private static void MonitorGateWait()
         {
+            if (_levelEndedSynced || GameBridge.IsLevelEnded())
+            {
+                _gateWaitStartTicks = -1.0;
+                return;
+            }
+
             int cur = DXGame.Current?.IAIterationInt ?? 0;
             double now = DXHelper_Environment.Ticks;
 
@@ -1419,9 +1610,12 @@ namespace TABCoopMod.Sync
             //    first tick from OnFrameTick; during active sim turns are sealed in OnSimulationTickStarting.
             if (Transport.IsHost)
             {
+                if (!_levelEndedSynced && GameBridge.IsLevelEnded())
+                    NotifyHostLevelEnded(GameBridge.GetLevelEndStatus() == 1);
+
                 var gx = DXGame.Current;
                 bool hostEnginePaused = gx != null && gx.Paused;
-                if (hostEnginePaused || LockstepClock.PausedBySession || _hostLastBroadcastSimTick < 0)
+                if (!_levelEndedSynced && (hostEnginePaused || LockstepClock.PausedBySession || _hostLastBroadcastSimTick < 0))
                 {
                     int cur = gx?.IAIterationInt ?? 0;
                     EmitHostTurns(cur);
@@ -1449,9 +1643,14 @@ namespace TABCoopMod.Sync
 
             LogPeriodicLatencyStats();
 
-            // While paused by session, UpdateGameLogic may not fire every tick, so flush any
-            // authorized turn commands stamped for the frozen tick directly on the main thread.
-            if (LockstepClock.PausedBySession)
+            // While paused (by session or local modal pause such as Mayor selection), UpdateGameLogic
+            // is frozen, so flush any authorized turn commands stamped <= pausedTick on the main thread
+            // so a peer's Mayor pick can close this machine's open Mayor modal immediately.
+            bool isLocalEnginePaused = DXGame.Current != null && DXGame.Current.Paused;
+            if ((LockstepClock.PausedBySession || isLocalEnginePaused)
+                && !LockstepClock.LoadingLevel
+                && !GameBridge.IsLevelEnded()
+                && GameBridge.IsCurrentLevelSystemEnabled())
             {
                 int pausedTick = DXGame.Current?.IAIterationInt ?? 0;
                 if (_networkGate == null || _networkGate.IsTickReady(pausedTick))
@@ -1483,6 +1682,54 @@ namespace TABCoopMod.Sync
             int entryTick = DXGame.Current?.IAIterationInt ?? 0;
             if (entryTick > 0 && _lastCheckedSimTick < 0)
                 RunEpochHashAndChecksum(entryTick);
+        }
+
+        public static void NotifyHostLevelEnded(bool won)
+        {
+            if (!IsSessionActive || !IsInSyncedLevel || Transport == null || !Transport.IsHost)
+                return;
+            if (_levelEndedSynced)
+                return;
+
+            _levelEndedSynced = true;
+            _clientHostPauseKeepaliveUntilTicks = -1.0;
+            _clientHostInModalPause = false;
+            LockstepClock.SetSessionPause(false);
+            PauseSyncController.CancelCountdown();
+
+            int tick = DXGame.Current?.IAIterationInt ?? 0;
+            ModLogger.Info($"[CoopSessionManager] Host level ended (won={won}, tick={tick}) -> broadcasting PacketType.LevelEnded to clients.");
+            Transport.Broadcast(SendChannel.ReliableCommand, PacketType.LevelEnded, w =>
+            {
+                w.Write(won);
+                w.Write(tick);
+            });
+        }
+
+        private static void OnClientLevelEndedReceived(bool won, int endTick)
+        {
+            if (_levelEndedSynced || GameBridge.IsLevelEnded())
+                return;
+
+            _levelEndedSynced = true;
+            _clientHostPauseKeepaliveUntilTicks = -1.0;
+            _clientHostInModalPause = false;
+            _gateWaitStartTicks = -1.0;
+            LockstepClock.SetSessionPause(false);
+            PauseSyncController.CancelCountdown();
+
+            ModLogger.Info($"[CoopSessionManager] Client received LevelEnded(won={won}, endTick={endTick}) from Host -> showing GameEnd modal.");
+            IsReceivingRemoteLevelEnd = true;
+            try
+            {
+                if (DXVision.GUI.DXModalScreen.IsInModal)
+                    DXVision.GUI.DXModalScreen.CloseAll();
+                GameBridge.ShowSyncedGameEnd(won);
+            }
+            finally
+            {
+                IsReceivingRemoteLevelEnd = false;
+            }
         }
 
         /// <summary>
@@ -1549,7 +1796,7 @@ namespace TABCoopMod.Sync
 
         private static void EmitHostTurns(int cur)
         {
-            if (!Transport.IsHost) return;
+            if (!Transport.IsHost || _levelEndedSynced || GameBridge.IsLevelEnded()) return;
 
             // Use the synchronized pause flag, or engine/modal pause when a game modal opens:
             // during modal pause UpdateGameLogic is frozen so we must not keep advancing targetTick
@@ -1791,9 +2038,10 @@ namespace TABCoopMod.Sync
             }
             else
             {
+                List<OwnedUnitPosSample> ownedUnits = CollectClientOwnedActiveUnits(digest.SimTick, dynamicPositions);
                 Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.StateChecksumReport, w =>
                 {
-                    WriteDigestReport(w, in digest, digestSummary);
+                    WriteDigestReport(w, in digest, digestSummary, ownedUnits);
                 });
             }
         }
@@ -2009,18 +2257,33 @@ namespace TABCoopMod.Sync
                     _networkGate.MarkReady(targetTick);
                     if (targetTick > _clientHostPausedTick)
                         _clientHostPauseKeepaliveUntilTicks = -1.0;
+
+                    if (cmds != null && cmds.Exists(c => c.Type == NetCommandType.MayorVoteOrSelect))
+                    {
+                        Patches.MayorSyncPatch.NotifyRemoteMayorCommitted(GameBridge.GetLevelCollectionCount("MayorStates"));
+                        Patches.MayorSyncPatch.CloseActiveMayorWindow();
+                    }
                     break;
                 }
 
                 case PacketType.HostPauseKeepalive:
                 {
-                    if (Transport.IsHost) break;
+                    if (Transport.IsHost || _levelEndedSynced || GameBridge.IsLevelEnded()) break;
                     int hostTick = r.ReadInt32();
                     bool hostInModal = r.ReadBoolean();
                     bool hostSessionPaused = r.ReadBoolean();
                     _clientHostPausedTick = hostTick;
                     _clientHostInModalPause = hostInModal || hostSessionPaused;
                     _clientHostPauseKeepaliveUntilTicks = DXHelper_Environment.Ticks + 1500.0;
+                    break;
+                }
+
+                case PacketType.LevelEnded:
+                {
+                    if (Transport.IsHost) break;
+                    bool won = r.ReadBoolean();
+                    int endTick = r.ReadInt32();
+                    OnClientLevelEndedReceived(won, endTick);
                     break;
                 }
 
@@ -2032,6 +2295,16 @@ namespace TABCoopMod.Sync
                     if (!_clientTickDigests.TryGetValue(clientTick, out var byPeer))
                         _clientTickDigests[clientTick] = byPeer = new Dictionary<byte, TickDigestRecord>();
                     byPeer[senderId] = rec;
+                    if (EnableAsyncPosAlign && rec.OwnedUnits != null && rec.OwnedUnits.Count > 0)
+                    {
+                        _incomingReverseAlignQueue.Enqueue(new PendingReverseAlignApply
+                        {
+                            Generation = _asyncGeneration,
+                            SenderPlayerId = senderId,
+                            Tick = clientTick,
+                            Units = rec.OwnedUnits
+                        });
+                    }
                     VerifyTickChecksum(clientTick);
                     break;
                 }
@@ -2205,7 +2478,7 @@ namespace TABCoopMod.Sync
             }
         }
 
-        private static void WriteDigestReport(BinaryWriter w, in StateHasher.LevelStateSnapshotDigest d, string summary)
+        private static void WriteDigestReport(BinaryWriter w, in StateHasher.LevelStateSnapshotDigest d, string summary, List<OwnedUnitPosSample> ownedUnits = null)
         {
             w.Write(d.SimTick);
             w.Write(d.GameTimeMs);
@@ -2243,6 +2516,15 @@ namespace TABCoopMod.Sync
             w.Write((ushort)entLen);
             for (int i = 0; i < entLen; i++)
                 w.Write(d.EntityBuckets[i]);
+
+            int ownedCount = ownedUnits != null ? Math.Min(ownedUnits.Count, MaxReverseAlignUnitsPerReport) : 0;
+            w.Write((ushort)ownedCount);
+            for (int i = 0; i < ownedCount; i++)
+            {
+                w.Write(ownedUnits[i].Id);
+                w.Write(ownedUnits[i].X);
+                w.Write(ownedUnits[i].Y);
+            }
         }
 
         private static TickDigestRecord ReadDigestReport(BinaryReader r)
@@ -2274,7 +2556,26 @@ namespace TABCoopMod.Sync
             d.PosBuckets = ReadBucketArray(r);
             d.LifeBuckets = ReadBucketArray(r);
             d.EntityBuckets = ReadBucketArray(r);
-            return new TickDigestRecord { Digest = d, Summary = summary };
+
+            List<OwnedUnitPosSample> ownedUnits = null;
+            if (r.BaseStream.Position + 2 <= r.BaseStream.Length)
+            {
+                ushort ownedCount = r.ReadUInt16();
+                if (ownedCount > 0 && r.BaseStream.Position + ownedCount * 16L <= r.BaseStream.Length)
+                {
+                    ownedUnits = new List<OwnedUnitPosSample>(ownedCount);
+                    for (int i = 0; i < ownedCount; i++)
+                    {
+                        ownedUnits.Add(new OwnedUnitPosSample
+                        {
+                            Id = r.ReadUInt64(),
+                            X = r.ReadSingle(),
+                            Y = r.ReadSingle()
+                        });
+                    }
+                }
+            }
+            return new TickDigestRecord { Digest = d, Summary = summary, OwnedUnits = ownedUnits };
         }
 
         private static ulong[] ReadBucketArray(BinaryReader r)
@@ -2593,6 +2894,7 @@ namespace TABCoopMod.Sync
                 float maxCoord = nCells > 1 ? nCells - 0.5f : 10000f;
 
                 int appliedCount = 0;
+                int protectedSelfOwned = 0;
                 if (item.ApplyPosCorrection && item.Deltas != null && game != null)
                 {
                     if (_lastEntityPosCorrectedTick.Count > 512)
@@ -2608,6 +2910,7 @@ namespace TABCoopMod.Sync
                             _lastEntityPosCorrectedTick.Remove(expiredIds[k]);
                     }
 
+                    byte localPid = Transport.LocalPlayerId;
                     for (int i = 0; i < item.Deltas.Count; i++)
                     {
                         var d = item.Deltas[i];
@@ -2622,14 +2925,22 @@ namespace TABCoopMod.Sync
                         if (e == null || e.Disposed || e.PhysicalType != DXBodyType.Dynamic) continue;
 
                         float dist = (float)Math.Sqrt(d.Dx * d.Dx + d.Dy * d.Dy);
+                        if (TryGetActiveUnitOwner(e.ID, item.Tick, e, out byte ownerId)
+                            && ownerId == localPid
+                            && dist < SelfOwnedHostOverrideThreshold)
+                        {
+                            protectedSelfOwned++;
+                            continue;
+                        }
+
                         float minThreshold = GameBridge.GetEntityPositionSnapThreshold(e, out float damping);
                         if (dist < minThreshold) continue;
 
                         float applyDx = dist < 2.2f ? d.Dx * damping : d.Dx;
                         float applyDy = dist < 2.2f ? d.Dy * damping : d.Dy;
 
-                        float nx = e.Position.X + applyDx;
-                        float ny = e.Position.Y + applyDy;
+                        float nx = LockstepClock.QuantizeCoord(e.Position.X + applyDx);
+                        float ny = LockstepClock.QuantizeCoord(e.Position.Y + applyDy);
                         if (float.IsNaN(nx) || float.IsInfinity(nx) || float.IsNaN(ny) || float.IsInfinity(ny)) continue;
 
                         nx = Math.Max(0.5f, Math.Min(maxCoord, nx));
@@ -2681,7 +2992,7 @@ namespace TABCoopMod.Sync
                 }
 
                 ModLogger.Info(
-                    $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}(pos={(item.ApplyPosCorrection ? 1 : 0)}:{appliedCount}/{item.ComparedCount}) " +
+                    $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}(pos={(item.ApplyPosCorrection ? 1 : 0)}:{appliedCount}/{item.ComparedCount}, selfProt={protectedSelfOwned}) " +
                     $"Drifted(>0.001={item.Drifted001}, >0.01={item.Drifted01}, >0.1={item.Drifted1}, >0.5={item.Drifted5}) " +
                     $"MaxDelta={item.MaxDelta:F4} Rms={item.RmsDelta:F4} MaxType={maxType} Exceeded={item.ExceededThreshold} " +
                     $"LifeDiff={item.LifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={item.MissingOnHost} MissingOnClient={item.MissingOnClient}");
@@ -2706,6 +3017,77 @@ namespace TABCoopMod.Sync
                     w.Write(item.MissingOnHost);
                     w.Write(item.MissingOnClient);
                 });
+            }
+
+            while (_incomingReverseAlignQueue.TryDequeue(out var rev))
+            {
+                if (rev.Generation != curGen || Transport == null || !Transport.IsHost) continue;
+                if (!EnableAsyncPosAlign || rev.Units == null || rev.Units.Count == 0) continue;
+                if (!_tickPosCache.TryGetValue(rev.Tick, out var hostSamples) || hostSamples == null || hostSamples.Count == 0)
+                    continue;
+
+                var game = DXGame.Current;
+                if (game == null) continue;
+                int curTick = game.IAIterationInt;
+                int nCells = DXWorldGrid.NCells;
+                float maxCoord = nCells > 1 ? nCells - 0.5f : 10000f;
+                int applied = 0;
+
+                var revMap = new Dictionary<ulong, OwnedUnitPosSample>(rev.Units.Count);
+                for (int i = 0; i < rev.Units.Count; i++)
+                    revMap[rev.Units[i].Id] = rev.Units[i];
+
+                for (int i = 0; i < hostSamples.Count; i++)
+                {
+                    var hs = hostSamples[i];
+                    if (!hs.IsDynamic || !revMap.TryGetValue(hs.Id, out var u))
+                        continue;
+
+                    if (_lastEntityPosCorrectedTick.TryGetValue(u.Id, out int prevTick))
+                    {
+                        int elapsed = curTick - prevTick;
+                        if (elapsed >= 0 && elapsed < EntityPosRealignCooldownTicks)
+                            continue;
+                    }
+
+                    DXEntity e = game.GetEntityByID(u.Id);
+                    if (e == null || e.Disposed || e.PhysicalType != DXBodyType.Dynamic) continue;
+                    if (!TryGetActiveUnitOwner(e.ID, curTick, e, out byte ownerId) || ownerId != rev.SenderPlayerId)
+                        continue;
+
+                    // Compare same-tick epoch samples (u@rev.Tick vs hs@rev.Tick) to eliminate tick-phase skew.
+                    float dx = u.X - hs.X;
+                    float dy = u.Y - hs.Y;
+                    float dist = (float)Math.Sqrt(dx * dx + dy * dy);
+                    if (dist < ReverseAlignMinThreshold || dist > MaxAsyncTeleportCells) continue;
+
+                    float damping = dist < 2.2f ? 0.65f : 1.0f;
+                    float nx = LockstepClock.QuantizeCoord(e.Position.X + dx * damping);
+                    float ny = LockstepClock.QuantizeCoord(e.Position.Y + dy * damping);
+                    if (float.IsNaN(nx) || float.IsInfinity(nx) || float.IsNaN(ny) || float.IsInfinity(ny)) continue;
+
+                    nx = Math.Max(0.5f, Math.Min(maxCoord, nx));
+                    ny = Math.Max(0.5f, Math.Min(maxCoord, ny));
+                    float actualDx = nx - e.Position.X;
+                    float actualDy = ny - e.Position.Y;
+                    var newPos = new PointF(nx, ny);
+                    e.LastPosition = newPos;
+                    e.Position = newPos;
+                    var body = e.Body;
+                    if (body != null && body.Handle != IntPtr.Zero)
+                    {
+                        body.LastPositionComputed = newPos;
+                        body.PositionComputed = newPos;
+                        body.PhysicPosition = newPos;
+                    }
+                    _lastEntityPosCorrectedTick[e.ID] = curTick;
+                    if (dist <= 3.5f)
+                        RenderVisualInterpolationPatch.RecordVisualSnapOffset(e.ID, -actualDx, -actualDy);
+                    applied++;
+                }
+
+                if (applied > 0)
+                    ModLogger.Info($"[AsyncReverseAlign] Client({rev.SenderPlayerId}) Tick={rev.Tick} applied={applied}/{rev.Units.Count}");
             }
         }
 

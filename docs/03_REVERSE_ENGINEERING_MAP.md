@@ -121,6 +121,11 @@
 | `#=zhWLC3K8=` | `void (string, Color, int)` | 顶部中央横幅提示（`durationMs=0` 时在暂停帧立即 `Opacity=1`） |
 | `#=zYWs2Gv9F3GD5` | `void (...)` | 左侧通知队列 |
 | `#=zR1qHCYY=` | `void ()` | 刷新右下角命令面板 |
+| `#=zbcjZqBFFSY96` | `bool` (Field) | 对局已结束标志 `GameEndedFlag` |
+| `#=z40N_lqqB8daJ` | `static DXAnimation` (Field) | 战败红屏模糊 / 局末全屏过渡动画 `ScreenAnim` |
+| `#=zIoSB3Q$9ZjUF` | `void (bool won)` | 触发胜负结算 `TriggerGameEnd`（设置 `ZXLevelState.EndStatus` 与结束标志后调用生存/战役结算） |
+| `#=zuY2pslm6MYCZNwXKL0J6wWQ=` | `void (bool won, bool isIntroDelay)` | 生存模式胜利/战败结算流程 `ShowSurvivalEnd` |
+| `#=z50KAckqpQjxWzdXGV4uLSoo=` | `void (bool won, bool isIntroDelay)` | 战役模式胜利/战败结算流程 `ShowCampaignEnd` |
 
 ### 4.4 `ZXCommand`, `Build`, `Train`, `ZXMayor`
 

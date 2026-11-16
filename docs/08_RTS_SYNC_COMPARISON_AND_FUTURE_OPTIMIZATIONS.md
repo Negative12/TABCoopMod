@@ -68,8 +68,11 @@
 
 ### 梯度二：中等深度确定性强化（约 400 ~ 1,000 行，2 ~ 5 天）
 用于进一步压低大规模尸潮混战时的软修正频率：
-5. **物理步末浮点坐标/速度量化截断**（约 `300~500 行` + 密集回放压测）：
-   - 在 [LockstepClock.cs](../src/TABCoopMod/Determinism/LockstepClock.cs) `UpdatePhysics_Exit` 中将活跃刚体的 `PositionComputed` 与 `Velocity` 按网格粒度（如 `1/256` 格）量化写回，消除 Chipmunk 浮点尾数累计触发的 `cpBBTree` 边界分叉。需实测平滑性与不破坏物理堆叠。
+5. ~~**物理步末浮点坐标/速度量化截断**~~（✅ **已完成**）：
+   - 在 [LockstepClock.cs](../src/TABCoopMod/Determinism/LockstepClock.cs) `UpdatePhysics_Exit` 中新增 `LockstepClock.QuantizePhysicsBodiesPostStep()`（可通过 [TestHarnessConfig.cs](../src/TABCoopMod/Testing/TestHarnessConfig.cs) `TABCOOP_PHYSICS_QUANT` 配置倍率，默认 `256` 即 `1/256 = 0.00390625` 格，`0` 可关闭用于 A/B 对照）：
+     - 在每次有效物理步进（`DXPhysicWorld.NUpdates != __state`）结束后遍历活跃 `DXBodyType.Dynamic` 刚体，对有限的 `PhysicPosition`（并按 `DXWorldGrid.NCells` 做安全边界防越界夹紧）与 `PhysicVelocity` 使用 `MidpointRounding.ToEven` 量化到二进制精确浮点格点；
+     - 仅在数值实际变化时写回 `PhysicPosition` / `PositionComputed` / `DXEntity.Position`（同步更新 `DXWorldGrid` 格缓存）以及 `PhysicVelocity` / `Velocity`，并在移动体上保留 `LastPositionComputed` / `LastPosition` 以确保 `RenderVisualInterpolationPatch` 帧间插值平滑（仅静止体首次吸附网格时同步 `Last*`）；
+     - 实测：`1_Backup.zxsav` 120 tick 双进程回放 `identical`（`maxDx=0, maxDy=0`）；`1_Backup.zxsav` 60s `Chaos-1`（`latency=120;jitter=30;loss=0.02;disconnect=4000-5000;seed=42`）从原本 Tick `32940` 触发 `Pos` 漂移收敛为 **Tick `31904..33720` 连续 31/31 `MATCH`、`0 Auto-resync`、`0 ERROR`**（`quant≈0.25ms/p`）；`900survival.zxsav`（18,074 实体）密集群体汇聚与反向行军双端暂停同 tick 对照 `maxPeerDiff=0.0000`、`minPairDist=0.4617 / 0.1105`（未破坏碰撞分离）、10/10 `MATCH`、`wait=0.0ms`。
 6. **战斗索敌目标 ID 同步锁定**（约 `400~600 行`）：
    - 绑定 `BData` 仇恨目标字段，在 `2s` 轻量状态同步包中附带处于接战态单位的 `TargetEntityId`，避免临界距离差异引发双方僵尸追向不同目标后越走越远。
 

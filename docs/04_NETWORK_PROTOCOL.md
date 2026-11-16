@@ -75,6 +75,8 @@ namespace TABCoopMod.Networking
 | `0x13` | `SessionStart` | Reliable | H -> All | 全员就绪，对齐并进入 Lockstep 步进（携带起始 tick、seed、idCounter 与当前 `InputDelayTicks`） |
 | `0x20` | `ClientInputReport` | Reliable | C -> H | 客机上报本人在当前 Turn 提交的 `NetCommand[]` 列表 |
 | `0x21` | `TurnInputBroadcast` | Reliable | H -> All | 房主汇总全员在 `TargetSimTick` 的指令批次并广播（含空心跳包） |
+| `0x22` | `HostPauseKeepalive` | Reliable | H -> All | 房主暂停或打开弹窗时周期保活心跳，区分于真实断线/失联 |
+| `0x23` | `LevelEnded` | Reliable | H -> All | 房主权威同步关卡胜利/战败结算（`won`, `endTick`），客机立即弹出 `游戏结束` 并抑制暂停误报 |
 | `0x30` | `StateChecksumReport` | Reliable | All -> H | 每 60 逻辑帧（2 秒）上报当前 `SimTick` 的 `StateHasher` 校验和 |
 | `0x31` | `DesyncDetectedAlert` | Reliable | H -> All | 房主检测到状态不一致时下发告警并触发自动快照 `Auto-resync` |
 | `0x40` | `AllyCursorAndCamera` | Unreliable | All <-> All | 20Hz 广播本地鼠标世界坐标、视野矩形与预览建筑状态 |

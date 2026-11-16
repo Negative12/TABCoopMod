@@ -1,7 +1,7 @@
 # 06 — 当前项目状态、门禁验收报告与下一步计划 (Project Status)
 
-> **最后更新**: 2026-11-15（完成多人执政官生存新局平衡实装、非 2 的幂次地图感染镇/遗迹边界 Transpiler 修正、4 场景同种子全景图对比及双开平衡 E2E 回归）
-> **构建基线**: `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=58, failed-tolerant=0`**（新增 `SurvivalBalancePatch` 含 `MapGenerator` IL Transpiler）。
+> **最后更新**: 2026-11-16（新增 `PacketType.LevelEnded` 战局胜负/战败同步与 `游戏结束` 退出 `AppHangB1` 防护修复；已移除文档 11 纯视觉起步假位移并修复退回主菜单越界异常）
+> **构建基线**: `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=63, failed-tolerant=0`**。
 > **历史过程记录**: 早期排查过程与会话 1~6 演进流水已归档至 [`docs/archive/`](archive/SESSION_CHANGELOG_S1_TO_S6.md)。
 
 ---
@@ -24,6 +24,10 @@
 | **RTS 等候房间与全流程** | `verify_lobby_flow.ps1` + `1_Backup.zxsav` 双开实测 + `run_replay_verify.ps1` | 主菜单入口/探测本地主机（`1/3`、`InLobby`）/加入初态未准备与房主 `canStart=False` 门控/客机切换就绪解锁开局/复用单人[新建生存游戏]并验证每次滚动动态种子（`-1880374752` vs `859584069`）/取消自动回房间/读档进入同步对局（`3018` 实体对齐）/房主 `ReturnToMainMenu` 双端退回主菜单且保留网络、重置客机为未准备并重开大厅；12 张实机截图无斜切撕裂或换行，双进程回放 `120 ticks identical`、`0 ERROR` | ✅ 通过 |
 | **文档 08 梯度一优化** | `1_Backup.zxsav`（120 tick 回放 + `latency=90/0` 双开测试） | 完成本地待建幽灵虚影与 8 项资源预扣累计、0ms 本地单位语音即时确认与回放期 `UnitVoices` 去重、基于 RTT 探测的自适应 `InputDelayTicks (1..4)`；实测 `GameBridge 0 missing`、`Classes OK=57, failed-tolerant=0`、回放 `120 ticks identical`、`latency=90` 升档 `1 -> 4`、`latency=0` 自动降档 `3 -> 2` 且全程 `StateChecksum MATCH`（幽灵框视觉与语音听感待人工桌面确认） | ✅ 已实现 |
 | **生存新局平衡与全景对比** | `verify_new_survival_balance.ps1` + 4 场景同种子全景图（`BR`/`DS`/`FA`/`VO`） | 实装 `CoopBalanceManager` + `SurvivalBalancePatch`（含 `MapGenerator` 非 2 的幂次边界 Transpiler `doom=1, raven=1`）+ 大厅 `Co-op Balanced / Vanilla` 切换同步；`Classes OK=58, failed-tolerant=0`；双开校验 Balanced (`NCells=280, extraW=2, 6R+1S+1CC`, Tick 2/120/197 `StateChecksum MATCH`) 与 Vanilla 对照 (`NCells=256, 4R+1S+1CC`) 通过，`0 ERROR`；4 场景全景图目视确认感染村镇回到可建造区中环（`reports/panorama_comparison.html`） | ✅ 通过 |
+| **文档 08 梯度二目标 5（物理步末量化截断）** | `1_Backup.zxsav`（120 tick 回放 + 60s `Chaos-1`）+ `900survival.zxsav`（密集群体汇聚/反向行军） | 在 `LockstepClock.UpdatePhysics_Exit` 接入 `QuantizePhysicsBodiesPostStep()`（`TABCOOP_PHYSICS_QUANT=256`，即 `1/256` 格量化写回 `PhysicPosition`/`PositionComputed`/`DXEntity.Position` 与 `PhysicVelocity`/`Velocity`，保留移动体 `Last*` 供视觉插值）；`1_Backup` 回放 `120 ticks identical`、`Chaos-1` 消除原 Tick 32940 位置漂移（Tick `31904..33720` **31/31 `MATCH`、`0 Auto-resync`、`0 ERROR`**，`quant≈0.25ms/p`）；`900survival` 8 单位汇聚+反向行军暂停同 tick 对照 `maxPeerDiff=0.0000`、`minPairDist=0.4617 / 0.1105`、10/10 `MATCH` | ✅ 已实现 |
+| **文档 11 控制权差分对齐与视觉平滑优化** | `1_Backup` 120 tick 回放 + `900survival`（`latency=0` & `ChaosTransport` 回归） | ① `CoopSessionManager` 实装 `_unitOwnership` 租约（300t TTL / 90t 闲置宽限）、客机自控保护（`<3.5` 格免拉回）与随 `StateChecksumReport` 捎带的同 tick 轻量反向对齐；② 改由 `SetCamera` + `UpdateVisibleCells` 批量投影全场景（含 `CShadow` 与 Z 深度）、修正 `StartFrame` 累加/扣减固定 `83.33ms` 时序及渲染期视觉 `GameTimeInt` 余数（已回退视觉起步假位移并修复退出主菜单渲染插值 `ArgumentOutOfRangeException`） | ✅ 已实现 |
+| **战败/胜利同步与结束界面退出修复** | `1_Backup.zxsav` + `900survival.zxsav` 双开实测（TriggerGameEnd + ConfirmExit） | 新增 `PacketType.LevelEnded (0x23)` 与 `LevelEndSyncPatch`（主机权威广播、抑制客机伪触发并关闭 `HostPauseKeepalive` / `Tick gate waiting` 误报），并在 `LockstepClock.UpdateGameLogic_Prefix` 增加 `Paused`/`!CurrentGameSystem.Enabled`/`IsLevelEnded` 停步保护及 `ReturnToMainMenuPatch` 清理结束画面渐变过渡特效；`900survival` 实测主机触发战败后双端同步弹出结束界面（`endStatus=2, inModal=true, countdownActive=false`），点击 `游戏结束` 退出按钮后双端均顺利退回主菜单重开大厅（`onMainMenu=true, lobbyWindowOpen=true, HostAlive=True, ClientAlive=True, 0 ERROR`） | ✅ 通过 |
+| **市长选择对端自动关窗修复** | `900survival.zxsav` 双开双向实测（Round 1 主机先选 / Round 2 客机先选） | 修复本地弹窗暂停（`DXGame.Paused = true`）阻塞 `FlushDueTurnCommands` 及客机等待未来 `TargetSimTick` 未提前关闭弹窗的问题：在 `OnFrameTick` 对本地引擎暂停同样冲刷已就绪回合指令，并在客机收到含 `MayorVoteOrSelect` 的 `TurnInputBroadcast` 时立即调用 `CloseActiveMayorWindow()` 与 `NotifyRemoteMayorCommitted()` 抑制延迟弹窗；双开实测双方向均在 300ms 内自动关闭对端弹窗且 `Paused=false`（`HostMayor=1/2, ClientMayor=1/2`），后续 Tick `4725..4920` 4/4 `StateChecksum MATCH`、`0 ERROR` | ✅ 通过 |
 
 ---
 

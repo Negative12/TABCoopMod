@@ -158,8 +158,11 @@ namespace TABCoopMod.Patches
         {
             try
             {
+                ModLogger.Info($"[ReturnToMainMenuPatch] Prefix start (IsHost={CoopSessionManager.Transport?.IsHost}, EndStatus={GameBridge.GetLevelEndStatus()}, InModal={DXVision.GUI.DXModalScreen.IsInModal}).");
+                GameBridge.ClearScreenTransitionEffect();
                 CoopLobbyWindow.ForceHideWithoutStopping();
                 CoopSessionManager.OnReturningToMainMenu();
+                ModLogger.Info("[ReturnToMainMenuPatch] Prefix complete.");
             }
             catch (Exception ex)
             {
