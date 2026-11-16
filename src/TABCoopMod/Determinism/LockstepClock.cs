@@ -144,7 +144,11 @@ namespace TABCoopMod.Determinism
         /// Prevents DXGame._TaskGameTime background thread from mutating GameTime/GameTimeInt
         /// mid-tick or mid-physics.
         /// </summary>
-        internal static bool AllowRawGameTimeSet => _allowRawGameTimeSet;
+        internal static bool AllowRawGameTimeSet
+        {
+            get => _allowRawGameTimeSet;
+            set => _allowRawGameTimeSet = value;
+        }
 
         internal static void SetDeterministicGameTime(DXGame game, double value)
         {
@@ -513,6 +517,29 @@ namespace TABCoopMod.Determinism
             var level = DXLevel.Current;
             if (level?.Random != null)
                 DXRandomCtorPatch.ReseedInstance(level.Random, MixTickSeed(baseSeed, tick, 0x243F6A88u));
+        }
+
+        /// <summary>
+        /// Deterministically seeds DXLevel.Current.Random for ZXGame.ShowMayorSelection from
+        /// (SyncedRandomSeed, mayorLevel) so every peer rolls identical male/female mayor choices
+        /// regardless of wall-clock ExecuteWithDelay(6000) or modal-retry tick skew.
+        /// </summary>
+        public static void ReseedLevelRandomForMayorSelection(int mayorLevel)
+        {
+            var level = DXLevel.Current;
+            if (!IsDeterministicModeActive || level?.Random == null) return;
+            uint seed = MixTickSeed(_syncedRandomSeed, mayorLevel, 0x4D415952u);
+            DXRandomCtorPatch.ReseedInstance(level.Random, seed);
+            ModLogger.Info($"[MayorSync] Seeded DXLevel.Random deterministically for Mayor level={mayorLevel} (baseSeed={_syncedRandomSeed}, drawSeed=0x{seed:X8}).");
+        }
+
+        /// <summary>Re-anchors DXLevel.Current.Random back to the current simulation tick stream.</summary>
+        public static void ReanchorLevelRandomToCurrentTick()
+        {
+            var level = DXLevel.Current;
+            if (!IsDeterministicModeActive || level?.Random == null) return;
+            int tick = DXGame.Current?.IAIterationInt ?? 0;
+            DXRandomCtorPatch.ReseedInstance(level.Random, MixTickSeed(_syncedRandomSeed, tick, 0x243F6A88u));
         }
 
         /// <summary>
@@ -1289,6 +1316,16 @@ namespace TABCoopMod.Determinism
                 LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate);
                 LockstepClock.AllowPhysicsThisFrame = false;
                 return false;
+            }
+
+            if (Testing.DeterministicReplayVerifier.IsRunning
+                && __instance.Paused
+                && !DXVision.GUI.DXModalScreen.IsInModal
+                && !Core.GameBridge.IsLevelEnded())
+            {
+                // EnterGameView queues an InvokeOnStartFrame action that sets DXGame.Paused=true
+                // on the frame after OnLevelLoadComplete clears it; keep replay runs unpaused.
+                __instance.Paused = false;
             }
 
             if (__instance.Paused || !Core.GameBridge.IsCurrentLevelSystemEnabled() || Core.GameBridge.IsLevelEnded())
@@ -3417,6 +3454,33 @@ namespace TABCoopMod.Determinism
             if (!LockstepClock.IsDeterministicModeActive || LockstepClock.LoadingLevel)
                 return true;
             return LockstepClock.AllowRawGameTimeSet;
+        }
+    }
+
+    /// <summary>
+    /// Allows explicit engine clock resets via DXGame.SetGameTime(double) — e.g. when starting a
+    /// New Survival or Custom Map after returning from a previous match — so GameTime/IAIterationInt
+    /// do not inherit the previous match's colony days while GameTimeIsolationPatch is active.
+    /// </summary>
+    [HarmonyPatch(typeof(DXGame), nameof(DXGame.SetGameTime), new[] { typeof(double) })]
+    public static class GameSetGameTimePatch
+    {
+        [HarmonyPrefix]
+        public static void Prefix(out bool __state)
+        {
+            __state = LockstepClock.AllowRawGameTimeSet;
+            LockstepClock.AllowRawGameTimeSet = true;
+        }
+
+        [HarmonyPostfix]
+        public static void Postfix(double gameTime, bool __state)
+        {
+            LockstepClock.AllowRawGameTimeSet = __state;
+            if (LockstepClock.IsDeterministicModeActive)
+            {
+                DXGame.LastGameTimeIAUpdate = gameTime;
+                DXPhysicWorld.LastGameTimeUpdatePhysics = gameTime;
+            }
         }
     }
 

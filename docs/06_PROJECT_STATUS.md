@@ -1,7 +1,7 @@
 # 06 — 当前项目状态、门禁验收报告与下一步计划 (Project Status)
 
-> **最后更新**: 2026-11-16（新增 `PacketType.LevelEnded` 战局胜负/战败同步与 `游戏结束` 退出 `AppHangB1` 防护修复；已移除文档 11 纯视觉起步假位移并修复退回主菜单越界异常）
-> **构建基线**: `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=63, failed-tolerant=0`**。
+> **最后更新**: 2026-11-16（**发布 `v0.1.2`**：修复 Steam P2P 实测 4 项问题——市长候选池确定性、战败退回大厅沙漏光标复原、Steam 邀请/回调重复进房去重、战败重开新局天数继承归零；详见 [`docs/12_STEAM_P2P_BUGS_AND_FIXES_20261116.md`](12_STEAM_P2P_BUGS_AND_FIXES_20261116.md)）
+> **构建基线**: `v0.1.2` (`0.1.2.0`) `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=64, failed-tolerant=0`**。
 > **历史过程记录**: 早期排查过程与会话 1~6 演进流水已归档至 [`docs/archive/`](archive/SESSION_CHANGELOG_S1_TO_S6.md)。
 
 ---
@@ -28,6 +28,7 @@
 | **文档 11 控制权差分对齐与视觉平滑优化** | `1_Backup` 120 tick 回放 + `900survival`（`latency=0` & `ChaosTransport` 回归） | ① `CoopSessionManager` 实装 `_unitOwnership` 租约（300t TTL / 90t 闲置宽限）、客机自控保护（`<3.5` 格免拉回）与随 `StateChecksumReport` 捎带的同 tick 轻量反向对齐；② 改由 `SetCamera` + `UpdateVisibleCells` 批量投影全场景（含 `CShadow` 与 Z 深度）、修正 `StartFrame` 累加/扣减固定 `83.33ms` 时序及渲染期视觉 `GameTimeInt` 余数（已回退视觉起步假位移并修复退出主菜单渲染插值 `ArgumentOutOfRangeException`） | ✅ 已实现 |
 | **战败/胜利同步与结束界面退出修复** | `1_Backup.zxsav` + `900survival.zxsav` 双开实测（TriggerGameEnd + ConfirmExit） | 新增 `PacketType.LevelEnded (0x23)` 与 `LevelEndSyncPatch`（主机权威广播、抑制客机伪触发并关闭 `HostPauseKeepalive` / `Tick gate waiting` 误报），并在 `LockstepClock.UpdateGameLogic_Prefix` 增加 `Paused`/`!CurrentGameSystem.Enabled`/`IsLevelEnded` 停步保护及 `ReturnToMainMenuPatch` 清理结束画面渐变过渡特效；`900survival` 实测主机触发战败后双端同步弹出结束界面（`endStatus=2, inModal=true, countdownActive=false`），点击 `游戏结束` 退出按钮后双端均顺利退回主菜单重开大厅（`onMainMenu=true, lobbyWindowOpen=true, HostAlive=True, ClientAlive=True, 0 ERROR`） | ✅ 通过 |
 | **市长选择对端自动关窗修复** | `900survival.zxsav` 双开双向实测（Round 1 主机先选 / Round 2 客机先选） | 修复本地弹窗暂停（`DXGame.Paused = true`）阻塞 `FlushDueTurnCommands` 及客机等待未来 `TargetSimTick` 未提前关闭弹窗的问题：在 `OnFrameTick` 对本地引擎暂停同样冲刷已就绪回合指令，并在客机收到含 `MayorVoteOrSelect` 的 `TurnInputBroadcast` 时立即调用 `CloseActiveMayorWindow()` 与 `NotifyRemoteMayorCommitted()` 抑制延迟弹窗；双开实测双方向均在 300ms 内自动关闭对端弹窗且 `Paused=false`（`HostMayor=1/2, ClientMayor=1/2`），后续 Tick `4725..4920` 4/4 `StateChecksum MATCH`、`0 ERROR` | ✅ 通过 |
+| **Steam P2P 实测 4 项问题修复** | `1_Backup.zxsav` + `900survival.zxsav` 双开实测 + `run_replay_verify.ps1` + `verify_lobby_flow.ps1` | ① `MayorModalTrackerPatch` 在弹窗抽样前按 `(SyncedRandomSeed, mayorLevel)` 重设 `DXLevel.Current.Random` 并在 Postfix 重锚（错帧双开截图同出 `阿什利·达尔` + `米娅·斯特兰德`）；② `ReturnToMainMenuPatch` / `MainMenuOnLoadCompletePatch` / `CoopLobbyWindow` 兜底 `ClearWaitCursor()`；③ 消费 `_pendingInviteLobbyId`、`SteamP2PTransport.Dispose()` 释放 5 个 `Callback<T>`、Host 按 `CSteamID` 幂等去重；④ 新增 `GameSetGameTimePatch` 放行 `DXGame.SetGameTime` 并在退回主菜单归零时钟（战败退出 `cursorLocked=False`，重开生存新局 `GameTime=0.0ms` / `天 000`，Tick `1` 与 `120` `StateChecksum MATCH`，`1_Backup` 回放 `120 ticks identical`，`verify_lobby_flow` 9/9 通过） | ✅ 通过 |
 
 ---
 

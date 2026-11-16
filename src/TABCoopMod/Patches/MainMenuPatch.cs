@@ -132,7 +132,12 @@ namespace TABCoopMod.Patches
                 {
                     SteamP2PTransport.RegisterGlobalInviteListener(CoopLobbyWindow.HandleSteamInviteAccepted);
                 }
+                if (GameBridge.CurrentLevelState == null && DXGame.Current != null)
+                {
+                    DXGame.Current.SetGameTime(0.0);
+                }
                 CoopLobbyWindow.OnMainMenuLoadComplete();
+                GameBridge.ClearWaitCursor();
             }
             catch (Exception ex)
             {
@@ -160,6 +165,9 @@ namespace TABCoopMod.Patches
             {
                 ModLogger.Info($"[ReturnToMainMenuPatch] Prefix start (IsHost={CoopSessionManager.Transport?.IsHost}, EndStatus={GameBridge.GetLevelEndStatus()}, InModal={DXVision.GUI.DXModalScreen.IsInModal}).");
                 GameBridge.ClearScreenTransitionEffect();
+                if (!GameBridge.IsGameLoading())
+                    GameBridge.ClearLoadingFadeOverlay();
+                GameBridge.ClearWaitCursor();
                 CoopLobbyWindow.ForceHideWithoutStopping();
                 CoopSessionManager.OnReturningToMainMenu();
                 ModLogger.Info("[ReturnToMainMenuPatch] Prefix complete.");

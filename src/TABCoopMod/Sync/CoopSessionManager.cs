@@ -672,6 +672,8 @@ namespace TABCoopMod.Sync
             _incomingChunks.Clear();
             _expectedChunks = 0;
             _networkGate = new TurnInputTickGate();
+            DXGame.LastGameTimeIAUpdate = 0.0;
+            DXPhysicWorld.LastGameTimeUpdatePhysics = 0.0;
 
             if (Transport != null)
             {
@@ -741,6 +743,8 @@ namespace TABCoopMod.Sync
             _incomingChunks.Clear();
             _expectedChunks = 0;
             _networkGate = new TurnInputTickGate();
+            DXGame.LastGameTimeIAUpdate = 0.0;
+            DXPhysicWorld.LastGameTimeUpdatePhysics = 0.0;
             LockstepClock.TickGate = null;
 
             ShouldOpenLobbyOnMainMenu = true;
@@ -823,7 +827,9 @@ namespace TABCoopMod.Sync
                 {
                     if (peer != null)
                     {
-                        _lobbyRoster.RemoveAll(p => p.PlayerId == peer.PlayerId);
+                        _lobbyRoster.RemoveAll(p =>
+                            p.PlayerId == peer.PlayerId
+                            || (peer.SteamId64 != 0 && p.SteamId64 == peer.SteamId64 && p.PlayerId != 1));
                         _lobbyRoster.Add(new PeerInfo
                         {
                             PlayerId = peer.PlayerId,

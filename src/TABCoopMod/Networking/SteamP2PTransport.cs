@@ -95,7 +95,9 @@ namespace TABCoopMod.Networking
         }
 
         private CSteamID _currentLobbyId = CSteamID.Nil;
+        private CSteamID _expectedLobbyId = CSteamID.Nil;
         private CSteamID _hostSteamId = CSteamID.Nil;
+        private volatile bool _disposed;
         private readonly List<PeerInfo> _peers = new List<PeerInfo>();
         private readonly Dictionary<byte, CSteamID> _playerToSteamId = new Dictionary<byte, CSteamID>();
         private byte _nextPlayerId = 2;
@@ -175,7 +177,7 @@ namespace TABCoopMod.Networking
 
         public void EnsureCallbacksRegistered()
         {
-            if (_cbLobbyCreated != null) return;
+            if (_disposed || _cbLobbyCreated != null) return;
 
             _cbLobbyCreated = Callback<LobbyCreated_t>.Create(OnLobbyCreated);
             _cbLobbyEnter = Callback<LobbyEnter_t>.Create(OnLobbyEntered);
@@ -184,12 +186,28 @@ namespace TABCoopMod.Networking
             _cbP2PConnectFail = Callback<P2PSessionConnectFail_t>.Create(OnP2PConnectFail);
         }
 
+        private void DisposeCallbacks()
+        {
+            try { _cbLobbyCreated?.Dispose(); } catch { }
+            try { _cbLobbyEnter?.Dispose(); } catch { }
+            try { _cbLobbyChatUpdate?.Dispose(); } catch { }
+            try { _cbP2PSessionRequest?.Dispose(); } catch { }
+            try { _cbP2PConnectFail?.Dispose(); } catch { }
+            _cbLobbyCreated = null;
+            _cbLobbyEnter = null;
+            _cbLobbyChatUpdate = null;
+            _cbP2PSessionRequest = null;
+            _cbP2PConnectFail = null;
+        }
+
         public void StartHost(int maxPlayers = 3)
         {
+            if (_disposed) return;
             EnsureCallbacksRegistered();
             IsHost = true;
             LocalPlayerId = 1;
             _nextPlayerId = 2;
+            _expectedLobbyId = CSteamID.Nil;
             _peers.Clear();
             _playerToSteamId.Clear();
 
@@ -209,9 +227,11 @@ namespace TABCoopMod.Networking
 
         public void ConnectToHost(string targetAddressOrSteamId)
         {
+            if (_disposed) return;
             EnsureCallbacksRegistered();
             IsHost = false;
             LocalPlayerId = 0;
+            _expectedLobbyId = CSteamID.Nil;
             _peers.Clear();
             _playerToSteamId.Clear();
             InitializeDirectFastPath(false);
@@ -222,6 +242,7 @@ namespace TABCoopMod.Networking
                 var targetId = new CSteamID(steamOrLobbyId);
                 if (targetId.IsLobby())
                 {
+                    _expectedLobbyId = targetId;
                     ModLogger.Info($"[SteamP2PTransport] Joining Steam Lobby {steamOrLobbyId}...");
                     SteamMatchmaking.JoinLobby(targetId);
                     IsActive = true;
@@ -246,6 +267,7 @@ namespace TABCoopMod.Networking
 
         private void OnLobbyCreated(LobbyCreated_t param)
         {
+            if (_disposed || !IsActive || !IsHost) return;
             if (param.m_eResult != EResult.k_EResultOK)
             {
                 ModLogger.Error($"[SteamP2PTransport] CreateLobby failed: {param.m_eResult}");
@@ -259,10 +281,17 @@ namespace TABCoopMod.Networking
 
         private void OnLobbyEntered(LobbyEnter_t param)
         {
-            _currentLobbyId = new CSteamID(param.m_ulSteamIDLobby);
-            if (IsHost) return;
+            if (_disposed || !IsActive) return;
+            if (IsHost)
+            {
+                _currentLobbyId = new CSteamID(param.m_ulSteamIDLobby);
+                return;
+            }
+            if (_expectedLobbyId.IsValid() && param.m_ulSteamIDLobby != _expectedLobbyId.m_SteamID) return;
 
+            _currentLobbyId = new CSteamID(param.m_ulSteamIDLobby);
             var ownerId = SteamMatchmaking.GetLobbyOwner(_currentLobbyId);
+            if (!ownerId.IsValid()) return;
             _hostSteamId = ownerId;
             _playerToSteamId[1] = ownerId;
             ModLogger.Info($"[SteamP2PTransport] Entered Lobby {_currentLobbyId.m_SteamID}, Host SteamID={ownerId.m_SteamID}. Sending Handshake...");
@@ -271,6 +300,7 @@ namespace TABCoopMod.Networking
 
         private void OnLobbyChatUpdate(LobbyChatUpdate_t param)
         {
+            if (_disposed || !IsActive) return;
             if (!_currentLobbyId.IsValid() || param.m_ulSteamIDLobby != _currentLobbyId.m_SteamID) return;
             uint change = param.m_rgfChatMemberStateChange;
             uint leftFlags = (uint)(EChatMemberStateChange.k_EChatMemberStateChangeLeft |
@@ -293,7 +323,7 @@ namespace TABCoopMod.Networking
             if (disconnectedPlayerId != 0)
             {
                 _playerToSteamId.Remove(disconnectedPlayerId);
-                _peers.RemoveAll(p => p.PlayerId == disconnectedPlayerId);
+                _peers.RemoveAll(p => p.PlayerId == disconnectedPlayerId || (leftSteamId.IsValid() && p.SteamId64 == leftSteamId.m_SteamID));
                 _cutoverPendingTs.Remove(disconnectedPlayerId);
                 _cutoverHoldQueue.Remove(disconnectedPlayerId);
                 _direct?.RemovePeer(disconnectedPlayerId);
@@ -304,6 +334,7 @@ namespace TABCoopMod.Networking
 
         private void SendHandshakeToHost()
         {
+            if (_disposed || !IsActive || !_hostSteamId.IsValid()) return;
             SendToSteamUser(_hostSteamId, SendChannel.ReliableCommand, PacketType.HandshakeRequest, w =>
             {
                 w.Write(SteamFriends.GetPersonaName() ?? "Client");
@@ -313,12 +344,14 @@ namespace TABCoopMod.Networking
 
         private void OnP2PSessionRequest(P2PSessionRequest_t param)
         {
+            if (_disposed || !IsActive) return;
             ModLogger.Info($"[SteamP2PTransport] Accepting P2P session from {param.m_steamIDRemote.m_SteamID}");
             SteamNetworking.AcceptP2PSessionWithUser(param.m_steamIDRemote);
         }
 
         private void OnP2PConnectFail(P2PSessionConnectFail_t param)
         {
+            if (_disposed || !IsActive) return;
             ModLogger.Warn($"[SteamP2PTransport] P2P session connect fail with {param.m_steamIDRemote.m_SteamID}: Error={param.m_eP2PSessionError}");
             foreach (var kv in _playerToSteamId)
             {
@@ -512,7 +545,16 @@ namespace TABCoopMod.Networking
                     ModLogger.Warn($"[SteamP2PTransport] Version mismatch! Host={ModInfo.Version}, Client({clientName})={ver}");
                 else
                     ModLogger.Info($"[SteamP2PTransport] Handshake from {clientName} (ver={ver}).");
-                byte assignedId = _nextPlayerId++;
+
+                byte existingId = ResolvePlayerIdBySteamId(remoteSteamId);
+                var existingPeer = _peers.Find(p =>
+                    (existingId != 0 && p.PlayerId == existingId)
+                    || (remoteSteamId.m_SteamID != 0 && p.SteamId64 == remoteSteamId.m_SteamID && p.PlayerId != LocalPlayerId));
+                if (existingId == 0 && existingPeer != null)
+                    existingId = existingPeer.PlayerId;
+
+                bool isDuplicate = existingId != 0 && existingId != LocalPlayerId;
+                byte assignedId = isDuplicate ? existingId : _nextPlayerId++;
                 _playerToSteamId[assignedId] = remoteSteamId;
 
                 var peer = new PeerInfo
@@ -520,10 +562,11 @@ namespace TABCoopMod.Networking
                     PlayerId = assignedId,
                     PlayerName = clientName,
                     SteamId64 = remoteSteamId.m_SteamID,
-                    IsReady = false
+                    IsReady = isDuplicate && (existingPeer?.IsReady ?? false)
                 };
-                _peers.RemoveAll(p => p.PlayerId == assignedId);
+                _peers.RemoveAll(p => p.PlayerId == assignedId || (remoteSteamId.m_SteamID != 0 && p.SteamId64 == remoteSteamId.m_SteamID && p.PlayerId != LocalPlayerId));
                 _peers.Add(peer);
+                _peers.Sort((a, b) => a.PlayerId.CompareTo(b.PlayerId));
 
                 SendToSteamUser(remoteSteamId, SendChannel.ReliableCommand, PacketType.HandshakeAccept, w =>
                 {
@@ -538,7 +581,11 @@ namespace TABCoopMod.Networking
                     }
                 });
 
-                ModLogger.Info($"[SteamP2PTransport] Accepted Steam peer {clientName} ({remoteSteamId.m_SteamID}) -> PlayerId={assignedId}");
+                if (isDuplicate)
+                    ModLogger.Info($"[SteamP2PTransport] Deduplicated repeat Handshake from {clientName} ({remoteSteamId.m_SteamID}) -> keeping PlayerId={assignedId}");
+                else
+                    ModLogger.Info($"[SteamP2PTransport] Accepted Steam peer {clientName} ({remoteSteamId.m_SteamID}) -> PlayerId={assignedId}");
+
                 _direct?.SetLocalPlayerId(LocalPlayerId);
                 SendDirectCandidatesToPeer(assignedId);
                 OnPeerConnected?.Invoke(peer);
@@ -550,6 +597,7 @@ namespace TABCoopMod.Networking
                 LocalPlayerId = reader.ReadByte();
                 byte count = reader.ReadByte();
                 _peers.Clear();
+                _playerToSteamId.Clear();
                 for (int i = 0; i < count; i++)
                 {
                     var p = new PeerInfo
@@ -559,6 +607,7 @@ namespace TABCoopMod.Networking
                         SteamId64 = reader.ReadUInt64(),
                         IsReady = reader.ReadBoolean()
                     };
+                    _peers.RemoveAll(existing => existing.PlayerId == p.PlayerId || (p.SteamId64 != 0 && existing.SteamId64 == p.SteamId64 && existing.PlayerId != 1));
                     _peers.Add(p);
                     if (p.SteamId64 != 0)
                         _playerToSteamId[p.PlayerId] = new CSteamID(p.SteamId64);
@@ -864,13 +913,16 @@ namespace TABCoopMod.Networking
 
         public void Dispose()
         {
+            _disposed = true;
             IsActive = false;
+            DisposeCallbacks();
             DisposeDirectOnly();
             if (_currentLobbyId.IsValid())
             {
                 try { SteamMatchmaking.LeaveLobby(_currentLobbyId); } catch { }
                 _currentLobbyId = CSteamID.Nil;
             }
+            _expectedLobbyId = CSteamID.Nil;
             _peers.Clear();
             _playerToSteamId.Clear();
         }

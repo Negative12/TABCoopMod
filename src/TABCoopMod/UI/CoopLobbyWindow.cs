@@ -223,6 +223,7 @@ namespace TABCoopMod.UI
                 TriggerLocalProbeIfDue(force: true);
 
                 GameBridge.ShowZXWindow(win, null, animType: 0);
+                GameBridge.ClearWaitCursor();
                 ModLogger.Info($"[CoopLobbyWindow] Opened RTS Waiting Room (Active={CoopSessionManager.IsSessionActive}, Phase={CoopSessionManager.RoomPhase}).");
             }
             catch (Exception ex)
@@ -266,6 +267,10 @@ namespace TABCoopMod.UI
             {
                 if (_window != null && !_isClosing)
                 {
+                    if (!GameBridge.IsGameLoading() && DXGame.Current != null && DXGame.Current.CursorLocked)
+                    {
+                        GameBridge.ClearWaitCursor();
+                    }
                     if (!CoopSessionManager.IsSessionActive)
                     {
                         TriggerLocalProbeIfDue(force: false);
@@ -335,6 +340,9 @@ namespace TABCoopMod.UI
             if (string.IsNullOrEmpty(lobbyId)) return;
             try
             {
+                // Consume the pending invite ID immediately so CoopSessionManager.TryHandlePendingSteamInvite()
+                // does not join the exact same lobby a second time on the next frame.
+                SteamP2PTransport.ConsumePendingInviteLobbyId();
                 ModLogger.Info($"[CoopLobbyWindow] Handling Steam Invite for Lobby {lobbyId}...");
                 if (GameBridge.CurrentLevelState != null)
                 {
