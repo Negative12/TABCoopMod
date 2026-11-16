@@ -1024,6 +1024,14 @@ namespace TABCoopMod.UI
 
         private static void UpdateRoomBanner(bool isHost, int peerCount)
         {
+            if (CoopSessionManager.HasVersionMismatch)
+            {
+                SetDynamicText(_roomStatusBanner,
+                    $"{CoopSessionManager.VersionMismatchSummary}\n请双方更新至完全一致的 Mod 版本后再开始游戏",
+                    textColor: Color.OrangeRed, borderColor: Color.OrangeRed);
+                return;
+            }
+
             if (isHost)
             {
                 if (!CoopSessionManager.HasJoinedClient)

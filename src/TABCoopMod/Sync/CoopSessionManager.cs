@@ -101,14 +101,22 @@ namespace TABCoopMod.Sync
         public const float ReverseAlignMinThreshold = 0.25f;      // Keep Host/Client owned squad within ~0.2-0.3 cells
         public const int MaxReverseAlignUnitsPerReport = 64;
 
+        public static bool HasVersionMismatch { get; private set; }
+        public static string VersionMismatchSummary { get; private set; } = string.Empty;
+        private static readonly HashSet<string> _versionMismatchAlertedKeys = new HashSet<string>();
+        private static string _pendingVersionMismatchAlert;
+
         // Tiered reload policy (async_align). Positions / HP / aggro / projectiles are corrected or
         // re-derived continuously without pausing; only irreversible divergence forces a full reload.
         private const int EconReloadStreak = 3;              // ~6s persistent resource/production/time mismatch
-        private const int StructuralReloadStreak = 15;       // ~30s entity-count delta beyond tolerance
+        private const int StructuralReloadStreak = 6;        // ~12s entity-count delta beyond tolerance
+        private const int MissingOnClientReloadStreak = 4;   // ~8s sustained unspawned/missing Host entities on Client
         private const int WidePosReloadStreak = 10;          // ~15-20s wide residual drift after corrections
+        private const double StructuralResyncCooldownMs = 30000.0;
         private const double LongPeriodRealignMs = 300000.0; // 5 min continuous residual divergence
         private static int _consecutiveEconMismatch;
         private static int _consecutiveStructuralMismatch;
+        private static int _consecutiveMissingOnClient;
         private static int _consecutiveSubCoarsePosDrift;
         private static double _divergedSinceTicks = -1.0;
 
@@ -116,6 +124,7 @@ namespace TABCoopMod.Sync
         {
             _consecutiveEconMismatch = 0;
             _consecutiveStructuralMismatch = 0;
+            _consecutiveMissingOnClient = 0;
             _consecutiveSubCoarsePosDrift = 0;
             _divergedSinceTicks = -1.0;
         }
@@ -632,6 +641,10 @@ namespace TABCoopMod.Sync
             RoomPhase = LobbyRoomPhase.Idle;
             BalancePreset = CoopBalancePreset.Balanced;
             HostActionHint = string.Empty;
+            HasVersionMismatch = false;
+            VersionMismatchSummary = string.Empty;
+            _versionMismatchAlertedKeys.Clear();
+            _pendingVersionMismatchAlert = null;
             ShouldOpenLobbyOnMainMenu = false;
             _pendingClientReturnToMainMenu = false;
             _suppressReturnNotice = false;
@@ -900,6 +913,30 @@ namespace TABCoopMod.Sync
             };
 
             Transport.OnPacketReceived += OnPacketReceived;
+            Transport.OnVersionMismatch += OnTransportVersionMismatch;
+        }
+
+        private static void OnTransportVersionMismatch(string peerName, string localVer, string remoteVer)
+        {
+            string peerLabel = string.IsNullOrEmpty(peerName)
+                ? (Transport != null && Transport.IsHost ? "客机" : "房主")
+                : peerName;
+            HasVersionMismatch = true;
+            VersionMismatchSummary = $"⚠ 版本不一致：本机 v{localVer} ≠ {peerLabel} (v{remoteVer})";
+
+            string key = $"{peerLabel}|{localVer}|{remoteVer}";
+            if (_versionMismatchAlertedKeys.Add(key))
+            {
+                ModLogger.Warn($"[CoopSessionManager] {VersionMismatchSummary}");
+                _pendingVersionMismatchAlert =
+                    $"检测到联机 Mod 版本不一致！\n\n" +
+                    $"本机版本：v{localVer}\n" +
+                    $"对端 ({peerLabel}) 版本：v{remoteVer}\n\n" +
+                    $"版本不一致会导致市长候选不同、重开天数异常、物理/尸潮不同步等问题。\n" +
+                    $"请所有联机玩家安装完全相同的 TABCoopMod 版本后再开始游戏！";
+                GameBridge.ShowTopBanner($"Version Mismatch: v{localVer} != v{remoteVer}", Color.OrangeRed, 5000);
+            }
+            LobbyStateChanged?.Invoke();
         }
 
         /// <summary>
@@ -1551,6 +1588,23 @@ namespace TABCoopMod.Sync
             }
 
             CoopLobbyWindow.Tick();
+
+            if (!string.IsNullOrEmpty(_pendingVersionMismatchAlert)
+                && !TestHarnessConfig.Enabled
+                && !TestHarnessConfig.ControlEnabled
+                && !GameBridge.IsGameLoading())
+            {
+                string alertMsg = _pendingVersionMismatchAlert;
+                _pendingVersionMismatchAlert = null;
+                try
+                {
+                    GameBridge.ShowAlertMessageBox("TABCoopMod 版本不一致警告", alertMsg);
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[CoopSessionManager] Failed to show version mismatch alert modal: {ex.Message}");
+                }
+            }
 
             if (!IsSessionActive || Transport == null) return;
 
@@ -2353,23 +2407,34 @@ namespace TABCoopMod.Sync
                     else
                         _consecutivePosExceeded = 0;
 
+                    if (missingOnClient >= 10)
+                        _consecutiveMissingOnClient++;
+                    else
+                        _consecutiveMissingOnClient = 0;
+
                     ModLogger.Info(
                         $"[PosDriftStats] Client({senderId}) Tick={pTick} Applied={wasApplied}({appliedCount}/{comparedCount}) " +
                         $"Drifted(>0.001={drifted001}, >0.01={drifted01}, >0.1={drifted1}, >0.5={drifted5}) " +
                         $"MaxDelta={maxDelta:F4} RmsDelta={rmsDelta:F4} Type={maxType} Exceeded={exceededThreshold} Streak={_consecutivePosExceeded} " +
-                        $"LifeDiff={lifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={missingOnHost} MissingOnClient={missingOnClient}");
+                        $"LifeDiff={lifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={missingOnHost} MissingOnClient={missingOnClient} MissingStreak={_consecutiveMissingOnClient}");
 
+                    bool triggerMissingResync = !IsStrictMode && _consecutiveMissingOnClient >= MissingOnClientReloadStreak;
                     bool triggerPosResync = IsStrictMode
                         ? (widePosDrift || _consecutivePosExceeded >= 3)
                         : (_consecutivePosExceeded >= WidePosReloadStreak);
-                    if (triggerPosResync && EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport)
+                    if ((triggerPosResync || triggerMissingResync) && EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport)
                     {
                         double now = DXHelper_Environment.Ticks;
-                        if (now - _lastAutoResyncTicks >= AutoResyncCooldownMs)
+                        double requiredCooldown = triggerMissingResync ? StructuralResyncCooldownMs : AutoResyncCooldownMs;
+                        if (now - _lastAutoResyncTicks >= requiredCooldown)
                         {
                             _lastAutoResyncTicks = now;
                             _consecutivePosExceeded = 0;
-                            ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after PosDrift at Tick {pTick} (MaxDelta={maxDelta:F4}, RmsDelta={rmsDelta:F4}, Drifted5={drifted5}).");
+                            _consecutiveMissingOnClient = 0;
+                            if (triggerMissingResync)
+                                ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after MissingOnClient at Tick {pTick} (MissingOnClient={missingOnClient}, MissingOnHost={missingOnHost}).");
+                            else
+                                ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after PosDrift at Tick {pTick} (MaxDelta={maxDelta:F4}, RmsDelta={rmsDelta:F4}, Drifted5={drifted5}).");
                             RequestSnapshotBroadcast();
                         }
                     }
@@ -2672,7 +2737,7 @@ namespace TABCoopMod.Sync
                 bool posDiff = host.PosChecksum != client.PosChecksum;
                 bool coarsePosDiff = host.CoarsePosChecksum != client.CoarsePosChecksum;
 
-                int entityTol = Math.Max(15, host.EntityCount / 100);
+                int entityTol = Math.Min(30, Math.Max(12, host.EntityCount / 1000));
                 int aggroTol = Math.Max(15, host.AggroZombieCount / 10);
                 int absEntityDelta = Math.Abs(host.EntityCount - client.EntityCount);
                 int absAggroDelta = Math.Abs(host.AggroZombieCount - client.AggroZombieCount);
@@ -2718,7 +2783,10 @@ namespace TABCoopMod.Sync
                 }
                 bool earlyEconBypass = !IsStrictMode && !_econEarlyBypassUsed
                     && _verifiedChecksumCycles <= 3 && _consecutiveEconMismatch >= EconReloadStreak;
-                bool cooldownElapsed = (now - _lastAutoResyncTicks >= AutoResyncCooldownMs) || earlyEconBypass;
+                bool structuralCooldownElapsed = !IsStrictMode
+                    && _consecutiveStructuralMismatch >= StructuralReloadStreak
+                    && (now - _lastAutoResyncTicks >= StructuralResyncCooldownMs);
+                bool cooldownElapsed = (now - _lastAutoResyncTicks >= AutoResyncCooldownMs) || earlyEconBypass || structuralCooldownElapsed;
                 bool canReloadNow = EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport
                     && cooldownElapsed;
 
@@ -3124,7 +3192,7 @@ namespace TABCoopMod.Sync
             }
 
             ushort sentMask = effectiveMask;
-            byte flags = (byte)((applyLifeCorrection ? 1 : 0) | (applyPosCorrection ? 2 : 0));
+            byte flags = (byte)((applyLifeCorrection ? 1 : 0) | (applyPosCorrection ? 2 : 0) | (includeStatic ? 4 : 0));
             int seq = ++_posSyncSeq;
             Task.Run(() =>
             {
@@ -3338,16 +3406,25 @@ namespace TABCoopMod.Sync
                             deltas.Add(new EntityDeltaFix { Id = hs.Id, Dx = dx, Dy = dy });
                     }
 
-                    // Entities alive on the client but absent on the Host at the same epoch tick, whose
-                    // ID the Host has already allocated past, were killed on the Host: kill them here.
+                    // Dynamic entities alive on the client but absent on the Host at the same epoch tick, whose
+                    // ID the Host has already allocated past, are candidates for host-killed stragglers.
+                    // Never kill a large batch when MissingOnClient is also non-trivial: that signals a
+                    // DXGuid ID-shift or unspawned wave where mass-killing would wipe out Client's own horde.
+                    var missingOnHostDynamicIds = effectiveApplyLife ? new List<ulong>(16) : null;
                     for (int i = 0; i < clientSnapshot.Length; i++)
                     {
                         var cs = clientSnapshot[i];
+                        if (!cs.IsDynamic) continue;
                         if ((hostMask & (1 << (int)(cs.Id & 0xFUL))) == 0) continue;
                         if (hostIds.Contains(cs.Id) || cs.Id > hostMaxId) continue;
                         missingOnHost++;
-                        if (effectiveApplyLife)
-                            lifeFixes.Add(new EntityLifeFix { Id = cs.Id, Delta = 0, Kill = true });
+                        missingOnHostDynamicIds?.Add(cs.Id);
+                    }
+                    if (effectiveApplyLife && missingOnHostDynamicIds != null
+                        && missingOnHost > 0 && missingOnHost <= 8 && missingOnClient <= 4)
+                    {
+                        for (int i = 0; i < missingOnHostDynamicIds.Count; i++)
+                            lifeFixes.Add(new EntityLifeFix { Id = missingOnHostDynamicIds[i], Delta = 0, Kill = true });
                     }
 
                     float rmsDelta = drifted001 > 0 ? (float)Math.Sqrt(sumSq / drifted001) : 0f;

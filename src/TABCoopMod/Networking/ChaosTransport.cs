@@ -123,6 +123,7 @@ namespace TABCoopMod.Networking
             _inner.OnPacketReceived += OnInnerPacketReceived;
             _inner.OnPeerConnected += p => OnPeerConnected?.Invoke(p);
             _inner.OnPeerDisconnected += id => OnPeerDisconnected?.Invoke(id);
+            _inner.OnVersionMismatch += (peer, localVer, remoteVer) => OnVersionMismatch?.Invoke(peer, localVer, remoteVer);
 
             if (IsChaosActive)
                 ModLogger.Info($"[ChaosTransport] enabled: latency={_cfg.LatencyMs}ms jitter={_cfg.JitterMs}ms loss={_cfg.LossRate:P1} windows={_cfg.DisconnectWindows.Count} seed={_cfg.Seed}");
@@ -191,6 +192,7 @@ namespace TABCoopMod.Networking
         public event Action<byte, PacketType, BinaryReader> OnPacketReceived;
         public event Action<PeerInfo> OnPeerConnected;
         public event Action<byte> OnPeerDisconnected;
+        public event Action<string, string, string> OnVersionMismatch;
 
         public void StartHost(int maxPlayers = 3) => _inner.StartHost(maxPlayers);
         public void ConnectToHost(string targetAddressOrSteamId) => _inner.ConnectToHost(targetAddressOrSteamId);

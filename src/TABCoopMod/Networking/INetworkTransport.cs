@@ -82,6 +82,7 @@ namespace TABCoopMod.Networking
         event Action<byte, PacketType, BinaryReader> OnPacketReceived;
         event Action<PeerInfo> OnPeerConnected;
         event Action<byte> OnPeerDisconnected;
+        event Action<string, string, string> OnVersionMismatch;
 
         void StartHost(int maxPlayers = 3);
         void ConnectToHost(string targetAddressOrSteamId);
@@ -126,6 +127,7 @@ namespace TABCoopMod.Networking
         public event Action<byte, PacketType, BinaryReader> OnPacketReceived;
         public event Action<PeerInfo> OnPeerConnected;
         public event Action<byte> OnPeerDisconnected;
+        public event Action<string, string, string> OnVersionMismatch;
 
         public void StartHost(int maxPlayers = 3)
         {
@@ -494,7 +496,8 @@ namespace TABCoopMod.Networking
             {
                 string clientName = reader.ReadString();
                 string version = reader.ReadString();
-                if (!string.Equals(version, ModInfo.Version, StringComparison.Ordinal))
+                bool versionMatched = string.Equals(version, ModInfo.Version, StringComparison.Ordinal);
+                if (!versionMatched)
                     ModLogger.Warn($"[LocalTcpLoopbackTransport] Version mismatch! Host={ModInfo.Version}, Client({clientName})={version}");
                 else
                     ModLogger.Info($"[LocalTcpLoopbackTransport] Handshake from {clientName} (ver={version}).");
@@ -512,9 +515,12 @@ namespace TABCoopMod.Networking
                         w.Write(p.PlayerName);
                         w.Write(p.IsReady);
                     }
+                    w.Write(ModInfo.Version);
                 });
 
                 OnPeerConnected?.Invoke(peer);
+                if (!versionMatched)
+                    OnVersionMismatch?.Invoke(clientName, ModInfo.Version, version);
                 return;
             }
 
@@ -532,8 +538,17 @@ namespace TABCoopMod.Networking
                         IsReady = reader.ReadBoolean()
                     });
                 }
-                ModLogger.Info($"[LocalTcpLoopbackTransport] HandshakeAccepted! LocalPlayerId={LocalPlayerId}, Peers={_peers.Count}");
+                string hostVersion = reader.BaseStream.Position < reader.BaseStream.Length
+                    ? reader.ReadString()
+                    : "<=0.1.2";
+                ModLogger.Info($"[LocalTcpLoopbackTransport] HandshakeAccepted! LocalPlayerId={LocalPlayerId}, Peers={_peers.Count}, HostVer={hostVersion}");
                 OnPeerConnected?.Invoke(_peers.Find(p => p.PlayerId == LocalPlayerId));
+                if (!string.Equals(hostVersion, ModInfo.Version, StringComparison.Ordinal))
+                {
+                    string hostName = _peers.Find(p => p.PlayerId == 1)?.PlayerName ?? "Host";
+                    ModLogger.Warn($"[LocalTcpLoopbackTransport] Version mismatch! Client={ModInfo.Version}, Host({hostName})={hostVersion}");
+                    OnVersionMismatch?.Invoke(hostName, ModInfo.Version, hostVersion);
+                }
                 return;
             }
 

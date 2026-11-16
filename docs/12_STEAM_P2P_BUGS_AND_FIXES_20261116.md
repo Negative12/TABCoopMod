@@ -116,3 +116,27 @@
 | **Bug 2 & Bug 4（战败退出光标与重开新局天数）** | `900survival.zxsav`（`tick=4755, gameTimeMs=142766`）双开触发战败 → `confirm_modal` 退回大厅 → `toggle_ready` → 新建生存地图 | 退回大厅后双端 `cursorLocked=False, tick=0, gameTimeMs=0`；重开新局双端均为 `Simulation clocks aligned at GameTime=0.0ms`，进入时 `tick=64, gameTimeMs=2166, entities=20890`，实机截图右上/左下显示 `天 000 小时 00`，Tick `1` 与 Tick `120` `StateChecksum MATCH`，`0 ERROR` | ✅ 通过 |
 | **RTS 大厅全流程回归** | `scripts/verify_lobby_flow.ps1` | `[9/9] ALL ASSERTIONS PASSED!`，`0 ERROR` | ✅ 通过 |
 | **Bug 3（Steam 邀请/花名册防重）** | `SteamP2PTransport` 回调释放 + `ConsumePendingInviteLobbyId()` + Host 按 `CSteamID` 幂等去重 + `_lobbyRoster` 双重去重 | 代码审查与 Release 编译/注入通过（Steam 双账号实机邀约待下次双机联网测试） | ✅ 已实现（待双机实测） |
+
+---
+
+## 补充排查（`logs/*_3.log` 实测复盘与 `v0.1.3` 修复）
+
+### 5. 为何会出现"市长仍不一致 / 重开天数保留"且未弹窗警告
+- **实测日志确认**：[`logs/TABCoopMod_host_3.log`](../logs/TABCoopMod_host_3.log) 为 **`v0.1.1`**（`Build=2026-11-16 19:45:50`，尚未合入 `v0.1.2` 的 `MayorModalTrackerPatch` 重锚、`GameSetGameTimePatch`、物理量化 `QuantizePhysicsBodiesPostStep`），而 [`logs/TABCoopMod_client_3.log`](../logs/TABCoopMod_client_3.log) 为 **`v0.1.2`**。
+- **未弹窗原因**：此前 `SteamP2PTransport` 仅在 Host 收到 `HandshakeRequest` 时记录一行 `[WARN] Version mismatch!`，既未把 Host 版本传给 Client（`HandshakeAccept` 无版本字段，Client 也未检查 Lobby 元数据 `tab_coop_ver`），也未向双方 UI 发送警告。
+- **`v0.1.3` 修复**：
+  1. `INetworkTransport` 新增 `OnVersionMismatch` 事件；`SteamP2PTransport` 在 `OnLobbyEntered` 读取 `tab_coop_ver`、在 `HandshakeAccept` 末尾写入 `ModInfo.Version`（向后兼容旧版 `<=0.1.1`），`LocalTcpLoopbackTransport` 与 `ChaosTransport` 同步支持。
+  2. `CoopSessionManager` 维护 `HasVersionMismatch` / `VersionMismatchSummary`，首次检测到不一致时在主线程弹出 `ZXMessageBoxHelper.ShowAlert` 模态警告与顶部提示条，并在 [`CoopLobbyWindow`](../src/TABCoopMod/UI/CoopLobbyWindow.cs) 房间状态栏以醒目红色展示双方版本差异。
+
+### 6. 客机"隐形尸潮"（看不到兵与小地图红点，直到建筑受击才强制对齐）
+- **根因链路**（见 `client_3.log` Tick `31020` / `31560` 与 `host_3.log` Tick `31260`~`33180`）：
+  1. 当双端（如混用 `v0.1.1` 与 `v0.1.2` 或 `async_align` 战斗微差）出现 `DXGuid.New()` 计数器错位时，同一批新生成的尸潮在两端拥有相同的数量（`Entity=False(d=0)`），但实体 `ID` 整体偏移。
+  2. `CoopSessionManager.OnPosDriftSyncChunkReceived` 对 `!hostIds.Contains(cs.Id) && cs.Id <= hostMaxId` 一律判定为"Host 已击杀"并下发 `Kill = true`，导致客机刚生成的小波/尸潮僵尸在 Tick `31020`（`Kills=31`）与 Tick `31560`（`Kills=41`）被当场全数处死，关联的 `ZXMiniMapIndicatorInfectedSwarn` 红点亦随单位归零而消失。
+  3. 同时，`VerifyTickChecksum` 的 `entityTol = Math.Max(15, EntityCount / 100)` 在 17,000 实体地图上高达 **`170`**，使 `d=87` 的实体缺失完全不触发 `structuralDiff`，`PosDriftStatsReport` 亦忽略了 `MissingOnClient=91..104`，直至僵尸打到建筑改变经济（`econ x3`）才触发 `Auto-resync`。
+- **`v0.1.3` 修复**：
+  1. `OnPosDriftSyncChunkReceived` 仅针对 `cs.IsDynamic` 统计 `MissingOnHost`，且仅当 `missingOnHost <= 8 && missingOnClient <= 4`（常规零星漏杀）时执行客机补杀；一旦同时出现批量 `MissingOnHost` 与 `MissingOnClient`，严禁批量杀怪以免误删客机尸潮。
+  2. `VerifyTickChecksum` 将 `entityTol` 收紧为 `Math.Min(30, Math.Max(12, host.EntityCount / 1000))`、`StructuralReloadStreak = 6`（`StructuralResyncCooldownMs = 30s`），并在 `PosDriftStatsReport` 对持续 `MissingOnClient >= 10`（4 次约 8 秒）主动触发 `Auto-resync`。
+
+### 7. 关于"第 10 天前出现多批慢速小尸潮"的原版机制确认
+- 反编译 `RandomMapGenerator`（`#=zyl_NPjjlA7DRfVtsRJCX1kN4BxSr`）确认：**原版生存模式自带两套不弹倒计时、不显示小地图红点（`AutoNotifyPlayer = false, ShowCountdown = false, ShowMiniMapIndicator = false`）的周期性偷袭小尸潮 `ZXLevelEvent`**——前期批次由 `ZombieWeakA` / `ZombieWeakB` / `ZombieWeakC`（慢速行者）组成，`MaxRepetitions = 10` 且 `AttackCommandCenter = true`。
+- 联机 `Co-op Balanced` 预设在 2 人模式下对早期事件仅做 `1.10x` 数量缩放（`EarlySwarmScale = 1.10f`），不会额外新增早期小尸潮波次。

@@ -174,6 +174,7 @@ namespace TABCoopMod.Networking
         public event Action<byte, PacketType, BinaryReader> OnPacketReceived;
         public event Action<PeerInfo> OnPeerConnected;
         public event Action<byte> OnPeerDisconnected;
+        public event Action<string, string, string> OnVersionMismatch;
 
         public void EnsureCallbacksRegistered()
         {
@@ -294,7 +295,15 @@ namespace TABCoopMod.Networking
             if (!ownerId.IsValid()) return;
             _hostSteamId = ownerId;
             _playerToSteamId[1] = ownerId;
-            ModLogger.Info($"[SteamP2PTransport] Entered Lobby {_currentLobbyId.m_SteamID}, Host SteamID={ownerId.m_SteamID}. Sending Handshake...");
+            string lobbyVer = SteamMatchmaking.GetLobbyData(_currentLobbyId, "tab_coop_ver");
+            ModLogger.Info($"[SteamP2PTransport] Entered Lobby {_currentLobbyId.m_SteamID}, Host SteamID={ownerId.m_SteamID} (lobbyVer={(string.IsNullOrEmpty(lobbyVer) ? "unknown" : lobbyVer)}). Sending Handshake...");
+            if (!string.IsNullOrEmpty(lobbyVer) && !string.Equals(lobbyVer, ModInfo.Version, StringComparison.Ordinal))
+            {
+                string hostName = SteamFriends.GetFriendPersonaName(ownerId);
+                if (string.IsNullOrEmpty(hostName)) hostName = "Host";
+                ModLogger.Warn($"[SteamP2PTransport] Version mismatch detected from lobby metadata! Local={ModInfo.Version}, Host({hostName})={lobbyVer}");
+                OnVersionMismatch?.Invoke(hostName, ModInfo.Version, lobbyVer);
+            }
             SendHandshakeToHost();
         }
 
@@ -541,7 +550,8 @@ namespace TABCoopMod.Networking
             {
                 string clientName = reader.ReadString();
                 string ver = reader.ReadString();
-                if (!string.Equals(ver, ModInfo.Version, StringComparison.Ordinal))
+                bool versionMatched = string.Equals(ver, ModInfo.Version, StringComparison.Ordinal);
+                if (!versionMatched)
                     ModLogger.Warn($"[SteamP2PTransport] Version mismatch! Host={ModInfo.Version}, Client({clientName})={ver}");
                 else
                     ModLogger.Info($"[SteamP2PTransport] Handshake from {clientName} (ver={ver}).");
@@ -579,6 +589,7 @@ namespace TABCoopMod.Networking
                         w.Write(p.SteamId64);
                         w.Write(p.IsReady);
                     }
+                    w.Write(ModInfo.Version);
                 });
 
                 if (isDuplicate)
@@ -589,6 +600,8 @@ namespace TABCoopMod.Networking
                 _direct?.SetLocalPlayerId(LocalPlayerId);
                 SendDirectCandidatesToPeer(assignedId);
                 OnPeerConnected?.Invoke(peer);
+                if (!versionMatched)
+                    OnVersionMismatch?.Invoke(clientName, ModInfo.Version, ver);
                 return;
             }
 
@@ -612,10 +625,22 @@ namespace TABCoopMod.Networking
                     if (p.SteamId64 != 0)
                         _playerToSteamId[p.PlayerId] = new CSteamID(p.SteamId64);
                 }
+                string hostVer = reader.BaseStream.Position < reader.BaseStream.Length
+                    ? reader.ReadString()
+                    : (_currentLobbyId.IsValid() ? SteamMatchmaking.GetLobbyData(_currentLobbyId, "tab_coop_ver") : string.Empty);
+                if (string.IsNullOrEmpty(hostVer))
+                    hostVer = "<=0.1.1 (未知旧版本)";
+
                 _direct?.SetLocalPlayerId(LocalPlayerId);
                 SendDirectCandidatesToPeer(1);
-                ModLogger.Info($"[SteamP2PTransport] Joined Host Lobby! Assigned LocalPlayerId={LocalPlayerId}");
+                ModLogger.Info($"[SteamP2PTransport] Joined Host Lobby! Assigned LocalPlayerId={LocalPlayerId}, HostVer={hostVer}");
                 OnPeerConnected?.Invoke(_peers.Find(p => p.PlayerId == LocalPlayerId));
+                if (!string.Equals(hostVer, ModInfo.Version, StringComparison.Ordinal))
+                {
+                    string hostName = _peers.Find(p => p.PlayerId == 1)?.PlayerName ?? "Host";
+                    ModLogger.Warn($"[SteamP2PTransport] Version mismatch! Client={ModInfo.Version}, Host({hostName})={hostVer}");
+                    OnVersionMismatch?.Invoke(hostName, ModInfo.Version, hostVer);
+                }
                 return;
             }
 
