@@ -53,11 +53,12 @@ namespace TABCoopMod.Networking
         private const byte FlagMsgEnd = 0x02;
 
         private const int ChunkPayloadBytes = 1080;
-        private const int CommandWindowChunks = 64;
-        private const int BulkWindowChunks = 192;
+        private const int CommandWindowChunks = 48;
+        private const int BulkWindowChunks = 48;
         private const double KeepaliveHeartbeatMs = 1000.0;
         private const double DiscoveryProbeIntervalMs = 120.0;
         private const double DirectTimeoutMs = 5500.0;
+        private const double DirectDataStallFallbackMs = 3000.0;
         private const int SIO_UDP_CONNRESET = -1744830452;
 
         private static readonly string[] StunHosts =
@@ -137,6 +138,7 @@ namespace TABCoopMod.Networking
             public readonly List<CandidateProbeState> Candidates = new List<CandidateProbeState>();
             public CandidateProbeState ActiveCandidate;
             public long LastAnyPacketRecvTs;
+            public long LastDataProgressTs;
             public bool VerifiedBidirectional;
             public bool TxEnabled;
             public bool CutoverSignaled;
@@ -350,8 +352,10 @@ namespace TABCoopMod.Networking
                         {
                             if (!peer.TxEnabled)
                             {
+                                long nowTs = Stopwatch.GetTimestamp();
                                 peer.TxEnabled = true;
-                                peer.LastAnyPacketRecvTs = Stopwatch.GetTimestamp();
+                                peer.LastAnyPacketRecvTs = nowTs;
+                                peer.LastDataProgressTs = nowTs;
                                 ModLogger.Info($"[DirectFastPath] Direct Fast-Path ACTIVATED for P{peerPlayerId} via {peer.ActiveCandidate.Candidate} (RTT={peer.ActiveCandidate.SmoothedRttMs:F1}ms)!");
                             }
                         }
@@ -390,6 +394,11 @@ namespace TABCoopMod.Networking
                 }
                 else
                 {
+                    if (peer.CmdTx.InFlight.Count == 0 && peer.CmdTx.PendingChunks.Count == 0
+                        && peer.BulkTx.InFlight.Count == 0 && peer.BulkTx.PendingChunks.Count == 0)
+                    {
+                        peer.LastDataProgressTs = Stopwatch.GetTimestamp();
+                    }
                     var tx = channel == SendChannel.ReliableCommand ? peer.CmdTx : peer.BulkTx;
                     uint msgId = tx.NextMsgId++;
                     int len = payload.Length;
@@ -1019,13 +1028,16 @@ namespace TABCoopMod.Networking
                     ulong bulkSack = BitConverter.ToUInt64(buf, 19);
                     uint cmdAck = BitConverter.ToUInt32(buf, 27);
                     ulong cmdSack = BitConverter.ToUInt64(buf, 31);
-                    ApplyAckToTx(peer.BulkTx, bulkAck, bulkSack);
-                    ApplyAckToTx(peer.CmdTx, cmdAck, cmdSack);
+                    bool progBulk = ApplyAckToTx(peer.BulkTx, bulkAck, bulkSack);
+                    bool progCmd = ApplyAckToTx(peer.CmdTx, cmdAck, cmdSack);
+                    if (progBulk || progCmd)
+                        peer.LastDataProgressTs = nowTs;
                     needWake = true;
                 }
                 else if (kind == KindCommand || kind == KindBulk)
                 {
-                    if (len < 42) return;
+                    // Reliable chunk header is 39 bytes + plen payload; allow 0..2 byte payloads (e.g. ClientReadyState=1B).
+                    if (len < 39) return;
                     uint streamSeq = BitConverter.ToUInt32(buf, 15);
                     byte flags = buf[19];
                     uint msgId = BitConverter.ToUInt32(buf, 20);
@@ -1036,8 +1048,11 @@ namespace TABCoopMod.Networking
                     if (39 + plen > len) return;
 
                     // Process piggybacked ACK for our outbound stream on the matching channel
-                    if (kind == KindCommand) ApplyAckToTx(peer.CmdTx, peerAckBase, peerSackMask);
-                    else ApplyAckToTx(peer.BulkTx, peerAckBase, peerSackMask);
+                    bool prog = kind == KindCommand
+                        ? ApplyAckToTx(peer.CmdTx, peerAckBase, peerSackMask)
+                        : ApplyAckToTx(peer.BulkTx, peerAckBase, peerSackMask);
+                    if (prog)
+                        peer.LastDataProgressTs = nowTs;
 
                     var rx = kind == KindCommand ? peer.CmdRx : peer.BulkRx;
                     var chunkBytes = new byte[plen];
@@ -1214,10 +1229,14 @@ namespace TABCoopMod.Networking
             }
         }
 
-        private static void ApplyAckToTx(ChannelTxState tx, uint ackBase, ulong sackMask)
+        private static bool ApplyAckToTx(ChannelTxState tx, uint ackBase, ulong sackMask)
         {
+            bool progressed = false;
             if (ackBase > tx.AckBase)
+            {
                 tx.AckBase = ackBase;
+                progressed = true;
+            }
 
             if (tx.InFlight.Count > 0)
             {
@@ -1237,10 +1256,14 @@ namespace TABCoopMod.Networking
                 }
                 for (int i = 0; i < acked.Count; i++)
                     tx.InFlight.Remove(acked[i]);
+                if (acked.Count > 0)
+                    progressed = true;
             }
 
             while (tx.UnackedMessages.Count > 0 && tx.UnackedMessages.Peek().EndSeq <= tx.AckBase)
                 tx.UnackedMessages.Dequeue();
+
+            return progressed;
         }
 
         private void PumpLoop()
@@ -1288,13 +1311,24 @@ namespace TABCoopMod.Networking
                             }
                         }
 
-                        // 2. Check liveness timeout -> seamless lossless Steam fallback
+                        // 2. Check liveness & reliable data-channel stall timeout -> seamless lossless Steam fallback
                         if (peer.TxEnabled && peer.LastAnyPacketRecvTs > 0)
                         {
+                            bool hasInFlightData = peer.CmdTx.InFlight.Count > 0 || peer.BulkTx.InFlight.Count > 0;
+                            if (!hasInFlightData)
+                                peer.LastDataProgressTs = nowTs;
+
                             double silentMs = (nowTs - peer.LastAnyPacketRecvTs) * swToMs;
-                            if (silentMs >= DirectTimeoutMs)
+                            double dataStallMs = (hasInFlightData && peer.LastDataProgressTs > 0)
+                                ? (nowTs - peer.LastDataProgressTs) * swToMs
+                                : 0.0;
+
+                            if (silentMs >= DirectTimeoutMs || dataStallMs >= DirectDataStallFallbackMs)
                             {
-                                ModLogger.Warn($"[DirectFastPath] Direct path timeout ({silentMs:F0}ms silent) for P{peer.PlayerId}; falling back cleanly to Steam P2P.");
+                                string reason = silentMs >= DirectTimeoutMs
+                                    ? $"path timeout ({silentMs:F0}ms silent)"
+                                    : $"data channel stalled ({dataStallMs:F0}ms unacked, cmdFly={peer.CmdTx.InFlight.Count}, bulkFly={peer.BulkTx.InFlight.Count})";
+                                ModLogger.Warn($"[DirectFastPath] Direct {reason} for P{peer.PlayerId}; falling back cleanly to Steam P2P.");
                                 peer.TxEnabled = false;
                                 peer.CutoverSignaled = false;
                                 peer.VerifiedBidirectional = false;

@@ -164,8 +164,13 @@ namespace TABCoopMod.Sync
         private static double _lastDelayAdjustTicks = -100000.0;
         private static readonly Dictionary<byte, double> _peerSmoothedRttMs = new Dictionary<byte, double>();
         private static readonly Dictionary<byte, double> _peerRttSampleTicks = new Dictionary<byte, double>();
+        private static readonly Dictionary<byte, int> _peerLastSimTick = new Dictionary<byte, int>();
+        private static readonly Dictionary<byte, double> _peerLastSimTickWallMs = new Dictionary<byte, double>();
         private const double RttProbeIntervalMs = 500.0;
         private const double RttStalePeerMs = 5000.0;
+        private const double ClientLagStaleMs = 3500.0;
+        private const int HostBackpressureSlowLagTicks = 16;
+        private const int HostBackpressureHoldLagTicks = 45;
         private const double DelayAdjustCooldownMs = 1500.0;
         private static int _gateLastObservedTick = -1;
         private static double _gateWaitStartTicks = -1.0;
@@ -371,6 +376,8 @@ namespace TABCoopMod.Sync
             while (_incomingPosAlignQueue.TryDequeue(out _)) { }
             while (_incomingReverseAlignQueue.TryDequeue(out _)) { }
             lock (_unitOwnershipSync) _unitOwnership.Clear();
+            _peerLastSimTick.Clear();
+            _peerLastSimTickWallMs.Clear();
             CommandInterceptor.ClearPendingLocalBuilds();
             Patches.MayorSyncPatch.ResetTracking();
         }
@@ -664,6 +671,8 @@ namespace TABCoopMod.Sync
             _lastDelayAdjustTicks = -100000.0;
             _peerSmoothedRttMs.Clear();
             _peerRttSampleTicks.Clear();
+            _peerLastSimTick.Clear();
+            _peerLastSimTickWallMs.Clear();
             _gateLastObservedTick = -1;
             _gateWaitStartTicks = -1.0;
             _awaitingSnapshotLoad = false;
@@ -739,6 +748,8 @@ namespace TABCoopMod.Sync
             _lastDelayAdjustTicks = -100000.0;
             _peerSmoothedRttMs.Clear();
             _peerRttSampleTicks.Clear();
+            _peerLastSimTick.Clear();
+            _peerLastSimTickWallMs.Clear();
             _gateLastObservedTick = -1;
             _gateWaitStartTicks = -1.0;
             _awaitingSnapshotLoad = false;
@@ -885,6 +896,8 @@ namespace TABCoopMod.Sync
                 AllyStates.Remove(playerId);
                 _peerSmoothedRttMs.Remove(playerId);
                 _peerRttSampleTicks.Remove(playerId);
+                _peerLastSimTick.Remove(playerId);
+                _peerLastSimTickWallMs.Remove(playerId);
                 _lobbyRoster.RemoveAll(p => p.PlayerId == playerId);
                 if (Transport != null && Transport.IsHost)
                     UpdateAdaptiveInputDelay();
@@ -2002,6 +2015,76 @@ namespace TABCoopMod.Sync
             ModLogger.Info($"[AdaptiveDelay] InputDelayTicks {cur} -> {desired} (smoothedRtt={maxRtt:F1}ms)");
         }
 
+        private static void UpdatePeerSimTick(byte peerId, int simTick)
+        {
+            if (peerId == 0 || peerId == 1 || simTick < 0) return;
+            if (_peerLastSimTick.TryGetValue(peerId, out int prevTick) && simTick < prevTick)
+            {
+                // Ignore stale out-of-order UDP RttPong samples, unless a snapshot reload reset tick downward.
+                if (prevTick - simTick < 300) return;
+            }
+            _peerLastSimTick[peerId] = simTick;
+            _peerLastSimTickWallMs[peerId] = DXHelper_Environment.Ticks;
+        }
+
+        private static bool TryGetSlowestClientLagTicks(out int maxLagTicks)
+        {
+            maxLagTicks = 0;
+            if (!IsSessionActive || !IsInSyncedLevel || Transport == null || !Transport.IsHost)
+                return false;
+
+            int hostTick = DXGame.Current?.IAIterationInt ?? 0;
+            double now = DXHelper_Environment.Ticks;
+            bool found = false;
+
+            foreach (var p in GetEffectivePeers())
+            {
+                if (p.PlayerId == 1) continue;
+                if (_peerLastSimTick.TryGetValue(p.PlayerId, out int peerTick)
+                    && _peerLastSimTickWallMs.TryGetValue(p.PlayerId, out double sampleTs)
+                    && now >= sampleTs
+                    && (now - sampleTs) <= ClientLagStaleMs)
+                {
+                    int lag = Math.Max(0, hostTick - peerTick);
+                    if (!found || lag > maxLagTicks)
+                    {
+                        maxLagTicks = lag;
+                        found = true;
+                    }
+                }
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// Backpressure for Host tick pacing so a slower Client cannot fall seconds behind Host
+        /// and accumulate multi-second input/pause latency. Bounded by ClientLagStaleMs (3.5s)
+        /// so a frozen/disconnected Client can never deadlock Host.
+        /// </summary>
+        internal static void GetHostPaceAdjustment(out double paceMultiplier, out int maxTicks)
+        {
+            paceMultiplier = 1.0;
+            maxTicks = 3;
+
+            if (!IsSessionActive || !IsInSyncedLevel || Transport == null || !Transport.IsHost)
+                return;
+            if (LockstepClock.PausedBySession || _awaitingClientSnapshotAck || _hostWaitingOwnReload
+                || Testing.DeterministicReplayVerifier.IsRunning)
+                return;
+            if (!TryGetSlowestClientLagTicks(out int maxLagTicks))
+                return;
+
+            if (maxLagTicks >= HostBackpressureHoldLagTicks)
+            {
+                maxTicks = 0;
+            }
+            else if (maxLagTicks >= HostBackpressureSlowLagTicks)
+            {
+                maxTicks = 1;
+                paceMultiplier = 1.35;
+            }
+        }
+
         private static void LogPeriodicLatencyStats()
         {
             if (!IsSessionActive || !IsInSyncedLevel || Transport == null) return;
@@ -2035,9 +2118,22 @@ namespace TABCoopMod.Sync
             string statsLine = diag != null ? diag.GetDebugStatsLine() : string.Empty;
             string role = Transport.IsHost ? "Host" : "Client";
 
+            string lagPart = string.Empty;
+            if (Transport.IsHost)
+            {
+                if (TryGetSlowestClientLagTicks(out int cLag))
+                    lagPart = $" clientLag={cLag}t({cLag * 33.3:F0}ms)";
+            }
+            else
+            {
+                int curTick = DXGame.Current?.IAIterationInt ?? 0;
+                int cLag = Math.Max(0, _networkGate.ReadyThrough - curTick);
+                lagPart = $" tickLag={cLag}t({cLag * 33.3:F0}ms)";
+            }
+
             ModLogger.Info(
                 $"[LatencyStats] role={role} path=\"{path}\" rtt={CurrentSmoothedRttMs:F1}ms directRtt={directRtt:F1}ms " +
-                $"delay={InputDelayTicks}t({InputDelayTicks * 33.3:F0}ms) cmdN={count} cmdAvg={avgMs:F1}ms cmdP95={p95Ms:F1}ms cmdMax={maxMs:F1}ms" +
+                $"delay={InputDelayTicks}t({InputDelayTicks * 33.3:F0}ms){lagPart} cmdN={count} cmdAvg={avgMs:F1}ms cmdP95={p95Ms:F1}ms cmdMax={maxMs:F1}ms" +
                 (string.IsNullOrEmpty(statsLine) ? string.Empty : $" | {statsLine}"));
         }
 
@@ -2063,21 +2159,21 @@ namespace TABCoopMod.Sync
 
             _lastCheckedSimTick = digest.SimTick;
 
-            // Prune stale digests (keep ~20s of history) so dictionaries cannot grow unbounded.
+            // Prune stale digests (keep ~40s of history) so dictionaries cannot grow unbounded.
             if (Transport.IsHost)
             {
                 if (_hostTickDigests.Count > 0)
                 {
                     var stale = new List<int>();
                     foreach (var k in _hostTickDigests.Keys)
-                        if (k < curTick - 600) stale.Add(k);
+                        if (k < curTick - 1200) stale.Add(k);
                     foreach (var k in stale) _hostTickDigests.Remove(k);
                 }
                 if (_clientTickDigests.Count > 0)
                 {
                     var stale = new List<int>();
                     foreach (var k in _clientTickDigests.Keys)
-                        if (k < curTick - 600) stale.Add(k);
+                        if (k < curTick - 1200) stale.Add(k);
                     foreach (var k in stale) _clientTickDigests.Remove(k);
                 }
             }
@@ -2335,6 +2431,11 @@ namespace TABCoopMod.Sync
                     _clientHostPausedTick = hostTick;
                     _clientHostInModalPause = hostInModal || hostSessionPaused;
                     _clientHostPauseKeepaliveUntilTicks = DXHelper_Environment.Ticks + 1500.0;
+                    int curClientTick = DXGame.Current?.IAIterationInt ?? 0;
+                    if (hostSessionPaused && !LockstepClock.PausedBySession && curClientTick < hostTick)
+                    {
+                        GameBridge.ShowTopBanner($"Pausing (syncing {hostTick - curClientTick}t)...", Color.LightSkyBlue, 600);
+                    }
                     break;
                 }
 
@@ -2352,6 +2453,7 @@ namespace TABCoopMod.Sync
                     if (!Transport.IsHost) break;
                     TickDigestRecord rec = ReadDigestReport(r);
                     int clientTick = rec.Digest.SimTick;
+                    UpdatePeerSimTick(senderId, clientTick);
                     if (!_clientTickDigests.TryGetValue(clientTick, out var byPeer))
                         _clientTickDigests[clientTick] = byPeer = new Dictionary<byte, TickDigestRecord>();
                     byPeer[senderId] = rec;
@@ -2511,6 +2613,7 @@ namespace TABCoopMod.Sync
                     {
                         w.Write(seq);
                         w.Write(hostTs);
+                        w.Write(DXGame.Current?.IAIterationInt ?? 0);
                     });
                     break;
                 }
@@ -2520,6 +2623,11 @@ namespace TABCoopMod.Sync
                     if (Transport == null || !Transport.IsHost) break;
                     uint seq = r.ReadUInt32();
                     long hostTs = r.ReadInt64();
+                    if (r.BaseStream.Position + 4 <= r.BaseStream.Length)
+                    {
+                        int clientTick = r.ReadInt32();
+                        UpdatePeerSimTick(senderId, clientTick);
+                    }
                     double rttMs = (Stopwatch.GetTimestamp() - hostTs) * 1000.0 / Stopwatch.Frequency;
                     if (rttMs < 0.0 || rttMs > 2000.0 || double.IsNaN(rttMs) || double.IsInfinity(rttMs))
                         break;
@@ -2542,7 +2650,7 @@ namespace TABCoopMod.Sync
             if (samples == null) return;
             _tickPosCache[tick] = samples;
             _tickPosCacheOrder.Enqueue(tick);
-            while (_tickPosCacheOrder.Count > 6)
+            while (_tickPosCacheOrder.Count > 16)
             {
                 int old = _tickPosCacheOrder.Dequeue();
                 _tickPosCache.Remove(old);

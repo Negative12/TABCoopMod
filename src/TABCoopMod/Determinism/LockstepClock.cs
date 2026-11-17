@@ -182,7 +182,7 @@ namespace TABCoopMod.Determinism
         /// render FPS (e.g. dual-window GPU sharing or unfocused background window) from slowing
         /// simulation below 1.0x real time and also supports >1x game speeds cleanly.
         /// </summary>
-        internal static int ConsumeHostRealTimeTicks(double gameSpeed, int maxTicks = 3)
+        internal static int ConsumeHostRealTimeTicks(double gameSpeed, int maxTicks = 3, double paceMultiplier = 1.0)
         {
             if (gameSpeed <= 0.001)
             {
@@ -190,7 +190,8 @@ namespace TABCoopMod.Determinism
                 return 0;
             }
 
-            double stepMs = MsPerLogicTick / gameSpeed;
+            double clampedPace = paceMultiplier > 0.1 ? paceMultiplier : 1.0;
+            double stepMs = (MsPerLogicTick * clampedPace) / gameSpeed;
             double nowMs = System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
             // Clamp stale backlog to <= 2 ticks so a temporary GC/physics/render spike cannot
             // trap Host in an 8-tick catchup death spiral (4 FPS).
@@ -1342,7 +1343,16 @@ namespace TABCoopMod.Determinism
             {
                 if (isHost)
                 {
-                    maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, 3);
+                    Sync.CoopSessionManager.GetHostPaceAdjustment(out double hostPaceMult, out int hostMaxTicks);
+                    if (hostMaxTicks <= 0)
+                    {
+                        LockstepClock.ResetHostTickPacing();
+                        maxTicksThisFrame = 0;
+                    }
+                    else
+                    {
+                        maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, hostMaxTicks, hostPaceMult);
+                    }
                 }
                 else
                 {
@@ -1362,10 +1372,20 @@ namespace TABCoopMod.Determinism
                     }
                     else
                     {
-                        // Client fell behind Host by more than InputDelayTicks: allow up to 2 ticks to catch up.
-                        int catchup = Math.Min(2, readyAhead - Sync.CoopSessionManager.InputDelayTicks + 1);
+                        // Client fell behind Host by more than InputDelayTicks: run multi-tick catchup so
+                        // sub-30 FPS clients cannot drift seconds behind Host.
+                        int behind = readyAhead - Sync.CoopSessionManager.InputDelayTicks;
+                        int catchup = behind >= 12 ? 4 : (behind >= 4 ? 3 : 2);
                         maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, catchup);
-                        if (maxTicksThisFrame < 1) maxTicksThisFrame = 1;
+                        if (behind >= 3)
+                        {
+                            maxTicksThisFrame = Math.Max(maxTicksThisFrame, Math.Min(catchup, behind));
+                            LockstepClock.ResetHostTickPacing();
+                        }
+                        else if (maxTicksThisFrame < 1)
+                        {
+                            maxTicksThisFrame = 1;
+                        }
                     }
                 }
             }
@@ -1384,14 +1404,13 @@ namespace TABCoopMod.Determinism
             DiagLastWantedTicks = maxTicksThisFrame;
 
             // Pipeline 1 tick asynchronously in _TaskLogic while RenderFrame/Present runs on MainThread
-            // when in co-op (outside replay verifier) at 1x speed when running 1 tick, on fast frames,
-            // or when single-tick logic takes >= 8ms.
-            double estLogicMs = _diagWorkerLogicMs > 0.0 ? _diagWorkerLogicMs : DiagAvgTickLogicMs;
+            // ONLY when running 1 tick this frame; multi-tick catchup must execute synchronously so
+            // slow late-game clients are not permanently capped to 1 tick per render frame.
             bool canOverlapAsync = inCoop
                 && !Testing.TestHarnessConfig.DisableAsyncTick
                 && !Testing.DeterministicReplayVerifier.IsRunning
                 && __instance.GameSpeed <= 1.05
-                && (maxTicksThisFrame == 1 || DiagAvgFrameMs < 28.0 || estLogicMs >= 8.0);
+                && maxTicksThisFrame == 1;
 
             if (canOverlapAsync)
             {
@@ -1425,16 +1444,18 @@ namespace TABCoopMod.Determinism
             }
 
             int ticksRan = 0;
-            // After running at least 1 tick, only run a 2nd catchup tick if tick 1 finished fast
-            // (< 10ms, e.g. small maps); heavy late-game maps stay at 1 tick/frame to keep FPS smooth.
-            const double FrameSimBudgetMs = 10.0;
+            // After running at least 1 tick, allow a wider budget when catching up multiple ticks
+            // (especially late-game Client catchup where 1 tick alone takes >10ms).
+            double frameSimBudgetMs = (!isHost && maxTicksThisFrame > 1)
+                ? 28.0
+                : (maxTicksThisFrame > 1 ? 18.0 : 10.0);
             for (int step = 0; step < maxTicksThisFrame; step++)
             {
                 if (LockstepClock.PausedBySession) break;
                 if (ticksRan >= 1)
                 {
                     double simElapsedMs = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs - nowEntryMs;
-                    if (simElapsedMs >= FrameSimBudgetMs) break;
+                    if (simElapsedMs >= frameSimBudgetMs) break;
                 }
 
                 int nextTick = __instance.IAIterationInt;

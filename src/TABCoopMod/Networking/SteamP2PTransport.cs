@@ -100,7 +100,7 @@ namespace TABCoopMod.Networking
         private volatile bool _disposed;
         private readonly List<PeerInfo> _peers = new List<PeerInfo>();
         private readonly Dictionary<byte, CSteamID> _playerToSteamId = new Dictionary<byte, CSteamID>();
-        private byte _nextPlayerId = 2;
+        private int _maxPlayers = 3;
 
         private DirectFastPathManager _direct;
         private readonly ConcurrentQueue<Action> _mainThreadActions = new ConcurrentQueue<Action>();
@@ -207,7 +207,7 @@ namespace TABCoopMod.Networking
             EnsureCallbacksRegistered();
             IsHost = true;
             LocalPlayerId = 1;
-            _nextPlayerId = 2;
+            _maxPlayers = Math.Max(2, maxPlayers);
             _expectedLobbyId = CSteamID.Nil;
             _peers.Clear();
             _playerToSteamId.Clear();
@@ -366,10 +366,13 @@ namespace TABCoopMod.Networking
             {
                 if (kv.Value == param.m_steamIDRemote)
                 {
-                    _cutoverPendingTs.Remove(kv.Key);
-                    _cutoverHoldQueue.Remove(kv.Key);
-                    _direct?.RemovePeer(kv.Key);
-                    OnPeerDisconnected?.Invoke(kv.Key);
+                    byte deadId = kv.Key;
+                    _playerToSteamId.Remove(deadId);
+                    _peers.RemoveAll(p => p.PlayerId == deadId || (param.m_steamIDRemote.IsValid() && p.SteamId64 == param.m_steamIDRemote.m_SteamID));
+                    _cutoverPendingTs.Remove(deadId);
+                    _cutoverHoldQueue.Remove(deadId);
+                    _direct?.RemovePeer(deadId);
+                    OnPeerDisconnected?.Invoke(deadId);
                     break;
                 }
             }
@@ -564,7 +567,17 @@ namespace TABCoopMod.Networking
                     existingId = existingPeer.PlayerId;
 
                 bool isDuplicate = existingId != 0 && existingId != LocalPlayerId;
-                byte assignedId = isDuplicate ? existingId : _nextPlayerId++;
+                byte assignedId = isDuplicate ? existingId : AllocateLowestFreePlayerId();
+                if (assignedId == 0)
+                {
+                    PruneStaleLobbyMembers();
+                    assignedId = AllocateLowestFreePlayerId();
+                }
+                if (assignedId == 0)
+                {
+                    ModLogger.Warn($"[SteamP2PTransport] Rejected Handshake from {clientName} ({remoteSteamId.m_SteamID}): room full (maxPlayers={_maxPlayers}).");
+                    return;
+                }
                 _playerToSteamId[assignedId] = remoteSteamId;
 
                 var peer = new PeerInfo
@@ -720,6 +733,57 @@ namespace TABCoopMod.Networking
                 if (kv.Value == remoteSteamId) return kv.Key;
             }
             return 0;
+        }
+
+        private byte AllocateLowestFreePlayerId()
+        {
+            int limit = Math.Min(255, Math.Max(2, _maxPlayers));
+            for (int candidate = 2; candidate <= limit; candidate++)
+            {
+                byte id = (byte)candidate;
+                if (_playerToSteamId.ContainsKey(id)) continue;
+                bool inPeers = false;
+                for (int i = 0; i < _peers.Count; i++)
+                {
+                    if (_peers[i].PlayerId == id) { inPeers = true; break; }
+                }
+                if (!inPeers) return id;
+            }
+            return 0;
+        }
+
+        private void PruneStaleLobbyMembers()
+        {
+            if (!_currentLobbyId.IsValid()) return;
+            try
+            {
+                int memberCount = SteamMatchmaking.GetNumLobbyMembers(_currentLobbyId);
+                var activeMembers = new HashSet<ulong>();
+                for (int i = 0; i < memberCount; i++)
+                {
+                    var m = SteamMatchmaking.GetLobbyMemberByIndex(_currentLobbyId, i);
+                    if (m.IsValid()) activeMembers.Add(m.m_SteamID);
+                }
+
+                var staleIds = new List<byte>();
+                foreach (var kv in _playerToSteamId)
+                {
+                    if (kv.Key != LocalPlayerId && kv.Value.IsValid() && !activeMembers.Contains(kv.Value.m_SteamID))
+                        staleIds.Add(kv.Key);
+                }
+                for (int i = 0; i < staleIds.Count; i++)
+                {
+                    byte pid = staleIds[i];
+                    _playerToSteamId.Remove(pid);
+                    _peers.RemoveAll(p => p.PlayerId == pid);
+                    _cutoverPendingTs.Remove(pid);
+                    _cutoverHoldQueue.Remove(pid);
+                    _direct?.RemovePeer(pid);
+                    ModLogger.Info($"[SteamP2PTransport] Pruned stale lobby slot PlayerId={pid} before assigning new joiner.");
+                    OnPeerDisconnected?.Invoke(pid);
+                }
+            }
+            catch { }
         }
 
         private void SendDirectCandidatesToPeer(byte targetPlayerId)

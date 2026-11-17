@@ -59,6 +59,10 @@ namespace TABCoopMod.Sync
             else
             {
                 CancelCountdown();
+                if (InNetworkSession && CoopSessionManager.Transport != null && !CoopSessionManager.Transport.IsHost)
+                {
+                    GameBridge.ShowTopBanner("Pause requested...", Color.LightSkyBlue, 900);
+                }
                 Apply(true);
                 return;
             }

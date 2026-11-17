@@ -106,7 +106,6 @@ namespace TABCoopMod.Networking
         private TcpClient _clientToHost;
         private NetworkStream _streamToHost;
         private readonly List<PeerInfo> _peers = new List<PeerInfo>();
-        private byte _nextPlayerId = 2;
         private int _maxPlayers = 3;
 
         /// <summary>
@@ -134,7 +133,6 @@ namespace TABCoopMod.Networking
             Dispose();
             IsHost = true;
             LocalPlayerId = 1;
-            _nextPlayerId = 2;
             _maxPlayers = Math.Max(2, maxPlayers);
             _peers.Clear();
             _peers.Add(new PeerInfo { PlayerId = 1, PlayerName = "HostPlayer", IsReady = true });
@@ -270,13 +268,13 @@ namespace TABCoopMod.Networking
 
                         if (pktType == PacketType.HandshakeRequest)
                         {
-                            if (_peers.Count >= _maxPlayers)
+                            byte assignedId = AllocateLowestFreePlayerId();
+                            if (_peers.Count >= _maxPlayers || assignedId == 0)
                             {
                                 ClosePending(i);
                                 continue;
                             }
 
-                            byte assignedId = _nextPlayerId++;
                             _pendingAccepts.RemoveAt(i);
                             _clients.Add((assignedId, pending.Client, pending.Stream));
                             ModLogger.Info($"[LocalTcpLoopbackTransport] Accepted client connection -> Assigned PlayerId={assignedId}");
@@ -324,6 +322,29 @@ namespace TABCoopMod.Networking
             {
                 ModLogger.Error("[LocalTcpLoopbackTransport] Exception in PollEvents", ex);
             }
+        }
+
+        private byte AllocateLowestFreePlayerId()
+        {
+            int limit = Math.Min(255, Math.Max(2, _maxPlayers));
+            for (int candidate = 2; candidate <= limit; candidate++)
+            {
+                byte id = (byte)candidate;
+                bool used = false;
+                for (int i = 0; i < _clients.Count; i++)
+                {
+                    if (_clients[i].PlayerId == id) { used = true; break; }
+                }
+                if (!used)
+                {
+                    for (int i = 0; i < _peers.Count; i++)
+                    {
+                        if (_peers[i].PlayerId == id) { used = true; break; }
+                    }
+                }
+                if (!used) return id;
+            }
+            return 0;
         }
 
         private void ClosePending(int index)

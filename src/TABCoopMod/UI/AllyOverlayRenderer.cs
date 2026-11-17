@@ -207,7 +207,7 @@ namespace TABCoopMod.UI
         public static void Postfix(DXObject __instance)
         {
             if (__instance == null || !CoopSessionManager.IsSessionActive || !CoopSessionManager.IsInSyncedLevel) return;
-            if (DXLevel.Current == null || CoopSessionManager.AllyStates.Count == 0) return;
+            if (DXLevel.Current == null) return;
 
             RectangleF playable = DXLevel.Current.PlayableArea;
             RectangleF inner = __instance.InnerArea;
@@ -215,6 +215,12 @@ namespace TABCoopMod.UI
 
             lock (_boxesSync)
             {
+                foreach (var kv in _boxes)
+                {
+                    if (kv.Value != null && !CoopSessionManager.AllyStates.ContainsKey(kv.Key))
+                        kv.Value.Visible = false;
+                }
+
                 foreach (var kv in CoopSessionManager.AllyStates)
                 {
                     byte playerId = kv.Key;
