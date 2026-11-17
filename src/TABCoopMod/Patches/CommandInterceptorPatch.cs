@@ -307,6 +307,10 @@ namespace TABCoopMod.Patches
                     if (!footprint.IsEmpty && newGhostId > 0)
                         AllyOverlayRenderer.SetPendingBuildGhost(newGhostId, footprint, CommandInterceptor.LocalPlayerId);
 
+                    int bonusBuildSlot = 0;
+                    if (isBonus)
+                        GameBridge.TryGetEntityBonusInfo(__instance, out bonusBuildSlot, out _, out _, out _);
+
                     var netBuild = new NetCommand
                     {
                         Type = NetCommandType.PlaceBuilding,
@@ -316,6 +320,7 @@ namespace TABCoopMod.Patches
                         CommandId = cmdId,
                         BuildingTypeName = buildingType.FullName,
                         IsBonusBuilding = isBonus,
+                        QueueSlotIndex = (byte)Math.Max(0, Math.Min(255, bonusBuildSlot)),
                         ExecutorEntityIds = new[] { executor.ID },
                         TargetEntityId = targetEntityId,
                         TargetPosition = targetPos,
@@ -328,6 +333,25 @@ namespace TABCoopMod.Patches
                 }
             }
 
+            string extraTypeOrSlotTag = string.Empty;
+            byte extraSlotIndex = 0;
+            bool isBonusUnit = false;
+            if (GameBridge.TryGetEntityBonusInfo(__instance, out int bonusUnitSlot, out Type bonusEntityType, out bool bonusIsStructure, out _)
+                && !bonusIsStructure)
+            {
+                // Empty bonus slot (already claimed/exhausted) — ignore safely.
+                if (bonusEntityType == null)
+                    return false;
+                extraTypeOrSlotTag = bonusEntityType.FullName;
+                extraSlotIndex = (byte)Math.Max(0, Math.Min(255, bonusUnitSlot));
+                isBonusUnit = true;
+            }
+            else if (GameBridge.TryGetExtractSlotInfo(__instance, out int extractSlot))
+            {
+                extraTypeOrSlotTag = "ZX.Commands.ExtractFromUnitHolderSlot";
+                extraSlotIndex = (byte)Math.Max(0, Math.Min(255, extractSlot));
+            }
+
             var netCmd = new NetCommand
             {
                 Type = NetCommandType.ExecuteCommand,
@@ -335,6 +359,8 @@ namespace TABCoopMod.Patches
                 TargetSimTick = curTick,
                 IsShiftQueued = isShift,
                 CommandId = cmdId,
+                BuildingTypeName = extraTypeOrSlotTag,
+                QueueSlotIndex = extraSlotIndex,
                 ExecutorEntityIds = new[] { executor.ID },
                 TargetEntityId = targetEntityId,
                 TargetPosition = targetPos,
@@ -347,7 +373,7 @@ namespace TABCoopMod.Patches
 
             Type orderEntityType = GameBridge.GetBuildingTypeFromCommand(__instance);
             if (orderEntityType != null)
-                GameBridge.PlayLocalBuildOrOrderFeedback(orderEntityType, preferCreationSound: false, fallbackExecutor: executor);
+                GameBridge.PlayLocalBuildOrOrderFeedback(orderEntityType, preferCreationSound: isBonusUnit, fallbackExecutor: executor);
             else
                 GameBridge.PlayUnitCommandVoice(executor, GameBridge.IsAttackCommand(__instance));
 

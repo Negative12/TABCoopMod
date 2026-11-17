@@ -1,7 +1,7 @@
 # 06 — 当前项目状态、门禁验收报告与下一步计划 (Project Status)
 
-> **最后更新**: 2026-11-16（**发布 `v0.1.3`**：补齐联机版本不一致双端弹窗与大厅红框告警、修复 `AsyncPosAlign` 在 ID 偏移时误杀客机新生成尸潮导致的“隐形尸潮”与漏检延迟问题；详见 [`docs/12_STEAM_P2P_BUGS_AND_FIXES_20261116.md`](12_STEAM_P2P_BUGS_AND_FIXES_20261116.md)）
-> **构建基线**: `v0.1.3` (`0.1.3.0`) `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=64, failed-tolerant=0`**。
+> **最后更新**: 2026-11-17（**发布 `v0.1.4`**：修复市长赠送单位无法从指挥中心取出、赠送建筑未扣减剩余次数，以及多奖励槽位/防御塔驻扎取出槽位 `Command.ID` 碰撞缺陷）
+> **构建基线**: `v0.1.4` (`0.1.4.0`) `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=64, failed-tolerant=0`**。
 > **历史过程记录**: 早期排查过程与会话 1~6 演进流水已归档至 [`docs/archive/`](archive/SESSION_CHANGELOG_S1_TO_S6.md)。
 
 ---
@@ -30,6 +30,7 @@
 | **市长选择对端自动关窗修复** | `900survival.zxsav` 双开双向实测（Round 1 主机先选 / Round 2 客机先选） | 修复本地弹窗暂停（`DXGame.Paused = true`）阻塞 `FlushDueTurnCommands` 及客机等待未来 `TargetSimTick` 未提前关闭弹窗的问题：在 `OnFrameTick` 对本地引擎暂停同样冲刷已就绪回合指令，并在客机收到含 `MayorVoteOrSelect` 的 `TurnInputBroadcast` 时立即调用 `CloseActiveMayorWindow()` 与 `NotifyRemoteMayorCommitted()` 抑制延迟弹窗；双开实测双方向均在 300ms 内自动关闭对端弹窗且 `Paused=false`（`HostMayor=1/2, ClientMayor=1/2`），后续 Tick `4725..4920` 4/4 `StateChecksum MATCH`、`0 ERROR` | ✅ 通过 |
 | **Steam P2P 实测 4 项问题修复** | `1_Backup.zxsav` + `900survival.zxsav` 双开实测 + `run_replay_verify.ps1` + `verify_lobby_flow.ps1` | ① `MayorModalTrackerPatch` 在弹窗抽样前按 `(SyncedRandomSeed, mayorLevel)` 重设 `DXLevel.Current.Random` 并在 Postfix 重锚（错帧双开截图同出 `阿什利·达尔` + `米娅·斯特兰德`）；② `ReturnToMainMenuPatch` / `MainMenuOnLoadCompletePatch` / `CoopLobbyWindow` 兜底 `ClearWaitCursor()`；③ 消费 `_pendingInviteLobbyId`、`SteamP2PTransport.Dispose()` 释放 5 个 `Callback<T>`、Host 按 `CSteamID` 幂等去重；④ 新增 `GameSetGameTimePatch` 放行 `DXGame.SetGameTime` 并在退回主菜单归零时钟（战败退出 `cursorLocked=False`，重开生存新局 `GameTime=0.0ms` / `天 000`，Tick `1` 与 `120` `StateChecksum MATCH`，`1_Backup` 回放 `120 ticks identical`，`verify_lobby_flow` 9/9 通过） | ✅ 通过 |
 | **版本不一致告警与隐形尸潮修复 (`v0.1.3`)** | `logs/*_3.log` 根因排查 + `1_Backup.zxsav` 120t 回放 + `ChaosTransport` 20s 双开 | ① `INetworkTransport` 新增 `OnVersionMismatch` 事件，`SteamP2PTransport`（Lobby 元数据 `tab_coop_ver` + `HandshakeAccept` 附带版本，兼容旧版无版本尾字段）与 `LocalTcpLoopbackTransport` 双端检测并弹窗/红框告警；② `CoopSessionManager.OnPosDriftSyncChunkReceived` 仅在 `cs.IsDynamic` 扫描且当 `missingOnHost > 8 \|\| missingOnClient > 4` 时禁止批量 `Kill`，避免 ID 偏移时误杀客机新生成的尸潮；③ `VerifyTickChecksum` 收紧 `entityTol = Clamp(EntityCount/1000, 12..30)`、`StructuralReloadStreak = 6`，`PosDriftStatsReport` 接入 `missingOnClient >= 10` 连续 4 次（`30s` 结构冷却）触发 `Auto-resync`；`1_Backup` 120t 回放 `identical`，`Chaos-1` 20s 11/11 `StateChecksum MATCH`、`0 ERROR` | ✅ 通过 |
+| **市长赠送单位取出与槽位碰撞修复 (`v0.1.4`)** | `1_Backup.zxsav` 120t 回放 + 双开 Loopback 实机验证（`Mayor_002` + `Mayor_006`） | ① `GameBridge.IsBuildOrBonusCommand` 仅将 `ZX.Entities.Structure` 类型的 `EntityBonusCreation` 归为 `PlaceBuilding` 分支，修正赠送单位被误判为 `(0,0)` 放置而遭吞没的缺陷；② `Patch_ZXCommand_Execute` 与 `ResolveReplayCommand` 为 `EntityBonusCreation` 与 `ExtractFromUnitHolderSlot` 携带真实 `NSlot`/`EntityTypeName` 并在 `AvailableCommands` 中按类型+槽位匹配（防耗尽前移误触发），取出单位后立即 `FlushStartFramePostMethods()`；③ `ExecutePlaceBuilding` 为 `IsBonusBuilding` 校验剩余次数并调用 `ConsumeBonusEntityByType` 与清理放置游标；双开实测 Client/Host 取出 `Ranger(2)`（`16->18`、过期点击未误触发前移的 `ShockingTower`）与放置 `ShockingTower`（`0->1`、次数归零）成功，Tick `31904..34200` 全程 `StateChecksum MATCH`、`0 ERROR` | ✅ 通过 |
 
 ---
 

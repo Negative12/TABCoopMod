@@ -762,6 +762,10 @@ namespace TABCoopMod.Testing
                         ["jitterMs"] = Sync.CoopSessionManager.LocalChaosJitterMs,
                         ["lossRate"] = Sync.CoopSessionManager.LocalChaosLossRate
                     };
+                case "bonus_slots":
+                    return GetBonusSlotsInfo();
+                case "invoke_bonus_slot":
+                    return InvokeBonusSlot(args);
                 default:
                     bool ok = CoopLobbyWindow.InvokeTestAction(act);
                     return new Dictionary<string, object> { ["ok"] = ok, ["action"] = act };
@@ -812,6 +816,81 @@ namespace TABCoopMod.Testing
                 ["ok"] = ok,
                 ["path"] = path,
                 ["resolution"] = res
+            };
+        }
+
+        private static object GetBonusSlotsInfo()
+        {
+            var cc = GameBridge.GetCommandCenterEntity();
+            var slots = new List<Dictionary<string, object>>();
+            var cmds = GameBridge.GetAvailableCommandsForEntity(cc);
+            if (cmds != null)
+            {
+                foreach (object cmd in cmds)
+                {
+                    if (!GameBridge.TryGetEntityBonusInfo(cmd, out int slot, out Type entType, out bool isStructure, out _))
+                        continue;
+                    if (entType == null) continue;
+                    int count = GameBridge.GetBonusEntityCount(entType, out _);
+                    slots.Add(new Dictionary<string, object>
+                    {
+                        ["slot"] = slot,
+                        ["entityType"] = entType.FullName,
+                        ["isStructure"] = isStructure,
+                        ["count"] = count
+                    });
+                }
+            }
+            return new Dictionary<string, object>
+            {
+                ["ok"] = cc != null,
+                ["ccId"] = cc?.ID ?? 0UL,
+                ["slots"] = slots
+            };
+        }
+
+        private static object InvokeBonusSlot(Dictionary<string, object> args)
+        {
+            int targetSlot = GetInt(args, "slot", 1);
+            var cc = GameBridge.GetCommandCenterEntity();
+            if (cc == null)
+                return new Dictionary<string, object> { ["ok"] = false, ["error"] = "CommandCenter not found" };
+
+            var cmds = GameBridge.GetAvailableCommandsForEntity(cc);
+            object matched = null;
+            if (cmds != null)
+            {
+                foreach (object cmd in cmds)
+                {
+                    if (GameBridge.TryGetEntityBonusInfo(cmd, out int slot, out _, out _, out _) && slot == targetSlot)
+                    {
+                        matched = cmd;
+                        break;
+                    }
+                }
+            }
+            if (matched == null)
+                return new Dictionary<string, object> { ["ok"] = false, ["error"] = $"Bonus slot {targetSlot} not found" };
+
+            float x = GetFloat(args, "x", 0f);
+            float y = GetFloat(args, "y", 0f);
+            float w = GetFloat(args, "sizeW", 0f);
+            float h = GetFloat(args, "sizeH", 0f);
+            object cmdTarget = GameBridge.CreateCommandTarget(
+                (x != 0f || y != 0f) ? new PointF(x, y) : PointF.Empty,
+                (w > 0f && h > 0f) ? new SizeF(w, h) : SizeF.Empty,
+                (x != 0f || y != 0f) ? new PointF(x, y) : PointF.Empty,
+                0UL);
+
+            // Invokes ZXCommand.Execute cleanly through Harmony Patch_ZXCommand_Execute just like a real UI click.
+            GameBridge.ExecuteCommandOnEntity(matched, cc, cmdTarget);
+            GameBridge.TryGetEntityBonusInfo(matched, out _, out Type entType, out bool isStructure, out _);
+            return new Dictionary<string, object>
+            {
+                ["ok"] = entType != null,
+                ["slot"] = targetSlot,
+                ["entityType"] = entType?.FullName ?? string.Empty,
+                ["isStructure"] = isStructure
             };
         }
 

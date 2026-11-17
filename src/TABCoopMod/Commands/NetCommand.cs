@@ -273,8 +273,9 @@ namespace TABCoopMod.Commands
 
         private static void ExecuteSingleOrBatchCommand(NetCommand netCmd)
         {
-            object cmd = GameBridge.GetCommandById(netCmd.CommandId);
-            if (cmd == null)
+            bool slotSensitive = !string.IsNullOrEmpty(netCmd.BuildingTypeName);
+            object sharedCmd = slotSensitive ? null : GameBridge.GetCommandById(netCmd.CommandId);
+            if (!slotSensitive && sharedCmd == null)
             {
                 ModLogger.Warn($"[CommandExecutor] Unknown CommandId: {netCmd.CommandId}");
                 return;
@@ -288,6 +289,15 @@ namespace TABCoopMod.Commands
                 if (!IsLiveExecutableEntity(executor))
                     continue;
 
+                object cmd = slotSensitive
+                    ? GameBridge.ResolveReplayCommand(netCmd.CommandId, netCmd.BuildingTypeName, netCmd.QueueSlotIndex, executor, out _)
+                    : sharedCmd;
+                if (cmd == null)
+                {
+                    ModLogger.Info($"[CommandExecutor] Rejected stale/unavailable slot command {netCmd.BuildingTypeName} (slot={netCmd.QueueSlotIndex}) on {entityId}.");
+                    continue;
+                }
+
                 if (GameBridge.IsResourceSpendingCommand(cmd, executor) && !GameBridge.CanExecuteCommandOnEntity(cmd, executor))
                 {
                     ModLogger.Info($"[CommandExecutor] Rejected {cmd.GetType().Name} on {entityId}: CanExecute=false.");
@@ -296,6 +306,8 @@ namespace TABCoopMod.Commands
 
                 GameBridge.ExecuteCommandOnEntity(cmd, executor, target);
                 GameBridge.NotifyUnitCommandExecuted(executor, cmd);
+                if (slotSensitive)
+                    GameBridge.FlushStartFramePostMethods();
             }
         }
 
@@ -363,18 +375,27 @@ namespace TABCoopMod.Commands
             if (!IsLiveExecutableEntity(builder)) return;
 
             // Mayor-reward buildings come from EntityBonusCreation, which internally calls
-            // Build.PlaceBuilding(isBonus:true). Executing the Build command instead would charge
-            // resources and produce a different structure, so replay it through PlaceBuilding.
+            // Build.PlaceBuilding(isBonus:true) AND consumes one entry from BonusEntityTemplates.
             if (netCmd.IsBonusBuilding)
             {
+                int prevBonusCount = GameBridge.GetBonusEntityCount(buildingType, out _);
+                if (prevBonusCount <= 0)
+                {
+                    ModLogger.Info($"[CommandExecutor] Rejected bonus PlaceBuilding {netCmd.BuildingTypeName}: no remaining bonus charge.");
+                    return;
+                }
                 if (!GameBridge.CanPlaceBuildingAtTarget(buildingType, netCmd.TargetPosition, netCmd.TargetSize, netCmd.TargetOrigin))
                 {
                     ModLogger.Info($"[CommandExecutor] Rejected bonus PlaceBuilding {netCmd.BuildingTypeName}: target cells occupied or invalid.");
                     return;
                 }
                 object bonusTarget = BuildCommandTarget(netCmd);
-                GameBridge.PlaceBuilding(builder, bonusTarget, buildingType, isBonus: true, instant: netCmd.InstantBuild, template: null);
+                object placed = GameBridge.PlaceBuilding(builder, bonusTarget, buildingType, isBonus: true, instant: netCmd.InstantBuild, template: null);
                 GameBridge.FlushStartFramePostMethods();
+                ModLogger.Info($"[CommandExecutor] Bonus PlaceBuilding {netCmd.BuildingTypeName} at ({netCmd.TargetPosition.X:F1},{netCmd.TargetPosition.Y:F1}) -> {(placed != null ? "OK" : "NULL")}");
+                GameBridge.ConsumeBonusEntityByType(buildingType);
+                if (prevBonusCount == 1 && netCmd.PlayerId == CommandInterceptor.LocalPlayerId)
+                    GameBridge.CancelPendingBonusCommandIfType(buildingType);
                 return;
             }
 

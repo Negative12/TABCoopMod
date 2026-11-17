@@ -111,6 +111,7 @@ namespace TABCoopMod.Core
         public const string Method_LevelSys_ShowTopBanner      = "#=zhWLC3K8=";
         public const string Method_LevelSys_EnqueueNotification= "#=zYWs2Gv9F3GD5";
         public const string Method_LevelSys_RefreshCmdPanel    = "#=zR1qHCYY=";
+        public const string Method_LevelSys_ClearPendingBuildMode = "#=z$xo$17_AskhgfUuy9Epz5JQ=";
         public const string Method_LevelSys_TriggerGameEnd     = "#=zIoSB3Q$9ZjUF";
         public const string Method_LevelSys_ShowSurvivalEnd    = "#=zuY2pslm6MYCZNwXKL0J6wWQ=";
         public const string Method_LevelSys_ShowCampaignEnd    = "#=z50KAckqpQjxWzdXGV4uLSoo=";
@@ -168,6 +169,8 @@ namespace TABCoopMod.Core
         public const string Method_ZXLevelState_AvailWorkers   = "#=z1GVm3ppkkMeC";
         public const string Method_ZXLevelState_AvailEnergy    = "#=zkqSYgCu1efoDkViT0w==";
         public const string Method_ZXLevelState_GetDXLevel     = "#=zOHDY2QTzgRSB";
+        public const string Method_ZXLevelState_ConsumeBonus   = "#=z0b0u0bUCzEHXjLBj5A==";
+        public const string Method_ZXLevelState_GetBonusCount  = "#=zBoOUVPKgrQd5bNC4RA==";
 
         // ====================================================================
         // 9. GUI & MessageBox Helpers

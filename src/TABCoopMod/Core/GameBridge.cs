@@ -60,6 +60,17 @@ namespace TABCoopMod.Core
         private static MethodInfo _methodIsVisibleCmd;
         private static MethodInfo _methodGetResourcesCost;
         private static Type _typeCreateEntityCommand;
+        private static Type _typeStructure;
+        private static Type _typeEntityBonusCreation;
+        private static Type _typeExtractFromSlot;
+        private static PropertyInfo _propBonusCmdNSlot;
+        private static PropertyInfo _propBonusCmdTemplate;
+        private static PropertyInfo _propBonusCmdEntity;
+        private static PropertyInfo _propExtractCmdNSlot;
+        private static PropertyInfo _propCmdableAvailableCmds;
+        private static FieldInfo _fieldZXGameAllCommands;
+        private static MethodInfo _methodLevelStateConsumeBonus;
+        private static MethodInfo _methodLevelSysClearPendingMode;
         private static MethodInfo _methodGetTemplateFromEntityType;
         private static MethodInfo _methodEntityCanPlaceAtCell;
         private static MethodInfo _methodEntityUpdateCellPosition;
@@ -241,6 +252,17 @@ namespace TABCoopMod.Core
                 _methodGetResourcesCost = AccessTools.Method(typeof(ZXCommand), ObfuscatedSymbols.Method_ZXCommand_GetResourcesCost,
                     new[] { typeof(ZXEntity) });
                 _typeCreateEntityCommand = GameAssembly.GetType("ZX.Commands.CreateEntityCommand");
+                _typeStructure = GameAssembly.GetType("ZX.Entities.Structure");
+                _typeEntityBonusCreation = GameAssembly.GetType("ZX.Commands.EntityBonusCreation");
+                _typeExtractFromSlot = GameAssembly.GetType("ZX.Commands.ExtractFromUnitHolderSlot");
+                _propBonusCmdNSlot = _typeEntityBonusCreation?.GetProperty("NSlot", BindingFlags.Public | BindingFlags.Instance);
+                _propBonusCmdTemplate = _typeEntityBonusCreation?.GetProperty("EntityTemplate", BindingFlags.Public | BindingFlags.Instance);
+                _propBonusCmdEntity = _typeEntityBonusCreation?.GetProperty("Entity", BindingFlags.Public | BindingFlags.Instance);
+                _propExtractCmdNSlot = _typeExtractFromSlot?.GetProperty("NSlot", BindingFlags.Public | BindingFlags.Instance);
+                _propCmdableAvailableCmds = typeof(CCommandable).GetProperty("AvailableCommands", BindingFlags.Public | BindingFlags.Instance);
+                _fieldZXGameAllCommands = TypeZXGame?.GetField(ObfuscatedSymbols.Field_ZXGame_AllCommandsList, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                _methodLevelStateConsumeBonus = AccessTools.Method(typeof(ZXLevelState), ObfuscatedSymbols.Method_ZXLevelState_ConsumeBonus, new[] { typeof(DXEntityTemplate) });
+                _methodLevelSysClearPendingMode = AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_ClearPendingBuildMode, Type.EmptyTypes);
                 _methodPlaceBuilding = AccessTools.Method(typeof(Build), ObfuscatedSymbols.Method_Build_PlaceBuilding,
                     new[] { typeof(ZXEntity), typeof(ZXCommandTarget), typeof(Type), typeof(bool), typeof(bool), typeof(DXEntityTemplate) });
                 _methodGetTemplateFromEntityType = AccessTools.Method(TypeZXGame, "GetTemplateFromEntityType", new[] { typeof(Type) });
@@ -256,6 +278,10 @@ namespace TABCoopMod.Core
                 Check(_methodIsVisibleCmd, "ZXCommand.IsVisible");
                 Check(_methodGetResourcesCost, "ZXCommand.GetResourcesCost");
                 Check(_typeCreateEntityCommand, "Type ZX.Commands.CreateEntityCommand");
+                Check(_typeStructure, "Type ZX.Entities.Structure");
+                Check(_typeEntityBonusCreation, "Type ZX.Commands.EntityBonusCreation");
+                Check(_typeExtractFromSlot, "Type ZX.Commands.ExtractFromUnitHolderSlot");
+                Check(_methodLevelStateConsumeBonus, "ZXLevelState.ConsumeBonus");
                 Check(_methodPlaceBuilding, "Build.PlaceBuilding");
                 Check(_methodGetTemplateFromEntityType, "ZXGame.GetTemplateFromEntityType");
                 Check(_methodEntityCanPlaceAtCell, "ZXEntity.CanPlaceAtCell");
@@ -2015,17 +2041,193 @@ namespace TABCoopMod.Core
             return false;
         }
 
+        /// <summary>
+        /// Inspects a ZX.Commands.EntityBonusCreation command and extracts its slot, entity type,
+        /// whether the rewarded entity is a Structure (placed on map) vs Unit (spawned at CommandCenter),
+        /// and its DXEntityTemplate.
+        /// </summary>
+        public static bool TryGetEntityBonusInfo(object command, out int slot, out Type entityType, out bool isStructure, out DXEntityTemplate template)
+        {
+            slot = 0;
+            entityType = null;
+            isStructure = false;
+            template = null;
+            if (command == null || _typeEntityBonusCreation == null || !_typeEntityBonusCreation.IsInstanceOfType(command))
+                return false;
+
+            try
+            {
+                if (_propBonusCmdNSlot != null)
+                    slot = Convert.ToInt32(_propBonusCmdNSlot.GetValue(command));
+                template = _propBonusCmdTemplate?.GetValue(command) as DXEntityTemplate;
+                DXEntity entity = template?.Entity ?? (_propBonusCmdEntity?.GetValue(command) as DXEntity);
+                if (entity != null)
+                {
+                    entityType = entity.GetType();
+                    isStructure = _typeStructure != null && _typeStructure.IsInstanceOfType(entity);
+                }
+            }
+            catch { }
+            return true;
+        }
+
+        public static bool TryGetExtractSlotInfo(object command, out int slot)
+        {
+            slot = 0;
+            if (command == null || _typeExtractFromSlot == null || !_typeExtractFromSlot.IsInstanceOfType(command))
+                return false;
+            try
+            {
+                if (_propExtractCmdNSlot != null)
+                    slot = Convert.ToInt32(_propExtractCmdNSlot.GetValue(command));
+            }
+            catch { }
+            return true;
+        }
+
         public static bool IsBuildOrBonusCommand(object command, out bool isBonus)
         {
             isBonus = false;
             if (command == null) return false;
-            string name = command.GetType().Name;
-            if (string.Equals(name, "EntityBonusCreation", StringComparison.Ordinal))
+            if (TryGetEntityBonusInfo(command, out _, out Type entityType, out bool isStructure, out _))
             {
-                isBonus = true;
-                return true;
+                if (isStructure && entityType != null)
+                {
+                    isBonus = true;
+                    return true;
+                }
+                // Bonus Units (TargetType.None) spawn next to the CommandCenter; they are NOT placed via PlaceBuilding.
+                return false;
             }
-            return string.Equals(name, "Build", StringComparison.Ordinal);
+            return string.Equals(command.GetType().Name, "Build", StringComparison.Ordinal);
+        }
+
+        public static int GetBonusEntityCount(Type entityType, out DXEntityTemplate matchedTemplate)
+        {
+            matchedTemplate = null;
+            if (entityType == null) return 0;
+            object ls = CurrentLevelState;
+            var bonusDict = ls != null ? GetLevelProperty("BonusEntityTemplates")?.GetValue(ls) as Dictionary<ulong, int> : null;
+            if (bonusDict == null || bonusDict.Count == 0) return 0;
+
+            DXEntityTemplate directTpl = GetEntityTemplateByType(entityType);
+            if (directTpl != null && bonusDict.TryGetValue(directTpl.ID, out int directCount) && directCount > 0)
+            {
+                matchedTemplate = directTpl;
+                return directCount;
+            }
+
+            var proj = DXProject.Current;
+            if (proj == null) return 0;
+            foreach (var kv in bonusDict)
+            {
+                if (kv.Value <= 0) continue;
+                var tpl = proj.EntityTemplateFromID(kv.Key);
+                if (tpl?.Entity != null && tpl.Entity.GetType() == entityType)
+                {
+                    matchedTemplate = tpl;
+                    return kv.Value;
+                }
+            }
+            return 0;
+        }
+
+        public static void ConsumeBonusEntityByType(Type entityType)
+        {
+            if (entityType == null || _methodLevelStateConsumeBonus == null) return;
+            object ls = CurrentLevelState;
+            if (ls == null) return;
+            if (GetBonusEntityCount(entityType, out DXEntityTemplate tpl) > 0 && tpl != null)
+            {
+                try { _methodLevelStateConsumeBonus.Invoke(ls, new object[] { tpl }); }
+                catch (Exception ex) { ModLogger.Warn($"[GameBridge] ConsumeBonusEntityByType({entityType.Name}) failed: {ex.Message}"); }
+            }
+        }
+
+        public static void CancelPendingBonusCommandIfType(Type buildingType)
+        {
+            if (buildingType == null) return;
+            object pending = GetPendingCommandOnLevelSys();
+            if (pending == null) return;
+            if (!TryGetEntityBonusInfo(pending, out _, out Type pendingEntityType, out _, out _))
+                return;
+            // After ConsumeBonusEntityByType removes the last charge, pendingEntityType may already be null or still point at a different shifted slot.
+            if (pendingEntityType == null || pendingEntityType == buildingType)
+            {
+                object levelSys = LevelSystemInstance;
+                if (levelSys != null && _methodLevelSysClearPendingMode != null)
+                {
+                    try { _methodLevelSysClearPendingMode.Invoke(levelSys, null); } catch { }
+                }
+            }
+        }
+
+        public static IList GetAvailableCommandsForEntity(object entity) => GetAvailableCommandsForExecutor(entity);
+
+        private static IList GetAvailableCommandsForExecutor(object executor)
+        {
+            if (executor == null || _propCmdableAvailableCmds == null) return null;
+            object cmdable = GetCommandableObject(executor);
+            if (cmdable == null) return null;
+            try { return _propCmdableAvailableCmds.GetValue(cmdable, null) as IList; }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Resolves the command object for ExecuteSingleOrBatchCommand replay.
+        /// Handles slot-indexed commands (EntityBonusCreation and ExtractFromUnitHolderSlot) whose base
+        /// ZXCommand.ID collides across all slots, matching bonus commands by rewarded entity type name.
+        /// </summary>
+        public static object ResolveReplayCommand(int commandId, string typeOrSlotTag, byte slotIndex, object executor, out bool isSlotSensitive)
+        {
+            isSlotSensitive = !string.IsNullOrEmpty(typeOrSlotTag);
+            if (!isSlotSensitive)
+                return GetCommandById(commandId);
+
+            if (string.Equals(typeOrSlotTag, "ZX.Commands.ExtractFromUnitHolderSlot", StringComparison.Ordinal))
+            {
+                IList avail = GetAvailableCommandsForExecutor(executor);
+                if (avail != null)
+                {
+                    foreach (object c in avail)
+                    {
+                        if (TryGetExtractSlotInfo(c, out int s) && s == slotIndex)
+                            return c;
+                    }
+                }
+                object game = ZXGameInstance;
+                var allCmds = game != null ? _fieldZXGameAllCommands?.GetValue(game) as IList : null;
+                if (allCmds != null)
+                {
+                    foreach (object c in allCmds)
+                    {
+                        if (TryGetExtractSlotInfo(c, out int s) && s == slotIndex)
+                            return c;
+                    }
+                }
+                return null;
+            }
+
+            // EntityBonusCreation for a Unit (or any non-structure bonus): CommandCenter.#=z0rkMLsM_Q666() populates slots 1..12.
+            IList ccAvail = GetAvailableCommandsForExecutor(executor)
+                ?? GetAvailableCommandsForExecutor(GetCommandCenterEntity());
+            if (ccAvail == null) return null;
+
+            object fallbackMatch = null;
+            foreach (object c in ccAvail)
+            {
+                if (!TryGetEntityBonusInfo(c, out int slot, out Type entityType, out bool isStructure, out _))
+                    continue;
+                if (isStructure || entityType == null)
+                    continue;
+                if (!string.Equals(entityType.FullName, typeOrSlotTag, StringComparison.Ordinal))
+                    continue;
+                if (slot == slotIndex)
+                    return c;
+                if (fallbackMatch == null)
+                    fallbackMatch = c;
+            }
+            return fallbackMatch;
         }
 
         public static bool CanExecuteCommandOnEntity(object command, object executor)
@@ -2330,7 +2532,7 @@ namespace TABCoopMod.Core
         // ====================================================================
         private static Type _typeZXMayor;
         private static FieldInfo _mayorRegistryField;
-        private static PropertyInfo _mayorIdProp, _mayorNameProp, _mayorLevelProp;
+        private static PropertyInfo _mayorIdProp, _mayorNameProp, _mayorLevelProp, _mayorBonusEntitiesProp;
         private static MethodInfo _mayorApplyMethod;
         private static MethodInfo _levelStateIsChoosingMayorMethod;
         private static MethodInfo _levelStateSetChoosingMayorMethod;
@@ -2349,6 +2551,7 @@ namespace TABCoopMod.Core
                 _mayorIdProp = _typeZXMayor.GetProperty("ID", IF);
                 _mayorNameProp = _typeZXMayor.GetProperty("Name", IF);
                 _mayorLevelProp = _typeZXMayor.GetProperty("Level", IF);
+                _mayorBonusEntitiesProp = _typeZXMayor.GetProperty("IDBonusEntities", IF);
                 _mayorApplyMethod = AccessTools.Method(_typeZXMayor, ObfuscatedSymbols.Method_ZXMayor_Apply, new[] { LevelStateType });
                 if (_mayorApplyMethod == null)
                 {
@@ -2389,7 +2592,8 @@ namespace TABCoopMod.Core
                 {
                     ["id"] = _mayorIdProp != null ? Convert.ToString(_mayorIdProp.GetValue(mayor)) : Convert.ToString(kv.Key),
                     ["name"] = _mayorNameProp != null ? Convert.ToString(_mayorNameProp.GetValue(mayor)) : "?",
-                    ["level"] = lvl
+                    ["level"] = lvl,
+                    ["bonusEntities"] = _mayorBonusEntitiesProp != null ? (Convert.ToString(_mayorBonusEntitiesProp.GetValue(mayor)) ?? string.Empty) : string.Empty
                 });
             }
             return result;
