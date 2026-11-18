@@ -192,6 +192,9 @@ namespace TABCoopMod.Networking
         public Action<byte, bool> PeerDirectCutoverNeeded;
         public Action<byte, List<FallbackMessage>> PeerFallbackTriggered;
 
+        private int _stunRefreshInFlight;
+        private IPEndPoint[] _cachedStunEndpoints;
+
         public ulong SessionToken => _sessionToken;
         public int LocalUdpPort => _localUdpPort;
 
@@ -599,31 +602,7 @@ namespace TABCoopMod.Networking
             try
             {
                 // 1. Fire STUN requests in parallel from our exact bound UDP socket
-                var stunEndpoints = new List<IPEndPoint>();
-                foreach (string hostPort in StunHosts)
-                {
-                    if (_disposed) return;
-                    try
-                    {
-                        var parts = hostPort.Split(':');
-                        int port = int.Parse(parts[1]);
-                        IPAddress[] ips = Dns.GetHostAddresses(parts[0]);
-                        foreach (var ip in ips)
-                        {
-                            if (ip.AddressFamily == AddressFamily.InterNetwork)
-                            {
-                                stunEndpoints.Add(new IPEndPoint(ip, port));
-                                break;
-                            }
-                        }
-                    }
-                    catch { }
-                }
-
-                foreach (var ep in stunEndpoints)
-                {
-                    SendStunBindingRequest(ep);
-                }
+                SendStunProbesToServers();
 
                 // 2. Best-effort UPnP IGD discovery & port mapping (400ms timeout)
                 if (TryUpnpMapUdpPort(_localUdpPort, out IPAddress extIp) && extIp != null)
@@ -644,6 +623,76 @@ namespace TABCoopMod.Networking
                 NotifyLocalCandidatesUpdated();
         }
 
+        private void SendStunProbesToServers()
+        {
+            var stunEndpoints = _cachedStunEndpoints;
+            if (stunEndpoints == null || stunEndpoints.Length == 0)
+            {
+                var list = new List<IPEndPoint>();
+                foreach (string hostPort in StunHosts)
+                {
+                    if (_disposed) return;
+                    try
+                    {
+                        var parts = hostPort.Split(':');
+                        int port = int.Parse(parts[1]);
+                        IPAddress[] ips = Dns.GetHostAddresses(parts[0]);
+                        foreach (var ip in ips)
+                        {
+                            if (ip.AddressFamily == AddressFamily.InterNetwork)
+                            {
+                                list.Add(new IPEndPoint(ip, port));
+                                break;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+                stunEndpoints = list.ToArray();
+                _cachedStunEndpoints = stunEndpoints;
+            }
+
+            for (int i = 0; i < stunEndpoints.Length; i++)
+            {
+                SendStunBindingRequest(stunEndpoints[i]);
+            }
+        }
+
+        /// <summary>
+        /// Refreshes external STUN NAT bindings (useful when idle in CGNAT lobby or on new peer handshake).
+        /// Always triggers STUN probes; notifies LocalCandidatesUpdated if the mapped port changed.
+        /// </summary>
+        public void RefreshExternalCandidatesAsync()
+        {
+            if (_disposed || _udpSocket == null) return;
+            if (Interlocked.CompareExchange(ref _stunRefreshInFlight, 1, 0) != 0) return;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    SendStunProbesToServers();
+                }
+                catch { }
+                finally
+                {
+                    Interlocked.Exchange(ref _stunRefreshInFlight, 0);
+                }
+            });
+        }
+
+        public bool HasUnverifiedPeers()
+        {
+            lock (_stateLock)
+            {
+                foreach (var p in _peers.Values)
+                {
+                    if (!p.TxEnabled || !p.VerifiedBidirectional)
+                        return true;
+                }
+                return false;
+            }
+        }
+
         private bool AddExternalCandidate(DirectCandidateKind kind, IPAddress ip, int port)
         {
             if (ip == null || IPAddress.IsLoopback(ip) || port <= 0 || port > 65535) return false;
@@ -651,10 +700,26 @@ namespace TABCoopMod.Networking
             bool changed = false;
             lock (_stateLock)
             {
-                for (int i = 0; i < _localCandidates.Count; i++)
+                if (kind == DirectCandidateKind.StunIPv4)
                 {
-                    if (_localCandidates[i].Address.Equals(ip) && _localCandidates[i].Port == port)
-                        return false;
+                    // Replace stale StunIPv4 entry for same external IP if CGNAT reassigned external port.
+                    for (int i = _localCandidates.Count - 1; i >= 0; i--)
+                    {
+                        var ex = _localCandidates[i];
+                        if (ex.Kind == DirectCandidateKind.StunIPv4 && ex.Address.Equals(ip))
+                        {
+                            if (ex.Port == port) return false;
+                            _localCandidates.RemoveAt(i);
+                        }
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < _localCandidates.Count; i++)
+                    {
+                        if (_localCandidates[i].Address.Equals(ip) && _localCandidates[i].Port == port)
+                            return false;
+                    }
                 }
                 _localCandidates.Add(new DirectEndpointCandidate { Kind = kind, Address = ip, Port = port });
                 _localCandidates.Sort((a, b) => GetPriorityScore(a.Kind).CompareTo(GetPriorityScore(b.Kind)));

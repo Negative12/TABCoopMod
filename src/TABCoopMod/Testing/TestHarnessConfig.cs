@@ -55,6 +55,12 @@ namespace TABCoopMod.Testing
         /// <summary>Physics step-end quantization grid inverse step (e.g. 256 => 1/256 cell). 0 disables.</summary>
         public static int PhysicsQuantScale { get; private set; } = DefaultPhysicsQuantScale;
 
+        /// <summary>Optional per-frame floor in ms (TABCOOP_SIM_MIN_FRAME_MS) to simulate lower FPS peers in tests.</summary>
+        public static int SimMinFrameMs { get; private set; }
+
+        /// <summary>Optional per-tick delay in ms (TABCOOP_SIM_EXTRA_TICK_MS) to simulate slower CPU tick rate in tests.</summary>
+        public static int SimExtraTickMs { get; private set; }
+
         /// <summary>True when the MCP control server is enabled (TABCOOP_CONTROL_PORT set).</summary>
         public static bool ControlEnabled => ControlPort > 0;
 
@@ -88,6 +94,8 @@ namespace TABCoopMod.Testing
             ResyncCooldownMs = ParseInt(Env("TABCOOP_RESYNC_COOLDOWN_MS"), -1);
             DisableAsyncTick = Env("TABCOOP_DISABLE_ASYNC_TICK") == "1";
             PhysicsQuantScale = Math.Max(0, ParseInt(Env("TABCOOP_PHYSICS_QUANT"), DefaultPhysicsQuantScale));
+            SimMinFrameMs = Math.Max(0, ParseInt(Env("TABCOOP_SIM_MIN_FRAME_MS"), 0));
+            SimExtraTickMs = Math.Max(0, ParseInt(Env("TABCOOP_SIM_EXTRA_TICK_MS"), 0));
 
             string logDir = null;
             try { logDir = Path.GetDirectoryName(ModLogger.LogFilePath); } catch { }

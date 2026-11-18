@@ -497,6 +497,7 @@ namespace TABCoopMod.Networking
                 }
 
                 CheckExpiredCutoverBarriers();
+                PumpDirectFastPathRetry();
 
                 if (_direct != null)
                 {
@@ -611,6 +612,7 @@ namespace TABCoopMod.Networking
                     ModLogger.Info($"[SteamP2PTransport] Accepted Steam peer {clientName} ({remoteSteamId.m_SteamID}) -> PlayerId={assignedId}");
 
                 _direct?.SetLocalPlayerId(LocalPlayerId);
+                _direct?.RefreshExternalCandidatesAsync();
                 SendDirectCandidatesToPeer(assignedId);
                 OnPeerConnected?.Invoke(peer);
                 if (!versionMatched)
@@ -645,6 +647,7 @@ namespace TABCoopMod.Networking
                     hostVer = "<=0.1.1 (未知旧版本)";
 
                 _direct?.SetLocalPlayerId(LocalPlayerId);
+                _direct?.RefreshExternalCandidatesAsync();
                 SendDirectCandidatesToPeer(1);
                 ModLogger.Info($"[SteamP2PTransport] Joined Host Lobby! Assigned LocalPlayerId={LocalPlayerId}, HostVer={hostVer}");
                 OnPeerConnected?.Invoke(_peers.Find(p => p.PlayerId == LocalPlayerId));
@@ -721,6 +724,8 @@ namespace TABCoopMod.Networking
         {
             _cutoverPendingTs.Clear();
             _cutoverHoldQueue.Clear();
+            _nextDirectRetryTs = 0;
+            _nextLobbyStunKeepaliveTs = 0;
             while (_mainThreadActions.TryDequeue(out _)) { }
             try { _direct?.Dispose(); } catch { }
             _direct = null;
@@ -784,6 +789,44 @@ namespace TABCoopMod.Networking
                 }
             }
             catch { }
+        }
+
+        private long _nextDirectRetryTs;
+        private long _nextLobbyStunKeepaliveTs;
+
+        private void PumpDirectFastPathRetry()
+        {
+            if (_direct == null || !IsActive) return;
+            long nowTs = Stopwatch.GetTimestamp();
+            double swToMs = 1000.0 / Stopwatch.Frequency;
+
+            bool hasRemotePeers = _playerToSteamId.Count > 1;
+            if (!hasRemotePeers)
+            {
+                // Keep CGNAT STUN UDP binding warm while waiting alone in Lobby.
+                if (_nextLobbyStunKeepaliveTs == 0 || (nowTs - _nextLobbyStunKeepaliveTs) * swToMs >= 20000.0)
+                {
+                    _nextLobbyStunKeepaliveTs = nowTs;
+                    _direct.RefreshExternalCandidatesAsync();
+                }
+                return;
+            }
+
+            if (_direct.HasUnverifiedPeers()
+                && (_nextDirectRetryTs == 0 || (nowTs - _nextDirectRetryTs) * swToMs >= 3000.0))
+            {
+                _nextDirectRetryTs = nowTs;
+                _direct.RefreshExternalCandidatesAsync();
+                var cands = _direct.GetLocalCandidatesSnapshot();
+                if (cands != null && cands.Count > 0)
+                {
+                    foreach (var kv in _playerToSteamId)
+                    {
+                        if (kv.Key != LocalPlayerId && kv.Value.IsValid() && !_direct.IsPeerDirectActive(kv.Key))
+                            SendDirectCandidatesPayload(kv.Value, cands, _direct.SessionToken);
+                    }
+                }
+            }
         }
 
         private void SendDirectCandidatesToPeer(byte targetPlayerId)

@@ -222,7 +222,7 @@ namespace TABCoopMod.Commands
                             if (!TABCoopMod.Sync.PauseSyncController.CountdownActive)
                             {
                                 // durationMs=0 avoids stalled fade-in clips while Paused is true.
-                                GameBridge.ShowTopBanner(
+                                ShowBannerOutsideDet(
                                     netCmd.TargetPausedState ? $"Player {netCmd.PlayerId} Paused Game" : $"Player {netCmd.PlayerId} Resumed Game",
                                     Color.Gold, netCmd.TargetPausedState ? 0 : 1500);
                             }
@@ -233,7 +233,7 @@ namespace TABCoopMod.Commands
                         if (DXGame.Current != null)
                         {
                             DXGame.Current.GameSpeed = Math.Max(0.0, Math.Min(20.0, (double)netCmd.GameSpeed));
-                            GameBridge.ShowTopBanner($"Player {netCmd.PlayerId} set speed {DXGame.Current.GameSpeed:0.##}x", Color.Gold, 1200);
+                            ShowBannerOutsideDet($"Player {netCmd.PlayerId} set speed {DXGame.Current.GameSpeed:0.##}x", Color.Gold, 1200);
                         }
                         break;
 
@@ -241,7 +241,7 @@ namespace TABCoopMod.Commands
                         if (!string.IsNullOrEmpty(netCmd.MayorId) && GameBridge.ApplyMayor(netCmd.MayorId))
                         {
                             string mayorName = GameBridge.GetMayorNameById(netCmd.MayorId);
-                            GameBridge.ShowTopBanner(
+                            ShowBannerOutsideDet(
                                 string.IsNullOrEmpty(mayorName)
                                     ? $"Player {netCmd.PlayerId} selected a mayor"
                                     : $"Player {netCmd.PlayerId} selected mayor: {mayorName}",
@@ -442,6 +442,22 @@ namespace TABCoopMod.Commands
             {
                 object cmdComp = GameBridge.GetCommandableObject(DXGame.Current?.GetEntityByID(id));
                 if (cmdComp != null) GameBridge.CancelQueueSlotObject(cmdComp, netCmd.QueueSlotIndex);
+            }
+        }
+
+        private static void ShowBannerOutsideDet(string message, Color color, int durationMs)
+        {
+            bool prevDet = LockstepClock.InDeterministicContext;
+            LockstepClock.InDeterministicContext = false;
+            LockstepClock.EnterVisualVfxContext();
+            try
+            {
+                GameBridge.ShowTopBanner(message, color, durationMs);
+            }
+            finally
+            {
+                LockstepClock.ExitVisualVfxContext();
+                LockstepClock.InDeterministicContext = prevDet;
             }
         }
 

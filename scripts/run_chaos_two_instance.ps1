@@ -16,7 +16,11 @@ param(
     [string]$Chaos = "latency=120;jitter=30;loss=0.02;disconnect=4000-5000;seed=42",
     [string]$GameDir = "",
     [int]$TimeoutSeconds = 240,
-    [int]$HoldSeconds = 0
+    [int]$HoldSeconds = 0,
+    [int]$ClientMinFrameMs = 0,
+    [int]$ClientExtraTickMs = 0,
+    [int]$HostMinFrameMs = 0,
+    [int]$HostExtraTickMs = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,7 +49,9 @@ $env:TABCOOP_ROLE = "host"
 $env:TABCOOP_LOG_NAME = "TABCoopMod.host.log"
 $env:TABCOOP_AUTO_LOAD_SAVE = $SavePath
 $env:TABCOOP_REPLAY_SAVE = ""       # verifier idle; we only want the snapshot flow
-Write-Host "[chaos] launching HOST..."
+$env:TABCOOP_SIM_MIN_FRAME_MS = "$HostMinFrameMs"
+$env:TABCOOP_SIM_EXTRA_TICK_MS = "$HostExtraTickMs"
+Write-Host "[chaos] launching HOST (minFrame=${HostMinFrameMs}ms, extraTick=${HostExtraTickMs}ms)..."
 $hostProc = Start-Process -FilePath $exe -WorkingDirectory $GameDir -PassThru
 
 Start-Sleep -Seconds 2
@@ -56,7 +62,9 @@ $env:TABCOOP_ROLE = "client"
 $env:TABCOOP_LOG_NAME = "TABCoopMod.client.log"
 $env:TABCOOP_AUTO_LOAD_SAVE = ""
 $env:TABCOOP_REPLAY_SAVE = ""
-Write-Host "[chaos] launching CLIENT..."
+$env:TABCOOP_SIM_MIN_FRAME_MS = "$ClientMinFrameMs"
+$env:TABCOOP_SIM_EXTRA_TICK_MS = "$ClientExtraTickMs"
+Write-Host "[chaos] launching CLIENT (minFrame=${ClientMinFrameMs}ms, extraTick=${ClientExtraTickMs}ms)..."
 $clientProc = Start-Process -FilePath $exe -WorkingDirectory $GameDir -PassThru
 
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)

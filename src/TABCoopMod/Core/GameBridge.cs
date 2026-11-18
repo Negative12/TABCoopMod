@@ -2354,13 +2354,26 @@ namespace TABCoopMod.Core
 
         public static void FlushStartFramePostMethods()
         {
+            var game = DXGame.Current;
+            var q = game?.PostMethods_OnStartFrame;
+            if (q == null) return;
+
+            bool prevRendering = game.RenderingFrame;
+            bool prevDet = Determinism.LockstepClock.InDeterministicContext;
+            game.RenderingFrame = false;
+            Determinism.LockstepClock.InDeterministicContext = false;
             try
             {
-                DXGame.Current?.PostMethods_OnStartFrame?.ExecuteAll();
+                q.ExecuteAll();
             }
             catch (Exception ex)
             {
                 ModLogger.Warn($"[GameBridge] FlushStartFramePostMethods failed: {ex.Message}");
+            }
+            finally
+            {
+                Determinism.LockstepClock.InDeterministicContext = prevDet;
+                game.RenderingFrame = prevRendering;
             }
         }
 

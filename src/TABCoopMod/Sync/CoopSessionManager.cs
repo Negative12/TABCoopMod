@@ -169,8 +169,8 @@ namespace TABCoopMod.Sync
         private const double RttProbeIntervalMs = 500.0;
         private const double RttStalePeerMs = 5000.0;
         private const double ClientLagStaleMs = 3500.0;
-        private const int HostBackpressureSlowLagTicks = 16;
-        private const int HostBackpressureHoldLagTicks = 45;
+        private const int HostBackpressureSlowLagTicks = 5;
+        private const int HostBackpressureHoldLagTicks = 9;
         private const double DelayAdjustCooldownMs = 1500.0;
         private static int _gateLastObservedTick = -1;
         private static double _gateWaitStartTicks = -1.0;
@@ -222,6 +222,7 @@ namespace TABCoopMod.Sync
             public StateHasher.LevelStateSnapshotDigest Digest;
             public string Summary;
             public List<OwnedUnitPosSample> OwnedUnits;
+            public long SyncedIdCounter;
         }
 
         private struct UnitOwnershipEntry
@@ -1738,6 +1739,7 @@ namespace TABCoopMod.Sync
                 var camArea = DXScene.Current.CameraArea;
                 var mouseWorldPos = GetLocalMouseWorldPos();
 
+                int broadcastTick = DXGame.Current?.IAIterationInt ?? 0;
                 Transport.Broadcast(SendChannel.UnreliableSequenced, PacketType.AllyCursorAndCamera, w =>
                 {
                     w.Write(Transport.LocalPlayerId);
@@ -1747,6 +1749,7 @@ namespace TABCoopMod.Sync
                     w.Write(camArea.Y);
                     w.Write(camArea.Width);
                     w.Write(camArea.Height);
+                    w.Write(broadcastTick);
                 });
             }
 
@@ -1859,10 +1862,12 @@ namespace TABCoopMod.Sync
 
             if (toSend != null)
             {
+                int clientTick = DXGame.Current?.IAIterationInt ?? 0;
                 Transport.SendToPeer(1, SendChannel.ReliableCommand, PacketType.ClientInputReport, w =>
                 {
                     w.Write((ushort)toSend.Count);
                     foreach (var c in toSend) c.WriteTo(w);
+                    w.Write(clientTick);
                 });
             }
         }
@@ -1995,14 +2000,22 @@ namespace TABCoopMod.Sync
                 return;
             }
 
+            // When background DirectFastPath UDP is verified bidirectional, prefer its wire RTT for
+            // InputDelayTicks sizing so slower Client render frames never inflate InputDelayTicks 1 -> 2..3.
+            double effectiveDelayRtt = maxRtt;
+            if (Transport is ITransportDiagnostics diag && diag.ActiveDirectRttMs > 0.0)
+            {
+                effectiveDelayRtt = diag.ActiveDirectRttMs;
+            }
+
             CurrentSmoothedRttMs = maxRtt;
 
             int cur = InputDelayTicks;
             int desired = cur;
-            if (maxRtt > 135.0) desired = 4;
-            else if (maxRtt > 92.0) desired = (cur == 4 && maxRtt >= 115.0) ? 4 : 3;
-            else if (maxRtt > 52.0) desired = (cur >= 3 && maxRtt >= 75.0) ? 3 : 2;
-            else if (cur == 2 && maxRtt >= 44.0) desired = 2;
+            if (effectiveDelayRtt > 145.0) desired = 4;
+            else if (effectiveDelayRtt > 100.0) desired = (cur == 4 && effectiveDelayRtt >= 122.0) ? 4 : 3;
+            else if (effectiveDelayRtt > 64.0) desired = (cur >= 3 && effectiveDelayRtt >= 82.0) ? 3 : 2;
+            else if (cur == 2 && effectiveDelayRtt >= 50.0) desired = 2;
             else desired = 1;
 
             desired = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, desired));
@@ -2012,7 +2025,7 @@ namespace TABCoopMod.Sync
 
             _lastDelayAdjustTicks = now;
             InputDelayTicks = desired;
-            ModLogger.Info($"[AdaptiveDelay] InputDelayTicks {cur} -> {desired} (smoothedRtt={maxRtt:F1}ms)");
+            ModLogger.Info($"[AdaptiveDelay] InputDelayTicks {cur} -> {desired} (delayRtt={effectiveDelayRtt:F1}ms, mainRtt={maxRtt:F1}ms)");
         }
 
         private static void UpdatePeerSimTick(byte peerId, int simTick)
@@ -2078,10 +2091,15 @@ namespace TABCoopMod.Sync
             {
                 maxTicks = 0;
             }
-            else if (maxLagTicks >= HostBackpressureSlowLagTicks)
+            else if (maxLagTicks >= 6)
             {
                 maxTicks = 1;
-                paceMultiplier = 1.35;
+                paceMultiplier = 1.38;
+            }
+            else if (maxLagTicks >= HostBackpressureSlowLagTicks)
+            {
+                maxTicks = 2;
+                paceMultiplier = 1.15;
             }
         }
 
@@ -2187,9 +2205,10 @@ namespace TABCoopMod.Sync
                 $"(entities={digest.EntityCount} proj={digest.ProjectileCount} queued={digest.QueuedOrderCount} " +
                 $"res={digest.Gold}/{digest.Wood}/{digest.Stone}/{digest.Iron}/{digest.Oil} time={digest.GameTimeMs})";
 
+            long idCounter = LockstepClock.CurrentSyncedEntityIdCounter;
             if (Transport.IsHost)
             {
-                _hostTickDigests[digest.SimTick] = new TickDigestRecord { Digest = digest, Summary = digestSummary };
+                _hostTickDigests[digest.SimTick] = new TickDigestRecord { Digest = digest, Summary = digestSummary, SyncedIdCounter = idCounter };
                 VerifyTickChecksum(digest.SimTick);
             }
             else
@@ -2197,7 +2216,7 @@ namespace TABCoopMod.Sync
                 List<OwnedUnitPosSample> ownedUnits = CollectClientOwnedActiveUnits(digest.SimTick, dynamicPositions);
                 Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.StateChecksumReport, w =>
                 {
-                    WriteDigestReport(w, in digest, digestSummary, ownedUnits);
+                    WriteDigestReport(w, in digest, digestSummary, ownedUnits, idCounter);
                 });
             }
         }
@@ -2383,6 +2402,11 @@ namespace TABCoopMod.Sync
                             _hostTurnBuffer.Add(cmd);
                         }
                     }
+                    if (r.BaseStream.Position + 4 <= r.BaseStream.Length)
+                    {
+                        int clientTick = r.ReadInt32();
+                        UpdatePeerSimTick(senderId, clientTick);
+                    }
                     break;
                 }
 
@@ -2557,6 +2581,12 @@ namespace TABCoopMod.Sync
                     };
                     AllyStates[pid] = state;
 
+                    if (Transport.IsHost && r.BaseStream.Position + 4 <= r.BaseStream.Length)
+                    {
+                        int peerTick = r.ReadInt32();
+                        UpdatePeerSimTick(senderId, peerTick);
+                    }
+
                     // If Host, relay to other clients in 3-player session
                     if (Transport.IsHost && Transport.ConnectedPeers.Count > 2)
                     {
@@ -2634,9 +2664,15 @@ namespace TABCoopMod.Sync
 
                     double sample = Math.Min(rttMs, 1500.0);
                     if (_peerSmoothedRttMs.TryGetValue(senderId, out double prev))
-                        _peerSmoothedRttMs[senderId] = 0.70 * prev + 0.30 * sample;
+                    {
+                        // Bias toward faster samples so occasional slow Client render frames don't inflate InputDelayTicks.
+                        double alpha = sample <= prev ? 0.40 : 0.14;
+                        _peerSmoothedRttMs[senderId] = (1.0 - alpha) * prev + alpha * sample;
+                    }
                     else
+                    {
                         _peerSmoothedRttMs[senderId] = sample;
+                    }
 
                     _peerRttSampleTicks[senderId] = DXHelper_Environment.Ticks;
                     UpdateAdaptiveInputDelay();
@@ -2657,7 +2693,7 @@ namespace TABCoopMod.Sync
             }
         }
 
-        private static void WriteDigestReport(BinaryWriter w, in StateHasher.LevelStateSnapshotDigest d, string summary, List<OwnedUnitPosSample> ownedUnits = null)
+        private static void WriteDigestReport(BinaryWriter w, in StateHasher.LevelStateSnapshotDigest d, string summary, List<OwnedUnitPosSample> ownedUnits = null, long idCounter = 0L)
         {
             w.Write(d.SimTick);
             w.Write(d.GameTimeMs);
@@ -2704,6 +2740,7 @@ namespace TABCoopMod.Sync
                 w.Write(ownedUnits[i].X);
                 w.Write(ownedUnits[i].Y);
             }
+            w.Write(idCounter);
         }
 
         private static TickDigestRecord ReadDigestReport(BinaryReader r)
@@ -2754,7 +2791,10 @@ namespace TABCoopMod.Sync
                     }
                 }
             }
-            return new TickDigestRecord { Digest = d, Summary = summary, OwnedUnits = ownedUnits };
+            long idCounter = 0L;
+            if (r.BaseStream.Position + 8 <= r.BaseStream.Length)
+                idCounter = r.ReadInt64();
+            return new TickDigestRecord { Digest = d, Summary = summary, OwnedUnits = ownedUnits, SyncedIdCounter = idCounter };
         }
 
         private static ulong[] ReadBucketArray(BinaryReader r)
@@ -2829,6 +2869,12 @@ namespace TABCoopMod.Sync
                     ResetTieredResyncState();
                     ModLogger.Info($"[StateChecksum] Tick {tick} MATCH (0x{host.FullHash:X16}) with Client({senderId}).");
                     continue;
+                }
+
+                if (hostRec.SyncedIdCounter != 0L && kv.Value.SyncedIdCounter != 0L
+                    && hostRec.SyncedIdCounter != kv.Value.SyncedIdCounter)
+                {
+                    ModLogger.Warn($"[StateChecksum] ID COUNTER DRIFT at Tick {tick}: Host={hostRec.SyncedIdCounter}, Client({senderId})={kv.Value.SyncedIdCounter}, delta={hostRec.SyncedIdCounter - kv.Value.SyncedIdCounter}");
                 }
 
                 bool lifeDiff = host.LifeChecksum != client.LifeChecksum;
