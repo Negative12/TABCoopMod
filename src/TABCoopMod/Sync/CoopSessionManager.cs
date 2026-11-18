@@ -183,6 +183,8 @@ namespace TABCoopMod.Sync
         private static bool _hostSnapshotReloadPending;
         private static bool _hostWaitingOwnReload;
         private static bool _clientSnapshotAckReceived;
+        private static bool _hasEnteredSyncedLevelInMatch;
+        private static ulong[][] _pendingResyncSelectionGroups;
         public static bool IsHostSnapshotReloadPending => _hostSnapshotReloadPending;
 
         // Deferred work: never export/load from inside a deep engine callback (LevelLoadComplete
@@ -682,6 +684,8 @@ namespace TABCoopMod.Sync
             _hostSnapshotReloadPending = false;
             _hostWaitingOwnReload = false;
             _clientSnapshotAckReceived = false;
+            _hasEnteredSyncedLevelInMatch = false;
+            _pendingResyncSelectionGroups = null;
             _lastAutoResyncTicks = -100000.0;
             _lastPosSyncSentTicks = -100000.0;
             _lastFullPosAlignSentTicks = -100000.0;
@@ -759,6 +763,8 @@ namespace TABCoopMod.Sync
             _hostSnapshotReloadPending = false;
             _hostWaitingOwnReload = false;
             _clientSnapshotAckReceived = false;
+            _hasEnteredSyncedLevelInMatch = false;
+            _pendingResyncSelectionGroups = null;
             _pendingHostSnapshotExport = false;
             _pendingClientSnapshotLoadPath = null;
             _pendingBroadcastSavBytes = null;
@@ -966,6 +972,34 @@ namespace TABCoopMod.Sync
         }
 
         /// <summary>
+        /// Snapshots the local player's 1..8 control groups (as deterministic entity IDs) right
+        /// before an in-game Auto-resync reload replaces ZXLevelState. Gated on
+        /// _hasEnteredSyncedLevelInMatch so initial lobby loads never overwrite a loaded save's
+        /// groups or leak groups from an earlier match.
+        /// </summary>
+        private static void CaptureLocalControlGroupsForMidGameReload()
+        {
+            if (!_hasEnteredSyncedLevelInMatch || GameBridge.CurrentLevelState == null)
+                return;
+            if (_pendingResyncSelectionGroups != null)
+                return;
+            _pendingResyncSelectionGroups = GameBridge.CaptureSelectionGroupEntityIds();
+        }
+
+        /// <summary>
+        /// Restores the locally captured 1..8 control groups onto the newly loaded ZXLevelState
+        /// after OnLevelLoadComplete. Control groups are local-only per Archon player and are not
+        /// present in the Host's snapshot for Clients.
+        /// </summary>
+        private static void RestoreLocalControlGroupsAfterMidGameReload()
+        {
+            var saved = _pendingResyncSelectionGroups;
+            _pendingResyncSelectionGroups = null;
+            if (saved != null)
+                GameBridge.RestoreSelectionGroupEntityIds(saved);
+        }
+
+        /// <summary>
         /// Exports the Host's current level state into a temporary .zxsav + .zxcheck pair
         /// and streams it to all connected peers in 32KB chunks.
         /// </summary>
@@ -977,6 +1011,7 @@ namespace TABCoopMod.Sync
             double wasGameSpeed = DXGame.Current.GameSpeed;
             try
             {
+                CaptureLocalControlGroupsForMidGameReload();
                 DXGame.Current.Paused = true;
 
                 string savesDir = GameBridge.GetSavesDirectory();
@@ -1195,6 +1230,7 @@ namespace TABCoopMod.Sync
             _networkGate.MarkReady(cur + initialDelay);
             _hostLastBroadcastSimTick = cur;
             _hostLastBroadcastTargetTick = cur + initialDelay;
+            _hasEnteredSyncedLevelInMatch = true;
             IsInSyncedLevel = true;
             CommandInterceptor.IsInterceptionEnabled = true;
             RoomPhase = LobbyRoomPhase.InGame;
@@ -1484,6 +1520,7 @@ namespace TABCoopMod.Sync
                 if (DXGame.Current != null) DXGame.Current.InputEnabled = false;
                 if (_hostSnapshotReloadPending && _hostWaitingOwnReload)
                 {
+                    RestoreLocalControlGroupsAfterMidGameReload();
                     _hostWaitingOwnReload = false;
                     ModLogger.Info($"[CoopSessionManager] Host symmetric snapshot reload finished at tick={DXGame.Current?.IAIterationInt ?? 0} (clientAck={_clientSnapshotAckReceived}).");
                     byte[] savBytes = _pendingBroadcastSavBytes;
@@ -1534,6 +1571,7 @@ namespace TABCoopMod.Sync
             if (!_awaitingSnapshotLoad) return;
 
             _awaitingSnapshotLoad = false;
+            RestoreLocalControlGroupsAfterMidGameReload();
             IsInSyncedLevel = false;
             LockstepClock.SetSessionPause(true);
             if (DXGame.Current != null) DXGame.Current.InputEnabled = false;
@@ -3720,6 +3758,7 @@ namespace TABCoopMod.Sync
         {
             try
             {
+                CaptureLocalControlGroupsForMidGameReload();
                 IsInSyncedLevel = false;
                 LockstepClock.SetSessionPause(true);
                 if (DXGame.Current != null) DXGame.Current.InputEnabled = false;

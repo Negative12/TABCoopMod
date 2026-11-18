@@ -174,3 +174,11 @@
 | `ZXLevelEvent` | `#=z0XSLMcBEuHC4` | 独立尸潮刷怪波次人口倍率缩放入口 |
 | `ZXGame` / `ProgressWindowHelper` | `#=z9DPDdq9qP9lZ` / `#=zzi2cl4h1HYA5cX8aaw==.#=z9gBNlmJCE1ly` | `AsyncTransition` 与异步进度窗（自动化无 UI 切图流程安全等待用） |
 | `ZXSystemGameLevel` | `#=z5NVIUf3bnsHNNo8FfA==` / `#=zwK_pUIeRBpbp` | 原生整图全屏全景导出（`CapturePanorama`）与进入关卡视图入口 |
+
+### 4.8 本地编队状态与键位绑定查询（同步 `ObfuscatedSymbols.cs` §5 / §8 / §16）
+
+| 类名 | 混淆成员名 | 签名与用途 |
+| :--- | :--- | :--- |
+| `ZX.ZXLevelState` | `#=zjt55PivoReTlHchOXA==()` | 返回本地 `1~8` 编队（9 槽 `List<ZXEntity>[]`）；存档时经 `RefEntitySelectionGroups`（`List<DXEntityRef>[]`）按 `IDEntity` 序列化，局内重同步必须本地备份/还原以免被房主快照覆盖 |
+| `ZXSystemGameLevel` | `#=zOAZllFnsly4T()` | 清理已阵亡/失效单位并刷新左下角 1~8 编队 HUD 槽位图标与计数 |
+| `#=zyMMweQL9LzVp8ZCJ7w==` | `#=zRtXKxIY=(DXKeys, ZXKeyboardCommand)` | 按当前生效键位方案（`Standard` / `CameraWASD` / `Custom`）判断按键是否绑定到指定 `ZXKeyboardCommand`（原版设置保存在 `我的文档\My Games\They Are Billions\Configuration.txt`） |

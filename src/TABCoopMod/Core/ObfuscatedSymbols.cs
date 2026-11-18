@@ -111,6 +111,7 @@ namespace TABCoopMod.Core
         public const string Method_LevelSys_ShowTopBanner      = "#=zhWLC3K8=";
         public const string Method_LevelSys_EnqueueNotification= "#=zYWs2Gv9F3GD5";
         public const string Method_LevelSys_RefreshCmdPanel    = "#=zR1qHCYY=";
+        public const string Method_LevelSys_RefreshSelectionGroupsHud = "#=zOAZllFnsly4T";
         public const string Method_LevelSys_ClearPendingBuildMode = "#=z$xo$17_AskhgfUuy9Epz5JQ=";
         public const string Method_LevelSys_TriggerGameEnd     = "#=zIoSB3Q$9ZjUF";
         public const string Method_LevelSys_ShowSurvivalEnd    = "#=zuY2pslm6MYCZNwXKL0J6wWQ=";
@@ -171,6 +172,7 @@ namespace TABCoopMod.Core
         public const string Method_ZXLevelState_GetDXLevel     = "#=zOHDY2QTzgRSB";
         public const string Method_ZXLevelState_ConsumeBonus   = "#=z0b0u0bUCzEHXjLBj5A==";
         public const string Method_ZXLevelState_GetBonusCount  = "#=zBoOUVPKgrQd5bNC4RA==";
+        public const string Method_ZXLevelState_GetSelectionGroups = "#=zjt55PivoReTlHchOXA==";
 
         // ====================================================================
         // 9. GUI & MessageBox Helpers
@@ -269,5 +271,11 @@ namespace TABCoopMod.Core
         public const string Field_ProgressWindow_Current       = "#=z9gBNlmJCE1ly";
         public const string Field_LevelSys_IntroCinematic      = "#=zfFXkD0aj1o9gF76ANQ==";
         public const string Field_LevelSys_ScreenAnim          = "#=z40N_lqqB8daJ";
+
+        // ====================================================================
+        // 16. Keyboard Bindings Manager (#=zyMMweQL9LzVp8ZCJ7w==)
+        // ====================================================================
+        public const string Type_KeyboardBindingsManager       = "#=zyMMweQL9LzVp8ZCJ7w==";
+        public const string Method_Keyboard_IsKeyForCommand  = "#=zRtXKxIY=";
     }
 }

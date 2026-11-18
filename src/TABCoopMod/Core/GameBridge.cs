@@ -127,6 +127,10 @@ namespace TABCoopMod.Core
         private static MethodInfo _methodLevelSysShowCampaignEnd;
         private static MethodInfo _methodGameShowMayorSelection;
         private static Type _typeZXGameState;
+        private static MethodInfo _methodLevelSysRefreshSelectionGroupsHud;
+        private static MethodInfo _methodLevelStateGetSelectionGroups;
+        private static Type _typeKeyboardBindingsManager;
+        private static MethodInfo _methodKeyboardIsKeyForCommand;
         private static PropertyInfo _propRandomParamsNCells;
         private static PropertyInfo _propRandomParamsFactorDuration;
         private static PropertyInfo _propRandomParamsFactorZombiePop;
@@ -441,6 +445,14 @@ namespace TABCoopMod.Core
                     ? AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_ZXGame_ShowMayorSelection, Type.EmptyTypes)
                     : null;
                 _typeZXGameState = typeof(ZXGameState);
+                _methodLevelSysRefreshSelectionGroupsHud = TypeZXSystemGameLevel != null
+                    ? AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_RefreshSelectionGroupsHud, Type.EmptyTypes)
+                    : null;
+                _methodLevelStateGetSelectionGroups = AccessTools.Method(typeof(ZXLevelState), ObfuscatedSymbols.Method_ZXLevelState_GetSelectionGroups, Type.EmptyTypes);
+                _typeKeyboardBindingsManager = GameAssembly.GetType(ObfuscatedSymbols.Type_KeyboardBindingsManager);
+                _methodKeyboardIsKeyForCommand = _typeKeyboardBindingsManager != null
+                    ? AccessTools.Method(_typeKeyboardBindingsManager, ObfuscatedSymbols.Method_Keyboard_IsKeyForCommand, new[] { typeof(DXKeys), typeof(ZXKeyboardCommand) })
+                    : null;
 
                 if (_typeZXRandomLevelParams != null)
                 {
@@ -526,6 +538,10 @@ namespace TABCoopMod.Core
                 Check(_methodLevelSysShowCampaignEnd, "ZXSystemGameLevel.ShowCampaignEnd");
                 Check(_methodGameShowMayorSelection, "ZXGame.ShowMayorSelection");
                 Check(_typeZXGameState, "Type ZXGameState");
+                Check(_methodLevelSysRefreshSelectionGroupsHud, "ZXSystemGameLevel.RefreshSelectionGroupsHud");
+                Check(_methodLevelStateGetSelectionGroups, "ZXLevelState.GetSelectionGroups");
+                Check(_typeKeyboardBindingsManager, $"Type KeyboardBindingsManager ({ObfuscatedSymbols.Type_KeyboardBindingsManager})");
+                Check(_methodKeyboardIsKeyForCommand, "KeyboardBindingsManager.IsKeyForCommand");
 
                 if (missingCount == 0)
                 {
@@ -632,6 +648,117 @@ namespace TABCoopMod.Core
             if (_fogEnabledProp == null || !_fogEnabledProp.CanWrite) return false;
 
             try { _fogEnabledProp.SetValue(inst, on); return true; } catch { return false; }
+        }
+
+        /// <summary>
+        /// Checks whether <paramref name="key"/> matches the player's currently active game
+        /// keyboard binding (Standard / WASD / Custom) for <paramref name="command"/>.
+        /// </summary>
+        public static bool IsKeyBoundToCommand(DXKeys key, ZXKeyboardCommand command, DXKeys fallbackKey = DXKeys.None)
+        {
+            if (_methodKeyboardIsKeyForCommand != null)
+            {
+                try
+                {
+                    return (bool)_methodKeyboardIsKeyForCommand.Invoke(null, new object[] { key, command });
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[GameBridge] IsKeyBoundToCommand failed for {command}: {ex.Message}");
+                }
+            }
+            return fallbackKey != DXKeys.None && key == fallbackKey;
+        }
+
+        /// <summary>
+        /// Captures the local player's 1..8 (9-slot) control groups as deterministic entity IDs
+        /// before an in-game snapshot reload replaces ZXLevelState.
+        /// </summary>
+        public static ulong[][] CaptureSelectionGroupEntityIds()
+        {
+            try
+            {
+                object ls = CurrentLevelState;
+                if (ls == null || _methodLevelStateGetSelectionGroups == null) return null;
+                var groups = _methodLevelStateGetSelectionGroups.Invoke(ls, null) as IList;
+                if (groups == null || groups.Count == 0) return null;
+
+                var captured = new ulong[groups.Count][];
+                for (int i = 0; i < groups.Count; i++)
+                {
+                    var slot = groups[i] as IEnumerable;
+                    if (slot == null)
+                    {
+                        captured[i] = Array.Empty<ulong>();
+                        continue;
+                    }
+
+                    var ids = new List<ulong>();
+                    foreach (object item in slot)
+                    {
+                        if (item is DXEntity ent && !ent.Disposed && (ent.ID & 0x8000000000000000UL) == 0)
+                            ids.Add(ent.ID);
+                    }
+                    captured[i] = ids.ToArray();
+                }
+                return captured;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] CaptureSelectionGroupEntityIds failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Restores previously captured local control-group entity IDs onto the newly loaded
+        /// ZXLevelState and refreshes the bottom-left control-group HUD slots.
+        /// </summary>
+        public static void RestoreSelectionGroupEntityIds(ulong[][] savedGroups)
+        {
+            if (savedGroups == null) return;
+            try
+            {
+                var game = ZXGameInstance;
+                object ls = CurrentLevelState;
+                if (game == null || ls == null || _methodLevelStateGetSelectionGroups == null) return;
+
+                var groups = _methodLevelStateGetSelectionGroups.Invoke(ls, null) as IList;
+                if (groups == null) return;
+
+                int slotCount = Math.Min(savedGroups.Length, groups.Count);
+                int restoredTotal = 0;
+                for (int i = 0; i < slotCount; i++)
+                {
+                    var list = groups[i] as IList;
+                    if (list == null) continue;
+                    list.Clear();
+
+                    ulong[] ids = savedGroups[i];
+                    if (ids == null || ids.Length == 0) continue;
+
+                    for (int j = 0; j < ids.Length; j++)
+                    {
+                        DXEntity ent = game.GetEntityByID(ids[j]);
+                        if (ent is ZXEntity zxEnt && !zxEnt.Disposed && !list.Contains(zxEnt))
+                        {
+                            list.Add(zxEnt);
+                            restoredTotal++;
+                        }
+                    }
+                }
+
+                object levelSys = LevelSystemInstance;
+                if (levelSys != null && _methodLevelSysRefreshSelectionGroupsHud != null)
+                {
+                    _methodLevelSysRefreshSelectionGroupsHud.Invoke(levelSys, null);
+                }
+                ModLogger.Info($"[GameBridge] Restored {restoredTotal} entity reference(s) across {slotCount} local control-group slot(s).");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] RestoreSelectionGroupEntityIds failed: {ex.Message}");
+            }
         }
 
         public static string Localize(string key) => _mLocalize != null ? (string)_mLocalize.Invoke(null, new object[] { key }) : key;
