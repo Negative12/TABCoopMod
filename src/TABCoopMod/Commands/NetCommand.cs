@@ -159,6 +159,35 @@ namespace TABCoopMod.Commands
         [ThreadStatic]
         public static bool IsReplayingLocalBuild;
 
+        private const double RejectLogCooldownMs = 3000.0;
+        private static string _lastRejectKey;
+        private static double _lastRejectLogMs = -10000.0;
+        private static int _suppressedRejectCount;
+
+        private static void LogRejected(string key, string message)
+        {
+            if (ModLogger.IsVerbose)
+            {
+                ModLogger.Info(message);
+                return;
+            }
+
+            double now = DXHelper_Environment.Ticks;
+            if (string.Equals(_lastRejectKey, key, StringComparison.Ordinal)
+                && now >= _lastRejectLogMs
+                && (now - _lastRejectLogMs) < RejectLogCooldownMs)
+            {
+                _suppressedRejectCount++;
+                return;
+            }
+
+            string suffix = _suppressedRejectCount > 0 ? $" (+{_suppressedRejectCount} similar suppressed)" : string.Empty;
+            _lastRejectKey = key;
+            _lastRejectLogMs = now;
+            _suppressedRejectCount = 0;
+            ModLogger.Info(message + suffix);
+        }
+
         public static void Execute(NetCommand netCmd)
         {
             if (netCmd == null || netCmd.Type == NetCommandType.None)
@@ -294,13 +323,14 @@ namespace TABCoopMod.Commands
                     : sharedCmd;
                 if (cmd == null)
                 {
-                    ModLogger.Info($"[CommandExecutor] Rejected stale/unavailable slot command {netCmd.BuildingTypeName} (slot={netCmd.QueueSlotIndex}) on {entityId}.");
+                    LogRejected($"slot:{netCmd.BuildingTypeName}", $"[CommandExecutor] Rejected stale/unavailable slot command {netCmd.BuildingTypeName} (slot={netCmd.QueueSlotIndex}) on {entityId}.");
                     continue;
                 }
 
                 if (GameBridge.IsResourceSpendingCommand(cmd, executor) && !GameBridge.CanExecuteCommandOnEntity(cmd, executor))
                 {
-                    ModLogger.Info($"[CommandExecutor] Rejected {cmd.GetType().Name} on {entityId}: CanExecute=false.");
+                    string cmdName = cmd.GetType().Name;
+                    LogRejected($"exec:{cmdName}", $"[CommandExecutor] Rejected {cmdName} on {entityId}: CanExecute=false.");
                     continue;
                 }
 
@@ -381,12 +411,12 @@ namespace TABCoopMod.Commands
                 int prevBonusCount = GameBridge.GetBonusEntityCount(buildingType, out _);
                 if (prevBonusCount <= 0)
                 {
-                    ModLogger.Info($"[CommandExecutor] Rejected bonus PlaceBuilding {netCmd.BuildingTypeName}: no remaining bonus charge.");
+                    LogRejected($"bonus0:{netCmd.BuildingTypeName}", $"[CommandExecutor] Rejected bonus PlaceBuilding {netCmd.BuildingTypeName}: no remaining bonus charge.");
                     return;
                 }
                 if (!GameBridge.CanPlaceBuildingAtTarget(buildingType, netCmd.TargetPosition, netCmd.TargetSize, netCmd.TargetOrigin))
                 {
-                    ModLogger.Info($"[CommandExecutor] Rejected bonus PlaceBuilding {netCmd.BuildingTypeName}: target cells occupied or invalid.");
+                    LogRejected($"bonusCell:{netCmd.BuildingTypeName}", $"[CommandExecutor] Rejected bonus PlaceBuilding {netCmd.BuildingTypeName}: target cells occupied or invalid.");
                     return;
                 }
                 object bonusTarget = BuildCommandTarget(netCmd);
@@ -402,13 +432,13 @@ namespace TABCoopMod.Commands
             object buildCmd = GameBridge.GetBuildCommandForType(buildingType);
             if (buildCmd != null && !GameBridge.CanExecuteCommandOnEntity(buildCmd, builder))
             {
-                ModLogger.Info($"[CommandExecutor] Rejected PlaceBuilding {netCmd.BuildingTypeName}: CanExecute=false (insufficient resources or prerequisites).");
+                LogRejected($"buildExec:{netCmd.BuildingTypeName}", $"[CommandExecutor] Rejected PlaceBuilding {netCmd.BuildingTypeName}: CanExecute=false (insufficient resources or prerequisites).");
                 return;
             }
 
             if (!GameBridge.CanPlaceBuildingAtTarget(buildingType, netCmd.TargetPosition, netCmd.TargetSize, netCmd.TargetOrigin))
             {
-                ModLogger.Info($"[CommandExecutor] Rejected PlaceBuilding {netCmd.BuildingTypeName} at ({netCmd.TargetPosition.X:F1},{netCmd.TargetPosition.Y:F1}): target cells occupied or invalid.");
+                LogRejected($"buildCell:{netCmd.BuildingTypeName}", $"[CommandExecutor] Rejected PlaceBuilding {netCmd.BuildingTypeName} at ({netCmd.TargetPosition.X:F1},{netCmd.TargetPosition.Y:F1}): target cells occupied or invalid.");
                 return;
             }
 

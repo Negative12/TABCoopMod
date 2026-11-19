@@ -180,6 +180,7 @@ namespace TABCoopMod.Core
                 EngineAssembly = typeof(DXGame).Assembly;
 
                 int missingCount = 0;
+                int verifiedCount = 0;
                 void Check(object member, string description)
                 {
                     if (member == null)
@@ -189,7 +190,8 @@ namespace TABCoopMod.Core
                     }
                     else
                     {
-                        ModLogger.Info($"[GameBridge] Verified: {description}");
+                        verifiedCount++;
+                        ModLogger.Verbose($"[GameBridge] Verified: {description}");
                     }
                 }
 
@@ -546,7 +548,7 @@ namespace TABCoopMod.Core
                 if (missingCount == 0)
                 {
                     TryCompileFastCommandDelegates();
-                    ModLogger.Info("[GameBridge] ALL BINDINGS VERIFIED SUCCESSFULLY (0 missing).");
+                    ModLogger.InfoImmediate($"[GameBridge] ALL BINDINGS VERIFIED SUCCESSFULLY (0 missing, verified={verifiedCount}).");
                     IsInitialized = true;
                     return true;
                 }

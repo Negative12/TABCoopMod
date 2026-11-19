@@ -1,12 +1,12 @@
 # 06 — 当前项目状态、门禁验收报告与下一步计划 (Project Status)
 
-> **最后更新**: 2026-11-19（基于 `v0.1.7` 基线整理全量文档）
-> **构建基线**: `v0.1.7` (`0.1.7.0`) `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=64, failed-tolerant=0`**。
+> **最后更新**: 2026-11-19（基于 `v0.1.8` 基线整理全量文档）
+> **构建基线**: `v0.1.8` (`0.1.8.0`) `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=64, failed-tolerant=0`**。
 > **历史过程记录**: 早期排查过程与会话 1~6 演进流水已归档至 [`docs/archive/`](archive/SESSION_CHANGELOG_S1_TO_S6.md)；Steam P2P 实测分析与近期专项修复见 [`10`](10_STEAM_P2P_TEST_ANALYSIS_AND_OPTIMIZATION_PLAN.md)、[`11`](11_SYNC_OWNERSHIP_AND_VISUAL_SMOOTHING.md)、[`12`](12_STEAM_P2P_BUGS_AND_FIXES_20261116.md)。
 
 ---
 
-## 0. 近期版本发布演进总览（`v0.1.0` ~ `v0.1.7`）
+## 0. 近期版本发布演进总览（`v0.1.0` ~ `v0.1.8`）
 
 | 版本 | 日期 | 核心更新内容 |
 | :---: | :---: | :--- |
@@ -18,10 +18,11 @@
 | **`v0.1.5`** | 2026-11-17 | **客机追帧、反压流控与槽位复用**：解除后期大图客机追帧 `canOverlapAsync` 单 tick 锁死并将追帧预算放宽至 `28ms`；主机通过 `RttPong` 实时采集 `ClientSimTick` 实施反压；修复 `DirectFastPath` 包头/SACK 窗口与 3s 假死回落；修复房间成员退出后新玩家槽位顺延导致 `P4/P5` 隐身问题，增加客机 `"Pause requested..."` 即时反馈。 |
 | **`v0.1.6`** | 2026-11-18 | **异构算力对称化与零事件 ID 漂移**：`VisualVfxIsolationPatch` 隔离视野门控 `ZXMapEvent`/`OMessageQueue` 防止实体 ID 偏移触发重载；绑定真实 `LogicThreadId` 与 Tick 末 `FlushStartFramePostMethods`；20Hz `AllyCursorAndCamera`/`ClientInputReport` 上报进度并平缓主机反压（`5t/6t/9t`）；`DirectFastPath` 线速 RTT 驱动 `InputDelayTicks` 并采用快降慢升 EWMA；保留慢客机 1-tick 异步并行流水线并增强大厅 20s STUN 保活。 |
 | **`v0.1.7`** | 2026-11-18 | **局内编队保留与原版快捷键跟随**：局内 `Auto-resync` 快照重载前按确定性实体 ID 备份并在 `OnLevelLoadComplete` 恢复各自本地 `1~8` 编队且刷新左下角 HUD 槽位；`PauseAndSpeedInputPatch` 改为经 `GameBridge.IsKeyBoundToCommand` 查询玩家当前 `ZXKeyboardCommand.Pause` 绑定（`Standard`/`WASD`/`Custom`），取消硬编码空格。 |
+| **`v0.1.8`** | 2026-11-19 | **日志异步写入与大幅降噪精简**：`ModLogger` 改为 `ConcurrentQueue` + 独立后台线程（`TABCoopMod.Logger`）每 `500ms` 批量刷盘、`Error`/`InfoImmediate`/`WarnImmediate` 立即刷盘与 `ProcessExit` 排空，彻底消除主线程同步开关双文件 I/O；默认汇总输出 `[GameBridge]`/`[Harmony]` 校验（可用 `TABCOOP_VERBOSE_LOG=1` 还原明细），`[StateChecksum]`/`[PosDriftStats]`/`[AsyncPosAlign]` 改为状态跳变直出 + `30s` 汇总，并节流 `[CommandExecutor] Rejected`（`3s`）、`[LoadFade]`（`>=300` 帧）与 `SetEngineMultiplayerMode` 重复行。 |
 
 ---
 
-## 1. 全门禁与自动化实测验收总表（2026-11-13 ~ 2026-11-18 实测）
+## 1. 全门禁与自动化实测验收总表（2026-11-13 ~ 2026-11-19 实测）
 
 | 门禁 / 用例 | 测试存档与条件 | 实测关键指标与结论 | 状态 |
 | :--- | :--- | :--- | :-: |
@@ -49,6 +50,7 @@
 | **客机追帧延迟、暂停同步、直连通道与槽位复用修复 (`v0.1.5`)** | `1_Backup.zxsav` 120t 回放 + `verify_lobby_flow.ps1` + `6666.zxsav` `ChaosTransport` 30s 双开 | ① `LockstepClock` 解除追帧时 `canOverlapAsync` 单 tick 硬限制并放宽客机追帧预算至 `28ms`；② `CoopSessionManager` 通过 `RttPong` 捎带客机实时 `SimTick`，主机按落后 tick（`>=16` 减速 `1.35x`、`>=45` 暂停推进，3.5s 失联保护）自动反压并将 `LatencyStats` 接入 `clientLag`/`tickLag`，同步扩大 `_tickPosCache`（32s）与 `_hostTickDigests`（40s），`PauseSyncController` / `HostPauseKeepalive` 增加客机即时横幅反馈；③ `DirectFastPath` 修正 `len < 39` 包头长度、对齐 `BulkWindowChunks=48` 与 64-bit SACK 窗口、增加 3s 数据通道假死自动回退 Steam；④ `SteamP2PTransport` 与 `LocalTcpLoopbackTransport` 按 `2.._maxPlayers` 最小空闲槽位回收复用（杜绝 `P4`/`P5` 隐身）并清理 `OnP2PConnectFail` / `AllyMiniMapOverlayPatch` 残留；实测 `1_Backup` 回放 `120 ticks identical`、`verify_lobby_flow` 9/9 通过、`6666.zxsav` `Chaos-1` 在双开 `15~22 FPS` 下稳定维持 `clientLag=9~10t` / `tickLag=3~5t`，11/11 `StateChecksum MATCH`、`0 ERROR` | ✅ 通过 |
 | **异构延迟对称化与操作触发 ID 偏移/重载修复 (`v0.1.6`)** | `1_Backup.zxsav` 120t 回放 + `6666.zxsav` 异构双开（`-ClientExtraTickMs 30` 模拟主机 30Hz vs 客机 ~20Hz） | ① `VisualVfxIsolationPatch` 隔离受本地视野门控的 `ZXMapEvent`（`.ctor`/`OnPoolNew`）与 `OMessageQueue`，阻断战斗告警导致 `_syncedEntityIdCounter` 单边偏移及连带 `MissingOnClient` 自动重载；② `LockstepClock` 新增精确 `LogicThreadId` 并统一于 `UpdatePhysics` 后、`StateChecksum` 前排空 `PostMethods`（`GameBridge.FlushStartFramePostMethods` 与 `ShowBannerOutsideDet` 清除外层 `InDeterministicContext`）；③ `CoopSessionManager` 通过 20Hz `AllyCursorAndCamera` / `ClientInputReport` 高频上报客机进度并收敛主机反压（`5t/1.15x/max2`、`6t/1.38x/max1`、`>=9t` 暂停）、优先以 `DirectFastPath` 线速 RTT 及快降慢升 EWMA 驱动 `InputDelayTicks`、在 `StateChecksumReport` 捎带 `SyncedIdCounter`；④ 客机在单 tick `>16ms` 时保留 1-tick 异步并行流水线（帧耗时由 `85.6~89ms` 降至 `47.7~51.1ms`），`DirectFastPath` 与 `SteamP2PTransport` 增加大厅 20s STUN 保活与 3s 未验证重推，并新增 `TABCOOP_SIM_MIN_FRAME_MS` / `TABCOOP_SIM_EXTRA_TICK_MS` 测试开关；实测 `Classes OK=64, failed-tolerant=0`，异构 `Client +30ms/tick` 下 `clientLag` 稳定 `6~8t`（原 `13~14t`）、`delay=1t`、连续 12/12 `StateChecksum MATCH`，`1_Backup` 回放 `120 ticks identical` | ✅ 通过 |
 | **局内重载保留编队与原版暂停热键跟随 (`v0.1.7`)** | `1_Backup.zxsav` 120t 回放 + `ChaosTransport` (`latency=80;jitter=20;loss=0.01;seed=7`) 双开验证 | ① `GameBridge` 新增 `CaptureSelectionGroupEntityIds` / `RestoreSelectionGroupEntityIds`（经 `ZXLevelState.#=zjt55PivoReTlHchOXA==` 采集/回写 `ulong entity.ID` 并调用 `ZXSystemGameLevel.#=zOAZllFnsly4T` 刷新左下角 1~8 编队槽位 HUD）；`CoopSessionManager` 以 `_hasEnteredSyncedLevelInMatch` 门控仅在局内重同步（`BroadcastCurrentLevelSnapshot` / `BeginClientSnapshotLoad`）前备份并在 `OnLevelLoadComplete` 恢复各自本地编队；② `GameBridge.IsKeyBoundToCommand` 接入 `#=zyMMweQL9LzVp8ZCJ7w==.#=zRtXKxIY=`，`PauseAndSpeedInputPatch` 改为读取玩家当前 `ZXKeyboardCommand.Pause` 绑定（`Standard`/`WASD`/`Custom`），取消硬编码 `Space`；实测 Release 0 警告 0 错误、`GameBridge 0 missing`、`Classes OK=64, failed-tolerant=0`、`1_Backup` 回放 `120 ticks identical`、`Chaos` 双开 7/7 `StateChecksum MATCH`、`0 ERROR` | ✅ 通过 |
+| **日志异步化与降噪精简 (`v0.1.8`)** | `1_Backup.zxsav` 120t 回放 + `Chaos` 20s 双开 + `verify_lobby_flow.ps1` | ① `ModLogger` 改为非阻塞队列 + 后台线程 `500ms` 批量刷盘（`Error`/`*Immediate` 立即刷盘，`TABCOOP_VERBOSE_LOG=1` 保留全量明细）；② 精简启动逐条自检及局内 `[StateChecksum]`/`[PosDriftStats]`/`[AsyncPosAlign]`/`[CommandExecutor] Rejected`/`[LoadFade]`/`SetEngineMultiplayerMode` 冗余刷屏；实测 `1_Backup` 回放 `120 ticks identical`、`Chaos` 20s 双端日志缩减至 Host `106` 行 (`15.2 KB`) / Client `96` 行 (`13.4 KB`)、`verify_lobby_flow` `9/9` 通过（`0 missing`、`Classes OK=64, failed-tolerant=0`） | ✅ 通过 |
 
 ---
 

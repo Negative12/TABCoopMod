@@ -100,16 +100,16 @@ namespace TABCoopMod.Bootstrap
                         var processor = new HarmonyLib.PatchClassProcessor(HarmonyInstance, type);
                         var patchedMethods = processor.Patch();
                         applied++;
-                        ModLogger.Info($"[Harmony] {type.Name}: patched {patchedMethods?.Count ?? 0} method(s).");
+                        ModLogger.Verbose($"[Harmony] {type.Name}: patched {patchedMethods?.Count ?? 0} method(s).");
                     }
                     catch (Exception patchEx)
                     {
                         failed++;
-                        ModLogger.Warn($"[Harmony] Skipped patch class {type.Name}: {patchEx.GetType().Name}: {patchEx.Message}");
+                        ModLogger.WarnImmediate($"[Harmony] Skipped patch class {type.Name}: {patchEx.GetType().Name}: {patchEx.Message}");
                     }
                 }
 
-                ModLogger.Info($"All Harmony patches applied. Classes OK={applied}, failed-tolerant={failed}.");
+                ModLogger.InfoImmediate($"All Harmony patches applied. Classes OK={applied}, failed-tolerant={failed}.");
             }
             catch (Exception ex)
             {

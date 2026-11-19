@@ -120,6 +120,18 @@ namespace TABCoopMod.Sync
         private static int _consecutiveSubCoarsePosDrift;
         private static double _divergedSinceTicks = -1.0;
 
+        // Periodic log throttling (verbose mode bypasses via ModLogger.IsVerbose)
+        private const double ChecksumSummaryIntervalMs = 30000.0;
+        private const double PosAlignLogIntervalMs = 30000.0;
+        private static string _lastChecksumLogKind;
+        private static double _lastChecksumMatchLogMs = -100000.0;
+        private static double _lastChecksumTransientLogMs = -100000.0;
+        private static double _lastChecksumSoftLogMs = -100000.0;
+        private static double _lastPosDriftStatsLogMs = -100000.0;
+        private static double _lastAsyncPosAlignLogMs = -100000.0;
+        private static int _suppressedChecksumMatchCount;
+        private static int _suppressedChecksumSoftCount;
+
         private static void ResetTieredResyncState()
         {
             _consecutiveEconMismatch = 0;
@@ -368,6 +380,14 @@ namespace TABCoopMod.Sync
             lock (_localCmdSentTs) _localCmdSentTs.Clear();
             lock (_cmdE2ELatencySamplesMs) _cmdE2ELatencySamplesMs.Clear();
             _lastLatencyStatsLogTicks = -100000.0;
+            _lastChecksumLogKind = null;
+            _lastChecksumMatchLogMs = -100000.0;
+            _lastChecksumTransientLogMs = -100000.0;
+            _lastChecksumSoftLogMs = -100000.0;
+            _lastPosDriftStatsLogMs = -100000.0;
+            _lastAsyncPosAlignLogMs = -100000.0;
+            _suppressedChecksumMatchCount = 0;
+            _suppressedChecksumSoftCount = 0;
             ResetTieredResyncState();
             _epochHasher.Reset();
             _hostTickDigests.Clear();
@@ -1125,7 +1145,7 @@ namespace TABCoopMod.Sync
                 w.Write(idCounter);
                 w.Write((byte)InputDelayTicks);
             });
-            ModLogger.Info($"[CoopSessionManager] Host+Client barrier satisfied; entered synced level and sent SessionStart at tick={startTick}, seed={CurrentSessionSeed}, inputDelay={InputDelayTicks}!");
+            ModLogger.InfoImmediate($"[CoopSessionManager] Host+Client barrier satisfied; entered synced level and sent SessionStart at tick={startTick}, seed={CurrentSessionSeed}, inputDelay={InputDelayTicks}!");
         }
 
         private static void OnLocalCommandCaptured(NetCommand cmd)
@@ -1522,7 +1542,7 @@ namespace TABCoopMod.Sync
                 {
                     RestoreLocalControlGroupsAfterMidGameReload();
                     _hostWaitingOwnReload = false;
-                    ModLogger.Info($"[CoopSessionManager] Host symmetric snapshot reload finished at tick={DXGame.Current?.IAIterationInt ?? 0} (clientAck={_clientSnapshotAckReceived}).");
+                    ModLogger.InfoImmediate($"[CoopSessionManager] Host symmetric snapshot reload finished at tick={DXGame.Current?.IAIterationInt ?? 0} (clientAck={_clientSnapshotAckReceived}).");
                     byte[] savBytes = _pendingBroadcastSavBytes;
                     _pendingBroadcastSavBytes = null;
                     if (savBytes != null && Transport != null && Transport.IsHost)
@@ -1534,7 +1554,7 @@ namespace TABCoopMod.Sync
                         int totalChunks = (savBytes.Length + ChunkSizeBytes - 1) / ChunkSizeBytes;
                         _awaitingClientSnapshotAck = true;
                         _awaitingClientAckStartTicks = DXHelper_Environment.Ticks;
-                        ModLogger.Info($"[CoopSessionManager] Broadcasting Snapshot ({savBytes.Length:N0} bytes in {totalChunks} chunks, seed={syncSeed}, idCounter={idCounter})...");
+                        ModLogger.InfoImmediate($"[CoopSessionManager] Broadcasting Snapshot ({savBytes.Length:N0} bytes in {totalChunks} chunks, seed={syncSeed}, idCounter={idCounter})...");
                         GameBridge.ShowTopBanner("Waiting for Client to finish loading...", Color.Cyan, 4000);
                         Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.SnapshotBegin, w =>
                         {
@@ -2423,7 +2443,7 @@ namespace TABCoopMod.Sync
                     ResetSyncTrackingState();
                     InputDelayTicks = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, (int)hostDelay));
                     EnterSyncedLevel();
-                    ModLogger.Info($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, inputDelay={InputDelayTicks}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
+                    ModLogger.InfoImmediate($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, inputDelay={InputDelayTicks}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
                     break;
                 }
 
@@ -2576,11 +2596,21 @@ namespace TABCoopMod.Sync
                     else
                         _consecutiveMissingOnClient = 0;
 
-                    ModLogger.Info(
-                        $"[PosDriftStats] Client({senderId}) Tick={pTick} Applied={wasApplied}({appliedCount}/{comparedCount}) " +
-                        $"Drifted(>0.001={drifted001}, >0.01={drifted01}, >0.1={drifted1}, >0.5={drifted5}) " +
-                        $"MaxDelta={maxDelta:F4} RmsDelta={rmsDelta:F4} Type={maxType} Exceeded={exceededThreshold} Streak={_consecutivePosExceeded} " +
-                        $"LifeDiff={lifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={missingOnHost} MissingOnClient={missingOnClient} MissingStreak={_consecutiveMissingOnClient}");
+                    double statsNow = DXHelper_Environment.Ticks;
+                    bool notablePosDrift = killsApplied > 0 || lifeApplied > 0
+                        || missingOnClient >= 5 || missingOnHost >= 5
+                        || maxDelta >= 2.0f || exceededThreshold
+                        || _consecutiveMissingOnClient > 0 || _consecutivePosExceeded > 0
+                        || ModLogger.IsVerbose;
+                    if (notablePosDrift || statsNow < _lastPosDriftStatsLogMs || (statsNow - _lastPosDriftStatsLogMs) >= PosAlignLogIntervalMs)
+                    {
+                        _lastPosDriftStatsLogMs = statsNow;
+                        ModLogger.Info(
+                            $"[PosDriftStats] Client({senderId}) Tick={pTick} Applied={wasApplied}({appliedCount}/{comparedCount}) " +
+                            $"Drifted(>0.001={drifted001}, >0.01={drifted01}, >0.1={drifted1}, >0.5={drifted5}) " +
+                            $"MaxDelta={maxDelta:F4} RmsDelta={rmsDelta:F4} Type={maxType} Exceeded={exceededThreshold} Streak={_consecutivePosExceeded} " +
+                            $"LifeDiff={lifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={missingOnHost} MissingOnClient={missingOnClient} MissingStreak={_consecutiveMissingOnClient}");
+                    }
 
                     bool triggerMissingResync = !IsStrictMode && _consecutiveMissingOnClient >= MissingOnClientReloadStreak;
                     bool triggerPosResync = IsStrictMode
@@ -2596,9 +2626,9 @@ namespace TABCoopMod.Sync
                             _consecutivePosExceeded = 0;
                             _consecutiveMissingOnClient = 0;
                             if (triggerMissingResync)
-                                ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after MissingOnClient at Tick {pTick} (MissingOnClient={missingOnClient}, MissingOnHost={missingOnHost}).");
+                                ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after MissingOnClient at Tick {pTick} (MissingOnClient={missingOnClient}, MissingOnHost={missingOnHost}).");
                             else
-                                ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after PosDrift at Tick {pTick} (MaxDelta={maxDelta:F4}, RmsDelta={rmsDelta:F4}, Drifted5={drifted5}).");
+                                ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after PosDrift at Tick {pTick} (MaxDelta={maxDelta:F4}, RmsDelta={rmsDelta:F4}, Drifted5={drifted5}).");
                             RequestSnapshotBroadcast();
                         }
                     }
@@ -2905,7 +2935,20 @@ namespace TABCoopMod.Sync
                     _consecutiveHardMismatch = 0;
                     _consecutivePosExceeded = 0;
                     ResetTieredResyncState();
-                    ModLogger.Info($"[StateChecksum] Tick {tick} MATCH (0x{host.FullHash:X16}) with Client({senderId}).");
+                    double matchNow = DXHelper_Environment.Ticks;
+                    bool stateRecovered = !string.Equals(_lastChecksumLogKind, "MATCH", StringComparison.Ordinal);
+                    if (stateRecovered || ModLogger.IsVerbose || matchNow < _lastChecksumMatchLogMs || (matchNow - _lastChecksumMatchLogMs) >= ChecksumSummaryIntervalMs)
+                    {
+                        string suffix = _suppressedChecksumMatchCount > 0 ? $" (+{_suppressedChecksumMatchCount} consecutive MATCH)" : string.Empty;
+                        _suppressedChecksumMatchCount = 0;
+                        _lastChecksumLogKind = "MATCH";
+                        _lastChecksumMatchLogMs = matchNow;
+                        ModLogger.Info($"[StateChecksum] Tick {tick} MATCH (0x{host.FullHash:X16}) with Client({senderId}).{suffix}");
+                    }
+                    else
+                    {
+                        _suppressedChecksumMatchCount++;
+                    }
                     continue;
                 }
 
@@ -3018,7 +3061,7 @@ namespace TABCoopMod.Sync
                         }
                         _lastAutoResyncTicks = now;
                         ResetTieredResyncState();
-                        ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after HARD DESYNC at Tick {tick} (Life={lifeDiff}, Aggro={aggroDiff}, Entity={entityDiff}, Econ={econDiff}, Proj={projDiff}).");
+                        ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after HARD DESYNC at Tick {tick} (Life={lifeDiff}, Aggro={aggroDiff}, Entity={entityDiff}, Econ={econDiff}, Proj={projDiff}).");
                         RequestSnapshotBroadcast();
                     }
                     continue;
@@ -3031,9 +3074,18 @@ namespace TABCoopMod.Sync
                     // Decouple fast HP/kill sync (2s) from slow position realignments (8s).
                     _consecutiveHardMismatch++;
                     _consecutiveProjOnlyMismatch = 0;
-                    ModLogger.Warn($"[StateChecksum] TRANSIENT STATE DRIFT at Tick {tick} (Life={lifeDiff} Aggro={aggroDiff} Entity={entityDiff}(d={absEntityDelta}) Econ={econDiff} CoarseDiff={coarsePosDiff} streak={_consecutiveHardMismatch} econStreak={_consecutiveEconMismatch} entityStreak={_consecutiveStructuralMismatch}).");
-                    ModLogger.Info($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
-                    ModLogger.Info($"[StateChecksum]   Client : {clientSummary ?? "(none)"}");
+                    bool firstTransient = !string.Equals(_lastChecksumLogKind, "TRANSIENT", StringComparison.Ordinal) || _consecutiveHardMismatch == 1;
+                    if (firstTransient || ModLogger.IsVerbose || (_consecutiveHardMismatch % 5) == 0 || now < _lastChecksumTransientLogMs || (now - _lastChecksumTransientLogMs) >= 10000.0)
+                    {
+                        _lastChecksumLogKind = "TRANSIENT";
+                        _lastChecksumTransientLogMs = now;
+                        ModLogger.Warn($"[StateChecksum] TRANSIENT STATE DRIFT at Tick {tick} (Life={lifeDiff} Aggro={aggroDiff} Entity={entityDiff}(d={absEntityDelta}) Econ={econDiff} CoarseDiff={coarsePosDiff} streak={_consecutiveHardMismatch} econStreak={_consecutiveEconMismatch} entityStreak={_consecutiveStructuralMismatch}).");
+                        if (firstTransient || ModLogger.IsVerbose)
+                        {
+                            ModLogger.Info($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
+                            ModLogger.Info($"[StateChecksum]   Client : {clientSummary ?? "(none)"}");
+                        }
+                    }
                     if ((posDiff || lifeDiff || entityDiff) && (now - _lastPosSyncSentTicks >= AsyncPosAlignCooldownMs))
                     {
                         _lastPosSyncSentTicks = now;
@@ -3055,7 +3107,12 @@ namespace TABCoopMod.Sync
                     // Projectiles are short-lived; their effect shows up as HP, which is corrected above.
                     _consecutiveProjOnlyMismatch++;
                     _consecutiveHardMismatch = 0;
-                    ModLogger.Warn($"[StateChecksum] TRANSIENT PROJ DIFF at Tick {tick} (Life/Aggro/Entity/Econ MATCH; PosDiff={posDiff} CoarseDiff={coarsePosDiff}, streak={_consecutiveProjOnlyMismatch}).");
+                    if (_consecutiveProjOnlyMismatch == 1 || ModLogger.IsVerbose || now < _lastChecksumSoftLogMs || (now - _lastChecksumSoftLogMs) >= ChecksumSummaryIntervalMs)
+                    {
+                        _lastChecksumLogKind = "PROJ";
+                        _lastChecksumSoftLogMs = now;
+                        ModLogger.Warn($"[StateChecksum] TRANSIENT PROJ DIFF at Tick {tick} (Life/Aggro/Entity/Econ MATCH; PosDiff={posDiff} CoarseDiff={coarsePosDiff}, streak={_consecutiveProjOnlyMismatch}).");
+                    }
                     if (coarsePosDiff && (now - _lastFullPosAlignSentTicks >= AsyncSoftPosAlignCooldownMs))
                     {
                         _lastFullPosAlignSentTicks = now;
@@ -3068,12 +3125,27 @@ namespace TABCoopMod.Sync
                 // Pure position drift (or same-count sub-tile aggro oscillation): NO real combat/economy divergence!
                 _consecutiveProjOnlyMismatch = 0;
                 _consecutiveHardMismatch = 0;
-                if (softAggroDrift)
-                    ModLogger.Warn($"[StateChecksum] SOFT AGGRO/POS DRIFT at Tick {tick} (AggroCount={host.AggroZombieCount}/{client.AggroZombieCount}; Life/Entity/Proj/Econ/Coarse MATCH, mode={EffectiveResyncMode}).");
+                bool firstSoft = !string.Equals(_lastChecksumLogKind, "SOFT", StringComparison.Ordinal);
+                if (firstSoft || ModLogger.IsVerbose || now < _lastChecksumSoftLogMs || (now - _lastChecksumSoftLogMs) >= ChecksumSummaryIntervalMs)
+                {
+                    string softSuffix = _suppressedChecksumSoftCount > 0 ? $" (+{_suppressedChecksumSoftCount} soft checks)" : string.Empty;
+                    _suppressedChecksumSoftCount = 0;
+                    _lastChecksumLogKind = "SOFT";
+                    _lastChecksumSoftLogMs = now;
+                    if (softAggroDrift)
+                        ModLogger.Warn($"[StateChecksum] SOFT AGGRO/POS DRIFT at Tick {tick} (AggroCount={host.AggroZombieCount}/{client.AggroZombieCount}; Life/Entity/Proj/Econ/Coarse MATCH, mode={EffectiveResyncMode}).{softSuffix}");
+                    else
+                        ModLogger.Warn($"[StateChecksum] SOFT POS DRIFT at Tick {tick} (Life/Aggro/Entity/Proj/Econ MATCH! CoarseDiff={coarsePosDiff}, mode={EffectiveResyncMode}).{softSuffix}");
+                    if (ModLogger.IsVerbose)
+                    {
+                        ModLogger.Info($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
+                        ModLogger.Info($"[StateChecksum]   Client : {clientSummary ?? "(none)"}");
+                    }
+                }
                 else
-                    ModLogger.Warn($"[StateChecksum] SOFT POS DRIFT at Tick {tick} (Life/Aggro/Entity/Proj/Econ MATCH! CoarseDiff={coarsePosDiff}, mode={EffectiveResyncMode}).");
-                ModLogger.Info($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
-                ModLogger.Info($"[StateChecksum]   Client : {clientSummary ?? "(none)"}");
+                {
+                    _suppressedChecksumSoftCount++;
+                }
 
                 if (IsStrictMode)
                 {
@@ -3085,7 +3157,7 @@ namespace TABCoopMod.Sync
                     if (EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport && (now - _lastAutoResyncTicks >= AutoResyncCooldownMs))
                     {
                         _lastAutoResyncTicks = now;
-                        ModLogger.Warn($"[CoopSessionManager] Auto-resync triggered after DESYNC (strict pos) at Tick {tick}.");
+                        ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after DESYNC (strict pos) at Tick {tick}.");
                         RequestSnapshotBroadcast();
                     }
                 }
@@ -3257,11 +3329,20 @@ namespace TABCoopMod.Sync
                     ModLogger.Info($"[DriftOnset] First observed pos drift at Tick={item.Tick}: EntityId={item.MaxDeltaEntityId}, Type={maxType}, Pos=({maxEnt.Position.X:F3},{maxEnt.Position.Y:F3}), MaxDelta={item.MaxDelta:F4}, Drifted001={item.Drifted001}, Rms={item.RmsDelta:F4}");
                 }
 
-                ModLogger.Info(
-                    $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}(pos={(item.ApplyPosCorrection ? 1 : 0)}:{appliedCount}/{item.ComparedCount}, selfProt={protectedSelfOwned}) " +
-                    $"Drifted(>0.001={item.Drifted001}, >0.01={item.Drifted01}, >0.1={item.Drifted1}, >0.5={item.Drifted5}) " +
-                    $"MaxDelta={item.MaxDelta:F4} Rms={item.RmsDelta:F4} MaxType={maxType} Exceeded={item.ExceededThreshold} " +
-                    $"LifeDiff={item.LifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={item.MissingOnHost} MissingOnClient={item.MissingOnClient}");
+                double alignNow = DXHelper_Environment.Ticks;
+                bool notableAlign = killsApplied > 0 || lifeApplied > 0
+                    || item.MissingOnClient >= 5 || item.MissingOnHost >= 5
+                    || item.MaxDelta >= 2.0f || item.ExceededThreshold
+                    || ModLogger.IsVerbose;
+                if (notableAlign || alignNow < _lastAsyncPosAlignLogMs || (alignNow - _lastAsyncPosAlignLogMs) >= PosAlignLogIntervalMs)
+                {
+                    _lastAsyncPosAlignLogMs = alignNow;
+                    ModLogger.Info(
+                        $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}(pos={(item.ApplyPosCorrection ? 1 : 0)}:{appliedCount}/{item.ComparedCount}, selfProt={protectedSelfOwned}) " +
+                        $"Drifted(>0.001={item.Drifted001}, >0.01={item.Drifted01}, >0.1={item.Drifted1}, >0.5={item.Drifted5}) " +
+                        $"MaxDelta={item.MaxDelta:F4} Rms={item.RmsDelta:F4} MaxType={maxType} Exceeded={item.ExceededThreshold} " +
+                        $"LifeDiff={item.LifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={item.MissingOnHost} MissingOnClient={item.MissingOnClient}");
+                }
 
                 Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.PosDriftStatsReport, w =>
                 {
@@ -3815,7 +3896,8 @@ namespace TABCoopMod.Sync
 
             GameBridge.KickLoadingFade(700.0);
 
-            if ((++_loadFadeKickFrames % 60) == 0)
+            ++_loadFadeKickFrames;
+            if (ModLogger.IsVerbose ? (_loadFadeKickFrames % 60) == 0 : (_loadFadeKickFrames >= 300 && (_loadFadeKickFrames % 300) == 0))
                 ModLogger.Info($"[LoadFade] frames={_loadFadeKickFrames} awaited={_awaitingSnapshotLoad} loading={LockstepClock.LoadingLevel} zxLoading={GameBridge.IsGameLoading()} tick={DXGame.Current?.IAIterationInt ?? -1}");
         }
     }

@@ -366,6 +366,7 @@ namespace TABCoopMod.Determinism
         }
 
         private static MethodInfo _setPlayerModeMethod;
+        private static int _lastLoggedPlayerMode = -1;
 
         /// <summary>
         /// Switches ZXGame's ZXPlayerModeType. Multiplayer makes CMovable compute paths synchronously
@@ -382,10 +383,15 @@ namespace TABCoopMod.Determinism
                 }
                 if (_setPlayerModeMethod == null) return;
 
+                int modeInt = multiplayer ? 1 : 0;
                 var paramType = _setPlayerModeMethod.GetParameters()[0].ParameterType;
-                object mode = Enum.ToObject(paramType, multiplayer ? 1 : 0);
+                object mode = Enum.ToObject(paramType, modeInt);
                 _setPlayerModeMethod.Invoke(null, new[] { mode });
-                ModLogger.Info($"[LockstepClock] ZXPlayerModeType set to {(multiplayer ? "Multiplayer" : "Singleplayer")}.");
+                if (_lastLoggedPlayerMode != modeInt || ModLogger.IsVerbose)
+                {
+                    _lastLoggedPlayerMode = modeInt;
+                    ModLogger.Info($"[LockstepClock] ZXPlayerModeType set to {(multiplayer ? "Multiplayer" : "Singleplayer")}.");
+                }
             }
             catch (Exception ex)
             {
