@@ -83,6 +83,9 @@
 | `#=zGQN$8GM48urIpvI5bA==` | `static bool (string path)` | 存档 `.zxcheck` 校验门禁 `IsSaveLoadable`（**校验内容与 `.zxsav` 文件名绑定**） |
 | `#=zbvwh$ickzalV` | `DXObject` (Field) | 黑屏淡入淡出遮罩 `LoadingFadeObj` |
 | `#=zTkvm$fc5hNvM` | `bool` (Field) | 启动过渡淡入激活标志 `StartupFadeActive` |
+| `#=z4GoTu3vYw0EXC1201A==` | `int` (Field) | 等待光标嵌套引用计数 `WaitCursorCount` |
+| `#=zIB5ucfBCe7G8` | `void ()` | 结束等待光标锁 `EndWaitCursor`（计数归零时置 `CursorLocked=false`、`Cursor=Normal`） |
+| `#=zFi4bPug=` | `void ()` | 重置世界状态 `ResetWorldState` |
 | `#=zB3Vhdin5PerfrubjO4AblAA=` | `static bool ()` | `IsMultiplayer()`（仅 6~8 字节 IL，会被 x64 RyuJIT 内联） |
 | `#=znDPORUoLfC4p` | `static void (ZXPlayerModeType)` | `SetPlayerMode`（`Singleplayer=0`, `Multiplayer=1`） |
 | `#=zcITiOSD6YNmD` | `void ()` | 弹出市长二选一窗口 |
@@ -121,6 +124,7 @@
 | `#=zhWLC3K8=` | `void (string, Color, int)` | 顶部中央横幅提示（`durationMs=0` 时在暂停帧立即 `Opacity=1`） |
 | `#=zYWs2Gv9F3GD5` | `void (...)` | 左侧通知队列 |
 | `#=zR1qHCYY=` | `void ()` | 刷新右下角命令面板 |
+| `#=z$xo$17_AskhgfUuy9Epz5JQ=` | `void ()` | 取消当前建造/奖励放置游标 `ClearPendingBuildMode` |
 | `#=zbcjZqBFFSY96` | `bool` (Field) | 对局已结束标志 `GameEndedFlag` |
 | `#=z40N_lqqB8daJ` | `static DXAnimation` (Field) | 战败红屏模糊 / 局末全屏过渡动画 `ScreenAnim` |
 | `#=zIoSB3Q$9ZjUF` | `void (bool won)` | 触发胜负结算 `TriggerGameEnd`（设置 `ZXLevelState.EndStatus` 与结束标志后调用生存/战役结算） |
@@ -157,6 +161,7 @@
 | :--- | :--- | :--- |
 | `ZXLevelState` | `#=zQXHqcVh9mGZZ` / `#=zF1YHTRUZSNRa` | 存档前保存时间 / 读档后恢复时间 |
 | `ZXLevelState` | `#=z5YtS5bwlM1kX` / `#=zG0slAM4=` / `#=zh4x6WKNtqKnr` / `#=zOHDY2QTzgRSB` | 扣费 / 退款 / 校验资源 / 获取 `DXLevel` |
+| `ZXLevelState` | `#=z0b0u0bUCzEHXjLBj5A==` / `#=zBoOUVPKgrQd5bNC4RA==` | 核销奖励实体次数 `ConsumeBonus` / 查询剩余奖励数量 `GetBonusCount` |
 | `ZXSystemMapLayers` | `#=zQFWYIvs=` / `#=z69ntQguW1qCr` / `#=z7sWPJNagVkip` / `#=zwJQaMvq$T3G4` | 单例 / 当前视野前台数组 / 20-tick 后台缓冲 / 已探索迷雾数组 |
 | `ZXMessageBoxHelper` | `#=zcvkFXLt$qEo6` / `#=zy6vF6BSAUKyT` / `#=zFNDB6pz7Wqg3` / `#=znd_PcbSNuH79` / `#=zYjeCpah9Jpv2S1i8lQ==` / `#=zth32r9N3TXbR` | Alert / OkCancel / YesNo / InputBox / ListSelector / PlainTextRenderer |
 | `ZXWindow` | `#=zJMx0W0Q=` / `#=zyruJg$0=` / `#=zePbLN$s=` | 添加底部按钮 / 显示窗口 / 关闭窗口 |

@@ -7,16 +7,19 @@
 ## 核心特性
 
 ### 执政官共控模式（Archon Mode，当前默认玩法）
-- **同阵营共控，操作完全独立**：2~3 名玩家共同管理同一个人类基地、共享资源与科技，但每位玩家拥有**完全独立的摄像机视角、鼠标框选、编队热键与建造上下文**。
-- **传统 RTS 等候大厅**：主菜单内置【多人合作模式】（快捷键 `K`），支持 Steam 好友房创建/邀请自动加入，以及 `127.0.0.1:27099` 本地双开测试；客机准备门控、房主复用原版【读取存档 / 新建生存游戏 / 自定义地图】界面及重返大厅功能。
+- **同阵营共控，操作完全独立**：2~3 名玩家共同管理同一个人类基地、共享资源与科技，但每位玩家拥有**完全独立的摄像机视角、鼠标框选、1~8 编队与建造上下文**（局内重同步亦自动保留各自本地编队）。
+- **传统 RTS 等候大厅与混合直连加速**：
+  - 主菜单内置【多人合作模式】（快捷键 `K`），支持 Steam 好友房创建/邀请自动加入，以及 `127.0.0.1:27099` 本地双开测试（内置本地 `Chaos` 网络波动模拟面板）；
+  - Steam 大厅接头后自动尝试局域网/虚拟组网/公网 IPv6/UPnP/STUN **双栈 UDP 直连升级（`DirectFastPath`）** 并在大厅顶部实时显示链路与 RTT；受限网络自动无损回落隔离后的 Steam 3 通道保底；
+  - 支持双端 Mod 版本一致性校验告警、退房槽位复用、客机准备门控、房主复用原版【读取存档 / 新建生存游戏 / 自定义地图】界面及重返大厅功能。
 - **协同交互体验**：
   - 小地图实时渲染队友彩色视野框（P1 蓝 / P2 绿 / P3 橙）。
   - `Alt + 左键` 地面与小地图同步战术信号打点（Ping）。
-  - 空格或按钮同步冻结暂停（支持暂停期间微操），恢复时显示 3 秒顶居中倒计时。
+  - 读取原版游戏暂停快捷键设置（支持 `Standard`/`WASD`/`Custom`）或点击右上角按钮同步冻结暂停（支持暂停期间微操），恢复时显示 3 秒顶居中倒计时。
   - 本地建造幽灵占位框、资源预扣防透支与 0ms 单位语音即时确认。
-  - 市长二选一按 ID 确定性同步，杜绝双端重复领奖。
+  - 市长同池抽样、按 ID 确定性同步（含赠送单位取出与奖励建筑次数核销），选定后对端自动关闭弹窗杜绝重复领奖；胜负结算同步弹出与退局清理。
 - **多人新生存局均衡预设**：房主可在大厅切换【联机均衡】与【原版】预设，针对 2P/3P 自动扩展生存地图尺寸（`280` / `304` 格）、初始巡逻兵力与指挥中心工人，并修正非 2 的幂次地图尺寸下的感染村镇/遗迹生成边界。
-- **确定性同步与自愈**：30Hz 锁步状态哈希校验与 `Auto-resync` 自动快照重建恢复。
+- **确定性同步、反压与自愈**：30Hz 锁步 `StateHasher` v3 均摊校验、慢机主机反压流控、控制权反向差分对齐与 `Auto-resync` 自动快照重建恢复。
 
 > 远期规划（Phase 4）：独立基地模式（多指挥中心生成、独立资源账本与单位所有权隔离）。
 
@@ -74,11 +77,11 @@
 1. 完全关闭游戏。
 2. 在 Steam 中右键《They Are Billions》→ **管理** → **浏览本地文件**，打开游戏根目录。
 3. **备份**游戏根目录中原有的 `TheyAreBillions.exe.config`（例如重命名为 `TheyAreBillions.exe.config.bak`）。
-4. 将发行压缩包（如 `TABCoopMod-v0.1.0.zip`）中的所有文件**直接解压到游戏根目录**，提示替换 `TheyAreBillions.exe.config` 时选择覆盖。
+4. 将发行压缩包（如 `TABCoopMod-v0.1.7.zip`）中的所有文件**直接解压到游戏根目录**，提示替换 `TheyAreBillions.exe.config` 时选择覆盖。
 5. 通过 Steam 正常启动游戏，主菜单出现【多人合作模式】即安装成功。
 
 ### 卸载步骤
-1. 关闭游戏，删除根目录下的 `TABCoopMod.dll`、`TABCoopMod.pdb`、`0Harmony.dll`、`steam_appid.txt`、`TABCoopMod.log` 与 `TABCoopMod_使用说明.txt`。
+1. 关闭游戏，删除根目录下的 `TABCoopMod.dll`、`TABCoopMod.pdb`、`0Harmony.dll`、`steam_appid.txt`、`TABCoopMod.log`、`TABCoopMod_Logs\` 目录与 `TABCoopMod_使用说明.txt`。
 2. 还原之前备份的 `TheyAreBillions.exe.config.bak`（或通过 Steam “验证游戏文件的完整性”恢复原版配置）。
 
 ---
@@ -132,9 +135,13 @@ TABCoopMod/
 | [`docs/01_PRD_AND_GAMEPLAY.md`](docs/01_PRD_AND_GAMEPLAY.md) | 执政官模式玩法设计、状态划分与协同规则 |
 | [`docs/02_ARCHITECTURE_DESIGN.md`](docs/02_ARCHITECTURE_DESIGN.md) | 注入机制、确定性沙盒、指令回放与内存快照流 |
 | [`docs/03_REVERSE_ENGINEERING_MAP.md`](docs/03_REVERSE_ENGINEERING_MAP.md) | 逆向符号映射表与原生引擎行为说明 |
-| [`docs/04_NETWORK_PROTOCOL.md`](docs/04_NETWORK_PROTOCOL.md) | 传输抽象、包头协议、`NetCommand` 与 `StateHasher` v2 |
+| [`docs/04_NETWORK_PROTOCOL.md`](docs/04_NETWORK_PROTOCOL.md) | 传输抽象、`DirectFastPath` UDP 升级、包头协议、`NetCommand` 与 `StateHasher` v3 |
 | [`docs/05_DEVELOPMENT_ROADMAP.md`](docs/05_DEVELOPMENT_ROADMAP.md) | 分阶段里程碑与源码交付物清单 |
-| [`docs/06_PROJECT_STATUS.md`](docs/06_PROJECT_STATUS.md) | 当前门禁实测状态与下一步待办 |
-| [`docs/07_TESTING_AND_MCP.md`](docs/07_TESTING_AND_MCP.md) | 自动化回放验证、Chaos 故障注入与控制通道测试指南 |
+| [`docs/06_PROJECT_STATUS.md`](docs/06_PROJECT_STATUS.md) | 版本演进总览、当前门禁实测状态与下一步待办 |
+| [`docs/07_TESTING_AND_MCP.md`](docs/07_TESTING_AND_MCP.md) | 自动化回放验证、Chaos 故障注入、异构算力测试与控制通道指南 |
 | [`docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md`](docs/08_RTS_SYNC_COMPARISON_AND_FUTURE_OPTIMIZATIONS.md) | 经典 RTS 同步机制对比与后续优化评估 |
 | [`docs/09_MULTIPLAYER_BALANCE_DESIGN.md`](docs/09_MULTIPLAYER_BALANCE_DESIGN.md) | 多人执政官生存新局平衡性设计与数值模型 |
+| [`docs/10_STEAM_P2P_TEST_ANALYSIS_AND_OPTIMIZATION_PLAN.md`](docs/10_STEAM_P2P_TEST_ANALYSIS_AND_OPTIMIZATION_PLAN.md) | Steam P2P 跨机实测分析与四阶段优化方案（含落地回溯） |
+| [`docs/11_SYNC_OWNERSHIP_AND_VISUAL_SMOOTHING.md`](docs/11_SYNC_OWNERSHIP_AND_VISUAL_SMOOTHING.md) | 控制权差分对齐与单位移动全场景视觉插值平滑方案 |
+| [`docs/12_STEAM_P2P_BUGS_AND_FIXES_20261116.md`](docs/12_STEAM_P2P_BUGS_AND_FIXES_20261116.md) | Steam P2P 实测 Bug 排查与修复记录（`v0.1.2` / `v0.1.3`） |
+| [`docs/archive/`](docs/archive/SESSION_CHANGELOG_S1_TO_S6.md) | 早期深度根因复盘与会话 1~6 历史演进日志 |

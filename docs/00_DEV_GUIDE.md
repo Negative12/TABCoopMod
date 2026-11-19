@@ -25,7 +25,7 @@
 | **操作系统 / Shell** | Windows 11 x64，PowerShell | 命令行脚本优先使用 PowerShell 语法（如 `Select-String`、`Stop-Process`、`Get-Content -Tail 50 -Wait`）。 |
 | **.NET SDK** | `.NET SDK 10.0.100` | Mod 主工程目标框架 `net46` / `x64`（`<AllowUnsafeBlocks>true</AllowUnsafeBlocks>`）；MCP 服务端为 `net10.0`。 |
 | **游戏存档目录** | `%USERPROFILE%\Documents\My Games\They Are Billions\Saves` | 存档由 `.zxsav`（加密 ZIP）+ `.zxcheck`（校验文本，与 `.zxsav` 文件名绑定）成对组成。 |
-| **Mod 运行日志** | `<游戏目录>\TABCoopMod.log` | `ModLogger` 路径基于 `typeof(ModLogger).Assembly.Location`；多开可通过环境变量 `TABCOOP_LOG_NAME` 分离日志。 |
+| **Mod 运行日志** | `<游戏目录>\TABCoopMod.log` 与 `TABCoopMod_Logs\` | `ModLogger` 路径基于 `typeof(ModLogger).Assembly.Location`；正常启动会自动在 `TABCoopMod_Logs/` 按版本号+时间戳归档（最多保留 30 份）；多开可通过环境变量 `TABCOOP_LOG_NAME` 分离日志。 |
 | **依赖库说明** | `lib/`（由 `extract_sdk.ps1` 导出） | `TABCoopMod.csproj` 统一从 `lib/` 引用游戏与引擎程序集（`<Private>False</Private>`，不复制到游戏目录）；运行构建前请先执行 `scripts/extract_sdk.ps1`。 |
 
 ---
@@ -46,15 +46,19 @@ Get-Process *TheyAreBillions* -ErrorAction SilentlyContinue | Stop-Process -Forc
 # 3. 部署到游戏目录（自动复制 DLL、配置 AppDomainManager 并写入 steam_appid.txt=644930）
 powershell -ExecutionPolicy Bypass -File scripts/install_mod.ps1
 
-# 4. 卸载恢复原版
+# 4. 打包玩家发行包（输出到 dist/TABCoopMod-vX.Y.Z.zip）
+powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1
+
+# 5. 卸载恢复原版
 powershell -ExecutionPolicy Bypass -File scripts/uninstall_mod.ps1
 ```
 
 - 构建/启动健康判定标准（查看 `TABCoopMod.log`）：
   - `[GameBridge] ALL BINDINGS VERIFIED SUCCESSFULLY (0 missing).`
-  - `[Harmony] All Harmony patches applied. Classes OK=..., failed-tolerant=0.`
+  - `[Harmony] All Harmony patches applied. Classes OK=64, failed-tolerant=0.`
   - `[MainMenuPatch] Injected 'CO-OP MULTIPLAYER' button into TMenuCategory.Main successfully!`
 - 若 `missing > 0`，立即停止并核对 `src/TABCoopMod/Core/ObfuscatedSymbols.cs`。
+- **发版版本号 4 处同步铁律**：每次发版必须同步递增 [`ModInfo.cs`](../src/TABCoopMod/Core/ModInfo.cs)、[`scripts/install_mod.ps1`](../scripts/install_mod.ps1)、[`scripts/package_release.ps1`](../scripts/package_release.ps1) 与 [`docs/06_PROJECT_STATUS.md`](06_PROJECT_STATUS.md)（并同步更新 Steam 创意工坊双语标题，详见 `.agents/skills/tab-release-and-workshop/SKILL.md`）。
 
 ### 3.2 提取内嵌 SDK 与反编译游戏类
 
@@ -82,7 +86,8 @@ powershell -ExecutionPolicy Bypass -File scripts/decompile_type.ps1 -AssemblyPat
 | **`Harmony.PatchAll` 一损俱损** | 单类目标方法重写失败中断整个 Mod 加载 | `ModEntry.Initialize` 已改为逐类 `new PatchClassProcessor(...).Patch()` 包 `try/catch`，**绝对不要改回 `PatchAll`**。 |
 | **`OMiniMap.OnMouseRightDown`** | 含 Eazfuscator 异常块，MonoMod IL 重写抛 `异常块的错误代码生成` | 不可直接 Patch 该方法，已改为在 `ZXSystemGameLevel` 与 `OMiniMap.OnRender` 侧处理。 |
 | **`DXBehaviour<T>.get_GlobalRandom` 补丁失败** | `[ThreadStatic]` 静态泛型属性 getter 无法被 HarmonyX 补丁，抛 `HarmonyException` | 改用 `EntityUpdateBehaviourRandomPatch` 在逻辑线程内按“线程 + 载入代次”动态重置 `_GlobalRandom`。 |
-| **直接 Hook `DXGame.set_Paused`** | 读档期间引擎内部频繁调用 `set_Paused`，拦截 `return false` 导致关卡载入硬退出 | **禁止 Hook `DXGame.set_Paused`**；暂停/倍速只允许从输入层（`ZXSystemGameLevel.OnKeyDown` / `OnKeyUp` + 按钮回调）拦截。 |
+| **直接 Hook `DXGame.set_Paused`** | 读档期间引擎内部频繁调用 `set_Paused`，拦截 `return false` 导致关卡载入硬退出 | **禁止 Hook `DXGame.set_Paused`**；暂停/倍速只允许从输入层（`ZXSystemGameLevel.OnKeyDown` / `OnKeyUp` + 按钮回调）拦截，且暂停快捷键必须通过 `GameBridge.IsKeyBoundToCommand` 查询玩家当前 `ZXKeyboardCommand.Pause` 绑定（禁止硬编码空格）。 |
+| **局内快照重载丢失本地编队** | 局内 `Auto-resync` 替换 `ZXLevelState` 后本地 `1~8` 编队清空 | 仅在 `_hasEnteredSyncedLevelInMatch` 门控下的局内重同步前按确定性实体 ID 备份并在 `OnLevelLoadComplete` 还原且刷新左下角编队 HUD。 |
 | **RyuJIT 内联短静态方法** | `ZXGame.#=zB3Vhdin5PerfrubjO4AblAA=()`（`IsMultiplayer`）仅 6~8 字节 IL，会被 x64 JIT 内联而绕过 Harmony Prefix | 直接在底层引擎接口（如 `DXWorldGrid.FindPathConcurrent`）实施拦截（`DeterministicPathfindingPatch`）。 |
 | **混淆名标识符 `CS1040`** | 直接在 C# 中写 `#=z...` 会被当作预处理指令编译失败 | 全部混淆常量统一收敛至 `ObfuscatedSymbols.cs`，业务层通过 `GameBridge` 桥接调用。 |
 | **直接运行 EXE 秒退** | `SteamAPI.RestartAppIfNecessary` 拉起 Steam 并杀掉当前进程 | `install_mod.ps1` 自动在游戏目录写 `steam_appid.txt`（内容 `644930`）。 |

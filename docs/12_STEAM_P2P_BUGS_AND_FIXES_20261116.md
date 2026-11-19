@@ -1,7 +1,7 @@
-# 12 — Steam P2P 实测 Bug 排查与修复记录（2026-11-16）
+# 12 — Steam P2P 实测 Bug 排查与修复记录（2026-11-16，`v0.1.2` / `v0.1.3`）
 
-> **状态**: 4 项问题已完成代码修复与实机验证（构建 `0 警告 0 错误`，`GameBridge 0 missing`，Harmony `Classes OK=64, failed-tolerant=0`）。  
-> **参考日志**: [`logs/TABCoopMod_host_2.log`](../logs/TABCoopMod_host_2.log)、[`logs/TABCoopMod_client_2.log`](../logs/TABCoopMod_client_2.log)
+> **状态**: 本文档记录的 6 项问题已在 `v0.1.2` / `v0.1.3` 修复并实机验证通过；`v0.1.4` ~ `v0.1.7` 的后续修复（市长赠送单位取出与槽位碰撞、客机追帧与主机反压、视口 `ZXMapEvent` ID 漂移、局内重同步保留本地 `1~8` 编队与读取原版暂停快捷键）见 [`06_PROJECT_STATUS.md`](06_PROJECT_STATUS.md) §0 与 §1。
+> **参考日志**: [`logs/TABCoopMod_host_2.log`](../logs/TABCoopMod_host_2.log)、[`logs/TABCoopMod_client_2.log`](../logs/TABCoopMod_client_2.log)、[`logs/TABCoopMod_host_3.log`](../logs/TABCoopMod_host_3.log)、[`logs/TABCoopMod_client_3.log`](../logs/TABCoopMod_client_3.log)
 
 ---
 

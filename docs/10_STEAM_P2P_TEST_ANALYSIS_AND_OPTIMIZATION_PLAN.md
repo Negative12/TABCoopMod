@@ -1,6 +1,12 @@
 # 10 — Steam P2P 跨机实测分析与优化方案（2026-11-15）
 
-本文档对 2026-11-15 进行的真实双机 Steam P2P 合作联机实测（约 14 分钟生存新局）做完整的现象复盘、日志数据量化与代码级根因定位，并制定分阶段修复与性能优化方案。
+> **后续落实状态（截至 `v0.1.7`）**：本文档提出的 4 个阶段优化已**全部核心落地**——
+> - **Phase 1（✅ 已完成，`v0.1.1` / `v0.1.2`）**：重载屏障期锁定 `InputEnabled=false` 阻断开局漏拦截；`EmitHostTurns` 与 `HostPauseKeepalive` 覆盖模态弹窗/本地暂停；`auto-close peer mayor` 防止干等。
+> - **Phase 2（✅ 已完成，`v0.1.1` / `v0.1.5` / `v0.1.6`）**：已实装双栈 IPv4/IPv6 `DirectFastPathManager`（含 3s 假死无损回落、20s STUN 保活与 3s 未验证重推）、Steam `nChannel` 三通道隔离以及 `PosDriftSync` 仅发动态/受伤实体瘦身。
+> - **Phase 3（✅ 已完成，`v0.1.1` / `v0.1.5` / `v0.1.6`）**：已上线 `[LatencyStats]`（含 `clientLag` / `tickLag` / `directRtt` / `cmdAvg/P95/Max`）、大厅链路与 RTT 实时展示、0ms 本地建造/指令音效确认、主机平滑反压与客机追帧解禁。
+> - **Phase 4（✅ 已完成，`v0.1.0` ~ `v0.1.6`）**：已补充 `TABCOOP_DISABLE_ASYNC_TICK`、`UpdatePhysics_Exit` `1/256` 量化、`VisualVfxIsolationPatch`（消除视口 `ZXMapEvent` 导致的 ID 偏移）以及按控制权租约的双向差分对齐（详见 [`11`](11_SYNC_OWNERSHIP_AND_VISUAL_SMOOTHING.md)）。
+
+本文档保留 2026-11-15 进行的真实双机 Steam P2P 合作联机实测（约 14 分钟生存新局）的完整现象复盘、日志数据量化、代码级根因定位与原始行动计划供溯源参考。
 
 ---
 

@@ -1,12 +1,27 @@
 # 06 — 当前项目状态、门禁验收报告与下一步计划 (Project Status)
 
-> **最后更新**: 2026-11-18（**发布 `v0.1.7`**：局内快照重载/`Auto-resync` 保留房主与客机各自本地 1~8 编队并刷新左下角编队 HUD 槽位；联机暂停快捷键改为读取游戏当前 `ZXKeyboardCommand.Pause` 绑定，取消硬编码 `DXKeys.Space`）
+> **最后更新**: 2026-11-19（基于 `v0.1.7` 基线整理全量文档）
 > **构建基线**: `v0.1.7` (`0.1.7.0`) `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=64, failed-tolerant=0`**。
-> **历史过程记录**: 早期排查过程与会话 1~6 演进流水已归档至 [`docs/archive/`](archive/SESSION_CHANGELOG_S1_TO_S6.md)。
+> **历史过程记录**: 早期排查过程与会话 1~6 演进流水已归档至 [`docs/archive/`](archive/SESSION_CHANGELOG_S1_TO_S6.md)；Steam P2P 实测分析与近期专项修复见 [`10`](10_STEAM_P2P_TEST_ANALYSIS_AND_OPTIMIZATION_PLAN.md)、[`11`](11_SYNC_OWNERSHIP_AND_VISUAL_SMOOTHING.md)、[`12`](12_STEAM_P2P_BUGS_AND_FIXES_20261116.md)。
 
 ---
 
-## 1. 全门禁与自动化实测验收总表（2026-11-13 实测）
+## 0. 近期版本发布演进总览（`v0.1.0` ~ `v0.1.7`）
+
+| 版本 | 日期 | 核心更新内容 |
+| :---: | :---: | :--- |
+| **`v0.1.0`** | 2026-11-15 | 首个可玩执政官联机基线：AppDomainManager 无损注入、30Hz 确定性沙盒、内存快照流与 Auto-resync、RTS 等候大厅、生存新局平衡预设与物理步末 `1/256` 量化。 |
+| **`v0.1.1`** | 2026-11-15 | **网络与传输大升级**：新增双栈 IPv4/IPv6 `DirectFastPathManager`（LAN/虚拟局域网/公网 IPv6/UPnP/STUN 直连自动升级与 3 通道隔离 + 无损 Steam 回退）、Steam `nChannel` 隔离、重载屏障锁定、`HostPauseKeepalive`、`LatencyStats` 埋点、大厅本地 `Chaos` 模拟面板与 `TABCoopMod_Logs/` 版本化日志归档。 |
+| **`v0.1.2`** | 2026-11-16 | **Steam P2P 联机闭环修复**：实装战败/胜利同步 (`LevelEndSyncPatch`) 与结束退出清理；市长选择按 `(SyncedRandomSeed, mayorLevel)` 同池抽取且选定后立即关闭对端弹窗；修复退回大厅沙漏光标锁死、Steam 邀请/回调重复入房与重开新生存继承上一局天数（`GameSetGameTimePatch`）；实装 `_unitOwnership` 反向差分对齐与全场景渲染插值平滑。 |
+| **`v0.1.3`** | 2026-11-16 | **版本保护与防误杀修复**：新增 `OnVersionMismatch` 双端版本不一致告警与大厅红框提示；收紧 `PosDriftSync` 动态实体误杀条件与 `entityTol`（`Clamp(EntityCount/1000, 12..30)`），解决 ID 偏移时误杀客机刚生成尸潮导致的“隐形尸潮”问题。 |
+| **`v0.1.4`** | 2026-11-17 | **市长奖励完整同步**：区分市长赠送单位与建筑，实现 `EntityBonusCreation` / `ExtractFromUnitHolderSlot` 的按 `EntityTypeName + NSlot` 槽位敏感回放、`ConsumeBonusEntityByType` 次数核销及取出后立即刷新状态队列。 |
+| **`v0.1.5`** | 2026-11-17 | **客机追帧、反压流控与槽位复用**：解除后期大图客机追帧 `canOverlapAsync` 单 tick 锁死并将追帧预算放宽至 `28ms`；主机通过 `RttPong` 实时采集 `ClientSimTick` 实施反压；修复 `DirectFastPath` 包头/SACK 窗口与 3s 假死回落；修复房间成员退出后新玩家槽位顺延导致 `P4/P5` 隐身问题，增加客机 `"Pause requested..."` 即时反馈。 |
+| **`v0.1.6`** | 2026-11-18 | **异构算力对称化与零事件 ID 漂移**：`VisualVfxIsolationPatch` 隔离视野门控 `ZXMapEvent`/`OMessageQueue` 防止实体 ID 偏移触发重载；绑定真实 `LogicThreadId` 与 Tick 末 `FlushStartFramePostMethods`；20Hz `AllyCursorAndCamera`/`ClientInputReport` 上报进度并平缓主机反压（`5t/6t/9t`）；`DirectFastPath` 线速 RTT 驱动 `InputDelayTicks` 并采用快降慢升 EWMA；保留慢客机 1-tick 异步并行流水线并增强大厅 20s STUN 保活。 |
+| **`v0.1.7`** | 2026-11-18 | **局内编队保留与原版快捷键跟随**：局内 `Auto-resync` 快照重载前按确定性实体 ID 备份并在 `OnLevelLoadComplete` 恢复各自本地 `1~8` 编队且刷新左下角 HUD 槽位；`PauseAndSpeedInputPatch` 改为经 `GameBridge.IsKeyBoundToCommand` 查询玩家当前 `ZXKeyboardCommand.Pause` 绑定（`Standard`/`WASD`/`Custom`），取消硬编码空格。 |
+
+---
+
+## 1. 全门禁与自动化实测验收总表（2026-11-13 ~ 2026-11-18 实测）
 
 | 门禁 / 用例 | 测试存档与条件 | 实测关键指标与结论 | 状态 |
 | :--- | :--- | :--- | :-: |
@@ -48,17 +63,17 @@
    - `PrepareForProgrammaticLoad()` 已彻底消除关卡内二次读档 `CShadow` NRE，但 `inproc` 模式下引擎仍存在跨局静态残留实体总数偏差；确定性比对统一以**双进程模式**为准。
 4. **新开局动态随机地图种子（已接入）**：
    - `CoopSessionManager.RollNewGameSeed()` 在正式联机会话（非 `TABCOOP_TEST=1`）下会在建房、点选[新建生存游戏]/[自定义地图]及重返大厅时动态滚动 `CurrentSessionSeed`，使联机新开局每次随机换图，并通过快照/`HostSyncBarrier` 将同一种子精确同步给所有客机；自动化回放与固定种子校验（`TestHarnessConfig.Enabled`）仍保留 `SyncSeed = 20261109`。
-5. **未实机覆盖项（需人工桌面/双账号参与，不可假设已完成）**：
+2. **未实机覆盖项（需人工桌面/跨机双账号参与，不可假设已完成）**：
    - **真人键鼠操作全链路扩展**：大波尸潮混战下客机位置平滑体感、Shift 连续建造与全部建筑/部队热键组合的长期稳定性；
-   - **Steam Lobby P2P 跨机联机**：`SteamP2PTransport`（内嵌 Steamworks.NET v10）需要双 Steam 账号或跨机实测。
+   - **Steam P2P 跨机多网络拓扑长局回归**：`v0.1.4~v0.1.7` 的异构帧率追帧、`DirectFastPath` STUN 打洞/回退与局内重同步编队保留需在真实双 Steam 账号不同网络环境下开展整局实玩验证。
 
 ---
 
 ## 3. 下一步最高优先级任务（Next Steps）
 
 1. **P1 — 真人输入全流程联调（人工桌面测试）**：
-   - 在游戏内进入单机拦截模式（`F8`）及双开 Loopback 联机模式，人工逐项验证：框选右键移动/攻击、小地图右键移动、Shift 连续建造与普通放置、兵营训练/取消队列、空格与右上角按钮暂停、`+`/`-` 倍速、市长二选一弹窗、`Alt+左键` 地面+小地图同步打点。
-2. **P2 — Steam P2P 跨机联机验收（双 Steam 账号）**：
-   - 使用双 Steam 账号/双机测试 `CoopLobbyWindow` 的创建房间、好友邀请、快照传输与 Steam P2P 全流程联机（`ChaosTransport` 故障注入与断连回归已在本地双开全通过）。
+   - 在游戏内进入单机拦截模式（`F8`）及双开 Loopback 联机模式，人工逐项验证：框选右键移动/攻击、小地图右键移动、Shift 连续建造与普通放置、兵营训练/取消队列、自定义暂停键与右上角按钮暂停、`+`/`-` 倍速、市长二选一弹窗及赠送单位取出、`Alt+左键` 地面+小地图同步打点。
+2. **P2 — Steam P2P 跨机联机长局验收（双 Steam 账号）**：
+   - 使用双 Steam 账号/双机在不同网络（含 IPv6/CGNAT）下实测 `v0.1.7` 的 `DirectFastPath` 直连升级、Steam 多通道保底、异构算力反压及整局至胜负结算流程。
 3. **P3 — 协同 UX 完善与 Phase 4 预研**：
    - 补全大地图地面队友彩色鼠标光标与建造预览框渲染；细化市长“客机意向高亮 + 房主拍板”交互；视情况启动 Phase 4 独立基地模式。

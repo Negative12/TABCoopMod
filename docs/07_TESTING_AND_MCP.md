@@ -112,8 +112,17 @@ powershell -ExecutionPolicy Bypass -File scripts/run_chaos_two_instance.ps1 `
 powershell -ExecutionPolicy Bypass -File scripts/run_chaos_two_instance.ps1 `
     -SavePath "$env:USERPROFILE\Documents\My Games\They Are Billions\Saves\1_Backup.zxsav" `
     -Chaos "latency=120;jitter=30;loss=0.02;disconnect=4000-5000;seed=42" -TimeoutSeconds 90 -HoldSeconds 60
+
+# 异构算力 / 帧率不对称双开压测（例如模拟主机 30Hz vs 客机 ~20Hz）
+powershell -ExecutionPolicy Bypass -File scripts/run_chaos_two_instance.ps1 `
+    -SavePath "$env:USERPROFILE\Documents\My Games\They Are Billions\Saves\6666.zxsav" `
+    -Chaos "" -ClientExtraTickMs 30 -TimeoutSeconds 120 -HoldSeconds 60
 ```
-- 日志自动分离为 `<游戏目录>\TABCoopMod.host.log` 与 `TABCoopMod.client.log`。
+- 日志自动分离为 `<游戏目录>\TABCoopMod.host.log` 与 `TABCoopMod.client.log`（日常非 `TABCOOP_LOG_NAME` 启动会自动归档至 `TABCoopMod_Logs/`）。
+- **额外环境开关（[`TestHarnessConfig.cs`](../src/TABCoopMod/Testing/TestHarnessConfig.cs)）**：
+  - `TABCOOP_PHYSICS_QUANT`：物理步末量化倒数步长（默认 `256`，即 `1/256` 格；`0` 关闭，用于 A/B 对照）。
+  - `TABCOOP_DISABLE_ASYNC_TICK=1`：强制关闭单 tick 异步重叠流水线（全同步单线程执行）。
+  - `TABCOOP_SIM_MIN_FRAME_MS` / `TABCOOP_SIM_EXTRA_TICK_MS`：分别向每帧和每个模拟 tick 注入毫秒级耗时，模拟低 FPS 或慢 CPU 对端（对应 `run_chaos_two_instance.ps1` 的 `-ClientMinFrameMs`/`-ClientExtraTickMs`/`-HostMinFrameMs`/`-HostExtraTickMs`）。
 
 ---
 
@@ -136,5 +145,6 @@ powershell -ExecutionPolicy Bypass -File scripts/run_chaos_two_instance.ps1 `
 | `levelLoaded=false` | 仍在主菜单或加载中；使用 `-SavePath` 自动读档并等待加载完成。 |
 | 操作后画面无变化 | 存档处于暂停态（先 `set_paused{paused:false}`），或建造坐标/资源不合法被游戏拒绝。 |
 | 协议细节（ControlServer） | 仅监听 `127.0.0.1` 换行 JSON，单请求 10s 超时（示例：`{"id":1,"tool":"game_state","args":{}}`）。 |
-| 等候大厅端到端测试（[`verify_lobby_flow.ps1`](../scripts/verify_lobby_flow.ps1)） | 双开无 `TABCOOP_TEST`（控制端口 `27901`/`27902`），验证 `open_lobby`、`lobby_state`、`lobby_action`（`probe`/`host_loopback`/`join_loopback`/`toggle_ready`/`open_new_survival`/`close_top_modal`/`load_save`/`return_to_menu`）、动态随机种子滚动、读档同步与方案 A 退回大厅全流程并保存截图。 |
-| 生存新局平衡与全景图测试 | [`verify_new_survival_balance.ps1`](../scripts/verify_new_survival_balance.ps1) 验证大厅 `Co-op Balanced` / `Vanilla` 切换同步及开局实测一致；[`generate_panorama_comparisons.ps1`](../scripts/generate_panorama_comparisons.ps1) 调用 `ControlServer` 扩展指令 `start_survival`、`capture_panorama` 与 `map_metrics` 生成 4 场景同种子全景图及 `reports/panorama_metrics.json` / `reports/panorama_comparison.html`。 |
+| 等候大厅端到端测试（[`verify_lobby_flow.ps1`](../scripts/verify_lobby_flow.ps1)） | 双开无 `TABCOOP_TEST`（控制端口 `27901`/`27902`），验证 `open_lobby`、`lobby_state`、`lobby_action`（`probe`/`host_loopback`/`join_loopback`/`toggle_ready`/`set_chaos`/`open_new_survival`/`close_top_modal`/`load_save`/`return_to_menu`）、动态随机种子滚动、读档同步与方案 A 退回大厅全流程并保存截图。 |
+| 局内控制端测试扩展指令（`ControlServer`） | 除 17 个基础 MCP 工具外，`ControlServer` 额外支持 `confirm_modal`、`kick_fade`、`trigger_game_end`、`trigger_mayor_popup`、`bonus_slots`、`invoke_bonus_slot`、`start_survival_gen`、`capture_panorama` 与 `map_metrics`，供 PowerShell 回归脚本直接测试战败退出、市长抽样与奖励单位取出、大厅 Chaos 开关及生存全景对比。 |
+| 生存新局平衡与全景图测试 | [`verify_new_survival_balance.ps1`](../scripts/verify_new_survival_balance.ps1) 验证大厅 `Co-op Balanced` / `Vanilla` 切换同步及开局实测一致；[`generate_panorama_comparisons.ps1`](../scripts/generate_panorama_comparisons.ps1) 调用 `ControlServer` 扩展指令 `start_survival_gen`、`capture_panorama` 与 `map_metrics` 生成 4 场景同种子全景图及 `reports/panorama_metrics.json` / `reports/panorama_comparison.html`。 |
