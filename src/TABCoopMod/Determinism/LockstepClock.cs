@@ -3271,6 +3271,15 @@ namespace TABCoopMod.Determinism
                 foreach (var c in AccessTools.GetDeclaredConstructors(msgQueueType))
                     if (c != null) yield return c;
             }
+
+            // Ambient cosmetic colonists (Worker_A / Worker_B) spawned by enabled Buildings do not
+            // participate in combat or resource generation; isolate their IDs to the 0x8000... UI track.
+            var buildingType = GameBridge.TypeBuilding;
+            if (buildingType != null)
+            {
+                var mSpawnColonists = AccessTools.Method(buildingType, Core.ObfuscatedSymbols.Method_Building_SpawnColonists, Type.EmptyTypes);
+                if (mSpawnColonists != null) yield return mSpawnColonists;
+            }
         }
 
         [HarmonyPrefix]
@@ -3755,6 +3764,31 @@ namespace TABCoopMod.Determinism
             if (!Sync.CoopSessionManager.IsSessionActive && !LockstepClock.IsDeterministicModeActive)
                 return;
             Core.GameBridge.EnforceDisabledCameraIntroForLevel(__instance);
+        }
+    }
+
+    /// <summary>
+    /// Suppresses Structure.HasNearEnemies during authorized lockstep command replay in Co-op
+    /// sessions so a 0.1-cell dynamic zombie drift on one peer never causes single-sided
+    /// rejection of an already-committed Upgrade or PlaceBuilding command.
+    /// </summary>
+    [HarmonyPatch]
+    public static class StructureNearEnemiesReplayPatch
+    {
+        public static MethodBase TargetMethod() =>
+            GameBridge.TypeStructure != null
+                ? AccessTools.PropertyGetter(GameBridge.TypeStructure, "HasNearEnemies")
+                : null;
+
+        [HarmonyPrefix]
+        public static bool Prefix(ref bool __result)
+        {
+            if (Commands.CommandExecutor.IsReplayingCommand && Sync.CoopSessionManager.IsSessionActive)
+            {
+                __result = false;
+                return false;
+            }
+            return true;
         }
     }
 }

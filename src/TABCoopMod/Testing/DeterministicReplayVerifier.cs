@@ -222,7 +222,7 @@ namespace TABCoopMod.Testing
                     {
                         if (e == null || e.Disposed) continue;
                         if ((e.ID & 0x8000000000000000UL) != 0) continue;
-                        if (e.GetType() == typeof(DXEntity)) continue;
+                        if (e.GetType() == typeof(DXEntity) || GameBridge.IsColonistType(e.GetType())) continue;
                         sb.Append(e.ID).Append('|')
                           .Append(e.Position.X.ToString("F4", CultureInfo.InvariantCulture)).Append('|')
                           .Append(e.Position.Y.ToString("F4", CultureInfo.InvariantCulture)).Append('|')
@@ -503,7 +503,7 @@ namespace TABCoopMod.Testing
             {
                 if (e == null || e.Disposed) continue;
                 if ((e.ID & 0x8000000000000000UL) != 0) continue;
-                if (e.GetType() == typeof(DXEntity) || string.Equals(e.GetType().Name, "Raven", StringComparison.Ordinal)) continue;
+                if (e.GetType() == typeof(DXEntity) || string.Equals(e.GetType().Name, "Raven", StringComparison.Ordinal) || GameBridge.IsColonistType(e.GetType())) continue;
                 ulong id = e.ID;
                 ulong x = unchecked((ulong)BitConverter.DoubleToInt64Bits(e.Position.X));
                 ulong y = unchecked((ulong)BitConverter.DoubleToInt64Bits(e.Position.Y));

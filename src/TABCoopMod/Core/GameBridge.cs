@@ -60,7 +60,9 @@ namespace TABCoopMod.Core
         private static MethodInfo _methodIsVisibleCmd;
         private static MethodInfo _methodGetResourcesCost;
         private static Type _typeCreateEntityCommand;
-        private static Type _typeStructure;
+        public static Type TypeStructure { get; private set; }
+        public static Type TypeColonist { get; private set; }
+        public static Type TypeBuilding { get; private set; }
         private static Type _typeEntityBonusCreation;
         private static Type _typeExtractFromSlot;
         private static PropertyInfo _propBonusCmdNSlot;
@@ -131,6 +133,26 @@ namespace TABCoopMod.Core
         private static MethodInfo _methodLevelStateGetSelectionGroups;
         private static Type _typeKeyboardBindingsManager;
         private static MethodInfo _methodKeyboardIsKeyForCommand;
+        private static FieldInfo _fieldLevelSysBuildAreaCursor;
+        private static Type _typeOCellAreaCursor;
+        private static FieldInfo _fieldCursorLastEnergyCell;
+        private static MethodInfo _methodCursorClearEnergyPreview;
+        private static MethodInfo _methodCursorUpdateVisual;
+        private static Type _typeZXOrder;
+        private static ConstructorInfo _ctorZXOrder;
+        private static Type _typeCBuildable;
+        private static PropertyInfo _propCBuildableFactor;
+        private static PropertyInfo _propCBuildableMode;
+        private static PropertyInfo _propStructureIsBeingBuilt;
+        private static MethodInfo _methodBuildingRecalcResources;
+        private static MethodInfo _methodStructureUpdateEnabled;
+        private static MethodInfo _methodLevelStateRecordEntityCreated;
+        private static MethodInfo _methodLevelSysRefreshCmdPanel;
+        private static PropertyInfo _propEntityTeam;
+        private static PropertyInfo _propEntityRelation;
+        private static PropertyInfo _propMovableTargetPosProp;
+        private static PropertyInfo _propMovablePath;
+        private static FieldInfo _fieldMovablePendingPath;
         private static PropertyInfo _propRandomParamsNCells;
         private static PropertyInfo _propRandomParamsFactorDuration;
         private static PropertyInfo _propRandomParamsFactorZombiePop;
@@ -258,7 +280,9 @@ namespace TABCoopMod.Core
                 _methodGetResourcesCost = AccessTools.Method(typeof(ZXCommand), ObfuscatedSymbols.Method_ZXCommand_GetResourcesCost,
                     new[] { typeof(ZXEntity) });
                 _typeCreateEntityCommand = GameAssembly.GetType("ZX.Commands.CreateEntityCommand");
-                _typeStructure = GameAssembly.GetType("ZX.Entities.Structure");
+                TypeStructure = GameAssembly.GetType("ZX.Entities.Structure");
+                TypeColonist = GameAssembly.GetType(ObfuscatedSymbols.Type_Colonist);
+                TypeBuilding = GameAssembly.GetType(ObfuscatedSymbols.Type_Building);
                 _typeEntityBonusCreation = GameAssembly.GetType("ZX.Commands.EntityBonusCreation");
                 _typeExtractFromSlot = GameAssembly.GetType("ZX.Commands.ExtractFromUnitHolderSlot");
                 _propBonusCmdNSlot = _typeEntityBonusCreation?.GetProperty("NSlot", BindingFlags.Public | BindingFlags.Instance);
@@ -284,7 +308,9 @@ namespace TABCoopMod.Core
                 Check(_methodIsVisibleCmd, "ZXCommand.IsVisible");
                 Check(_methodGetResourcesCost, "ZXCommand.GetResourcesCost");
                 Check(_typeCreateEntityCommand, "Type ZX.Commands.CreateEntityCommand");
-                Check(_typeStructure, "Type ZX.Entities.Structure");
+                Check(TypeStructure, "Type ZX.Entities.Structure");
+                Check(TypeColonist, "Type ZX.Entities.Colonist");
+                Check(TypeBuilding, "Type ZX.Entities.Building");
                 Check(_typeEntityBonusCreation, "Type ZX.Commands.EntityBonusCreation");
                 Check(_typeExtractFromSlot, "Type ZX.Commands.ExtractFromUnitHolderSlot");
                 Check(_methodLevelStateConsumeBonus, "ZXLevelState.ConsumeBonus");
@@ -455,6 +481,45 @@ namespace TABCoopMod.Core
                 _methodKeyboardIsKeyForCommand = _typeKeyboardBindingsManager != null
                     ? AccessTools.Method(_typeKeyboardBindingsManager, ObfuscatedSymbols.Method_Keyboard_IsKeyForCommand, new[] { typeof(DXKeys), typeof(ZXKeyboardCommand) })
                     : null;
+                _fieldLevelSysBuildAreaCursor = TypeZXSystemGameLevel != null
+                    ? AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_BuildAreaCursor)
+                    : null;
+                _typeOCellAreaCursor = GameAssembly.GetType(ObfuscatedSymbols.Type_OCellAreaCursor);
+                if (_typeOCellAreaCursor != null)
+                {
+                    _fieldCursorLastEnergyCell = AccessTools.Field(_typeOCellAreaCursor, ObfuscatedSymbols.Field_OCellAreaCursor_LastEnergyCell);
+                    _methodCursorClearEnergyPreview = AccessTools.Method(_typeOCellAreaCursor, ObfuscatedSymbols.Method_OCellAreaCursor_ClearEnergyPreview, Type.EmptyTypes);
+                    _methodCursorUpdateVisual = AccessTools.Method(_typeOCellAreaCursor, ObfuscatedSymbols.Method_OCellAreaCursor_UpdateVisual, Type.EmptyTypes);
+                }
+                _typeZXOrder = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXOrder);
+                _ctorZXOrder = (_typeZXOrder != null && TypeZXCommandTarget != null)
+                    ? _typeZXOrder.GetConstructor(new[] { typeof(ZXCommand), TypeZXCommandTarget })
+                    : null;
+                _typeCBuildable = GameAssembly.GetType(ObfuscatedSymbols.Type_CBuildable);
+                if (_typeCBuildable != null)
+                {
+                    _propCBuildableFactor = _typeCBuildable.GetProperty("BuildingFactor", BindingFlags.Public | BindingFlags.Instance);
+                    _propCBuildableMode = _typeCBuildable.GetProperty("BuildMode", BindingFlags.Public | BindingFlags.Instance);
+                }
+                _propStructureIsBeingBuilt = TypeStructure?.GetProperty("IsBeingBuilt", BindingFlags.Public | BindingFlags.Instance);
+                _methodBuildingRecalcResources = TypeBuilding != null
+                    ? AccessTools.Method(TypeBuilding, ObfuscatedSymbols.Method_Building_RecalcResources, Type.EmptyTypes)
+                    : null;
+                _methodStructureUpdateEnabled = TypeStructure != null
+                    ? AccessTools.Method(TypeStructure, ObfuscatedSymbols.Method_Structure_UpdateEnabled, Type.EmptyTypes)
+                    : null;
+                _methodLevelStateRecordEntityCreated = AccessTools.Method(typeof(ZXLevelState), ObfuscatedSymbols.Method_LevelState_RecordEntityCreated, new[] { typeof(DXEntity) });
+                _methodLevelSysRefreshCmdPanel = TypeZXSystemGameLevel != null
+                    ? AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_RefreshCmdPanel, Type.EmptyTypes)
+                    : null;
+                _propEntityTeam = TypeZXEntity?.GetProperty("Team", BindingFlags.Public | BindingFlags.Instance);
+                _propEntityRelation = TypeZXEntity?.GetProperty("Relation", BindingFlags.Public | BindingFlags.Instance);
+                if (TypeCMovable != null)
+                {
+                    _propMovableTargetPosProp = TypeCMovable.GetProperty("TargetPosition", BindingFlags.Public | BindingFlags.Instance);
+                    _propMovablePath = TypeCMovable.GetProperty("Path", BindingFlags.Public | BindingFlags.Instance);
+                    _fieldMovablePendingPath = TypeCMovable.GetField(ObfuscatedSymbols.Field_CMovable_PendingPathRequest, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                }
 
                 if (_typeZXRandomLevelParams != null)
                 {
@@ -544,6 +609,26 @@ namespace TABCoopMod.Core
                 Check(_methodLevelStateGetSelectionGroups, "ZXLevelState.GetSelectionGroups");
                 Check(_typeKeyboardBindingsManager, $"Type KeyboardBindingsManager ({ObfuscatedSymbols.Type_KeyboardBindingsManager})");
                 Check(_methodKeyboardIsKeyForCommand, "KeyboardBindingsManager.IsKeyForCommand");
+                Check(_fieldLevelSysBuildAreaCursor, "ZXSystemGameLevel.BuildAreaCursor");
+                Check(_typeOCellAreaCursor, "Type ZX.GUI.OCellAreaCursor");
+                Check(_fieldCursorLastEnergyCell, "OCellAreaCursor.LastEnergyCell");
+                Check(_methodCursorClearEnergyPreview, "OCellAreaCursor.ClearEnergyPreview");
+                Check(_methodCursorUpdateVisual, "OCellAreaCursor.UpdateVisual");
+                Check(_typeZXOrder, "Type ZX.Commands.ZXOrder");
+                Check(_ctorZXOrder, "ZXOrder..ctor(ZXCommand, ZXCommandTarget)");
+                Check(_typeCBuildable, "Type ZX.Components.CBuildable");
+                Check(_propCBuildableFactor, "CBuildable.BuildingFactor");
+                Check(_propCBuildableMode, "CBuildable.BuildMode");
+                Check(_propStructureIsBeingBuilt, "Structure.IsBeingBuilt");
+                Check(_methodBuildingRecalcResources, "Building.RecalcResources");
+                Check(_methodStructureUpdateEnabled, "Structure.UpdateEnabled");
+                Check(_methodLevelStateRecordEntityCreated, "ZXLevelState.RecordEntityCreated");
+                Check(_methodLevelSysRefreshCmdPanel, "ZXSystemGameLevel.RefreshCmdPanel");
+                Check(_propEntityTeam, "ZXEntity.Team");
+                Check(_propEntityRelation, "ZXEntity.Relation");
+                Check(_propMovableTargetPosProp, "CMovable.TargetPosition");
+                Check(_propMovablePath, "CMovable.Path");
+                Check(_fieldMovablePendingPath, "CMovable.PendingPathRequest");
 
                 if (missingCount == 0)
                 {
@@ -620,6 +705,33 @@ namespace TABCoopMod.Core
             var ls = CurrentLevelState;
             if (prop == null || ls == null || !prop.CanWrite) return false;
             try { prop.SetValue(ls, value); return true; } catch { return false; }
+        }
+
+        /// <summary>
+        /// Applies an integer delta to a ZXLevelState resource property (Gold/Wood/Stone/Iron/Oil)
+        /// via its private setter so engine storage clamping (DXMath.Limit) is respected.
+        /// </summary>
+        public static bool AddLevelResourceDelta(string name, int delta)
+        {
+            if (delta == 0) return true;
+            var prop = GetLevelProperty(name);
+            var ls = CurrentLevelState;
+            if (prop == null || ls == null) return false;
+            var setter = prop.GetSetMethod(nonPublic: true);
+            if (setter == null) return false;
+            try
+            {
+                int cur = Convert.ToInt32(prop.GetValue(ls));
+                int next = cur + delta;
+                if (!string.Equals(name, "Gold", StringComparison.Ordinal) && next < 0)
+                    next = 0;
+                setter.Invoke(ls, new object[] { next });
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         /// <summary>
@@ -1194,6 +1306,10 @@ namespace TABCoopMod.Core
         }
 
         public static bool IsZombieType(Type type) => type != null && _typeZombie != null && _typeZombie.IsAssignableFrom(type);
+
+        public static bool IsColonistType(Type type) => type != null && TypeColonist != null && TypeColonist.IsAssignableFrom(type);
+
+        public static bool IsStructureType(Type type) => type != null && TypeStructure != null && TypeStructure.IsAssignableFrom(type);
 
         public static void ExecuteCommandOnEntity(object cmd, object executor, object target)
         {
@@ -2193,7 +2309,7 @@ namespace TABCoopMod.Core
                 if (entity != null)
                 {
                     entityType = entity.GetType();
-                    isStructure = _typeStructure != null && _typeStructure.IsInstanceOfType(entity);
+                    isStructure = TypeStructure != null && TypeStructure.IsInstanceOfType(entity);
                 }
             }
             catch { }
@@ -2478,6 +2594,516 @@ namespace TABCoopMod.Core
             {
                 ModLogger.Warn($"[GameBridge] CanPlaceBuildingAtTarget({buildingType.Name}) failed: {ex.Message}");
                 return true;
+            }
+        }
+
+        /// <summary>
+        /// Temporarily removes the local OCellAreaCursor's preview energy-grid +1 so replaying
+        /// remote PlaceBuilding commands sees the deterministic shared energy grid rather than
+        /// whichever power building the local player happens to be hovering.
+        /// </summary>
+        public static object SuspendLocalBuildCursorEnergyPreview()
+        {
+            if (_fieldLevelSysBuildAreaCursor == null || _fieldCursorLastEnergyCell == null || _methodCursorClearEnergyPreview == null)
+                return null;
+            try
+            {
+                object levelSys = LevelSystemInstance;
+                if (levelSys == null) return null;
+                object cursor = _fieldLevelSysBuildAreaCursor.GetValue(levelSys);
+                if (cursor == null) return null;
+                if (_fieldCursorLastEnergyCell.GetValue(cursor) == null)
+                    return null;
+                _methodCursorClearEnergyPreview.Invoke(cursor, null);
+                return cursor;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static void RestoreLocalBuildCursorEnergyPreview(object cursor)
+        {
+            if (cursor == null || _methodCursorUpdateVisual == null) return;
+            try
+            {
+                if (cursor is DXObject obj && obj.Scene != null)
+                    _methodCursorUpdateVisual.Invoke(cursor, null);
+            }
+            catch { }
+        }
+
+        // ====================================================================
+        // Phase 2 & 3 Async Delta Patching Helpers (ProdQueues / Structures /
+        // Combat+Move Targets / Missing Dynamic Entity Respawn)
+        // ====================================================================
+
+        public static int[] ReadOrdersQueuedCommandIds(DXEntity entity)
+        {
+            if (entity == null || entity.Disposed) return null;
+            IList orders = GetOrdersQueued(GetCommandableObject(entity));
+            if (orders == null || orders.Count == 0) return null;
+            var ids = new int[orders.Count];
+            int n = 0;
+            for (int i = 0; i < orders.Count; i++)
+            {
+                object item = orders[i];
+                if (item == null) continue;
+                ids[n++] = GetOrderCommandId(item);
+            }
+            if (n == 0) return null;
+            if (n < ids.Length) Array.Resize(ref ids, n);
+            return ids;
+        }
+
+        public static bool ApplyOrdersQueuedCommandIds(DXEntity entity, int[] commandIds)
+        {
+            if (entity == null || entity.Disposed || _typeZXOrder == null || _ctorZXOrder == null)
+                return false;
+            object cmdable = GetCommandableObject(entity);
+            IList orders = GetOrdersQueued(cmdable);
+            if (orders == null) return false;
+
+            EnsureCommandTargetMeta();
+            if (_typeZXCommandTargetRef == null) return false;
+
+            try
+            {
+                lock (orders.SyncRoot)
+                {
+                    orders.Clear();
+                    if (commandIds != null && commandIds.Length > 0)
+                    {
+                        object defaultTarget = Activator.CreateInstance(_typeZXCommandTargetRef);
+                        int limit = Math.Min(commandIds.Length, 4);
+                        for (int i = 0; i < limit; i++)
+                        {
+                            object cmd = GetCommandById(commandIds[i]);
+                            if (cmd == null) continue;
+                            object zxOrder = _ctorZXOrder.Invoke(new[] { cmd, defaultTarget });
+                            if (zxOrder != null)
+                                orders.Add(zxOrder);
+                        }
+                    }
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] ApplyOrdersQueuedCommandIds({entity.ID}) failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        public static void RefreshCommandPanel()
+        {
+            try
+            {
+                object levelSys = LevelSystemInstance;
+                if (levelSys != null)
+                    _methodLevelSysRefreshCmdPanel?.Invoke(levelSys, null);
+            }
+            catch { }
+        }
+
+        public static bool TryCaptureStructureMeta(
+            DXEntity entity,
+            out ulong templateId,
+            out int cellX,
+            out int cellY,
+            out byte width,
+            out byte height,
+            out float buildFactor)
+        {
+            templateId = 0UL;
+            cellX = 0;
+            cellY = 0;
+            width = 1;
+            height = 1;
+            buildFactor = 1f;
+            if (entity == null || entity.Disposed || !IsStructureType(entity.GetType()))
+                return false;
+            if (entity.Template == null) return false;
+
+            templateId = entity.Template.ID;
+            var ca = entity.CellArea;
+            cellX = ca.X;
+            cellY = ca.Y;
+            width = (byte)Math.Max(1, Math.Min(255, ca.Width));
+            height = (byte)Math.Max(1, Math.Min(255, ca.Height));
+            if (_typeCBuildable != null && _propCBuildableFactor != null)
+            {
+                var comps = entity.Components;
+                if (comps != null)
+                {
+                    for (int i = 0; i < comps.Count; i++)
+                    {
+                        if (comps[i] != null && _typeCBuildable.IsInstanceOfType(comps[i]))
+                        {
+                            buildFactor = Convert.ToSingle(_propCBuildableFactor.GetValue(comps[i]));
+                            break;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
+        public static bool TrySetEntityLifeAbsolute(DXEntity entity, int life)
+        {
+            object lifeObj = GetLifeObject(entity);
+            if (lifeObj == null) return false;
+            Type t = lifeObj.GetType();
+            try
+            {
+                if (!_lifePropCache.TryGetValue(t, out PropertyInfo lifeProp))
+                {
+                    lifeProp = t.GetProperty("Life", BindingFlags.Public | BindingFlags.Instance);
+                    _lifePropCache[t] = lifeProp;
+                }
+                if (lifeProp == null || !lifeProp.CanWrite) return false;
+                lifeProp.SetValue(lifeObj, Math.Max(0, life));
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool PlaceSyncedStructure(
+            ulong hostEntityId,
+            ulong templateId,
+            int cellX,
+            int cellY,
+            int width,
+            int height,
+            int life,
+            float buildFactor)
+        {
+            var game = DXGame.Current;
+            var proj = DXProject.Current;
+            if (game == null || proj == null || hostEntityId == 0UL || templateId == 0UL)
+                return false;
+            if (game.GetEntityByID(hostEntityId) != null)
+                return false;
+
+            DXEntityTemplate tpl = proj.EntityTemplateFromID(templateId);
+            if (tpl == null) return false;
+
+            Determinism.LockstepClock.EnterVisualVfxContext();
+            try
+            {
+                DXEntity ent = tpl.CreateInstance() as DXEntity;
+                if (ent == null || !IsStructureType(ent.GetType()))
+                    return false;
+
+                ent.ID = hostEntityId;
+                if (_propEntityRelation != null)
+                    _propEntityRelation.SetValue(ent, Enum.ToObject(_propEntityRelation.PropertyType, 0)); // Friend = 0
+                if (_propEntityTeam != null)
+                    _propEntityTeam.SetValue(ent, Enum.ToObject(_propEntityTeam.PropertyType, 0)); // Player = 0
+
+                ent.CellArea = new Rectangle(cellX, cellY, Math.Max(1, width), Math.Max(1, height));
+                _methodEntityUpdateCellPosition?.Invoke(ent, null);
+
+                bool isBeingBuilt = buildFactor < 0.999f && _typeCBuildable != null && _propCBuildableMode != null && _propCBuildableFactor != null;
+                if (isBeingBuilt)
+                {
+                    var cBuildable = Activator.CreateInstance(_typeCBuildable) as DXComponent;
+                    if (cBuildable != null)
+                    {
+                        _propCBuildableMode.SetValue(cBuildable, Enum.Parse(_propCBuildableMode.PropertyType, "Building"));
+                        _propCBuildableFactor.SetValue(cBuildable, Math.Max(0f, Math.Min(0.99f, buildFactor)));
+                        ent.AddComponent(cBuildable);
+                    }
+                    _propStructureIsBeingBuilt?.SetValue(ent, true);
+                }
+                else
+                {
+                    _propStructureIsBeingBuilt?.SetValue(ent, false);
+                }
+
+                _methodStructureUpdateEnabled?.Invoke(ent, null);
+                ent.CreateSceneObject();
+
+                object ls = CurrentLevelState;
+                if (ls != null)
+                    _methodLevelStateRecordEntityCreated?.Invoke(ls, new object[] { ent });
+
+                ent.InvokeAddToScene();
+                FlushStartFramePostMethods();
+
+                if (life > 0)
+                    TrySetEntityLifeAbsolute(ent, life);
+
+                if (TypeBuilding != null && TypeBuilding.IsInstanceOfType(ent))
+                    _methodBuildingRecalcResources?.Invoke(ent, null);
+
+                if (ent.SceneObject != null && ent.SceneObject.Animation != null)
+                {
+                    DXClip clip = ent.SceneObject.Animation.NewClip();
+                    DXTransition tr = clip.NewTransition(200, -1f);
+                    tr.RangeCenter = new DXRange<PointF?>(ent.SceneObject.Center.Add(0f, -1f), ent.SceneObject.Center);
+                    tr.RangeOpacity = new DXRange<float?>(0f, ent.SceneObject.Opacity);
+                    clip.OnFinished += delegate { try { clip.Clear(); } catch { } };
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] PlaceSyncedStructure(id={hostEntityId}, tpl={templateId}) failed: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                Determinism.LockstepClock.ExitVisualVfxContext();
+            }
+        }
+
+        public static bool DestroySyncedExtraStructure(DXEntity entity)
+        {
+            if (entity == null || entity.Disposed || !IsStructureType(entity.GetType()))
+                return false;
+            if (ReferenceEquals(entity, GetCommandCenterEntity()))
+                return false;
+
+            Determinism.LockstepClock.EnterVisualVfxContext();
+            try
+            {
+                entity.RemoveFromScene();
+                entity.Dispose();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] DestroySyncedExtraStructure(id={entity.ID}) failed: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                Determinism.LockstepClock.ExitVisualVfxContext();
+            }
+        }
+
+        private static object GetBDataFromEntity(DXEntity entity)
+        {
+            if (entity == null || _mGetEntityBehaviour == null || !_mGetEntityBehaviour.DeclaringType.IsInstanceOfType(entity))
+                return null;
+            object cbehav = _mGetEntityBehaviour.Invoke(entity, null);
+            if (cbehav == null) return null;
+            if (_propCBehavBehaviour == null)
+                _propCBehavBehaviour = cbehav.GetType().GetProperty("Behaviour", BindingFlags.Public | BindingFlags.Instance);
+            object behav = _propCBehavBehaviour?.GetValue(cbehav);
+            if (behav == null) return null;
+            if (_propBehavData == null)
+                _propBehavData = behav.GetType().GetProperty("Data", BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+            return _propBehavData?.GetValue(behav);
+        }
+
+        private static bool TrySetEntityTargetRefOnBData(object bdata, ulong targetEntityId)
+        {
+            if (bdata == null) return false;
+            if (_fieldBDataTargetRef == null)
+                _fieldBDataTargetRef = bdata.GetType().GetField(ObfuscatedSymbols.Field_BData_TargetRef, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (_fieldBDataTargetRef == null) return false;
+
+            Type refType = _fieldBDataTargetRef.FieldType;
+            object refBox = Activator.CreateInstance(refType);
+            if (targetEntityId != 0UL)
+            {
+                DXEntity targetEnt = DXGame.Current?.GetEntityByID(targetEntityId);
+                if (targetEnt == null || targetEnt.Disposed)
+                    return false;
+                PropertyInfo pEnt = refType.GetProperty("Entity", BindingFlags.Public | BindingFlags.Instance);
+                if (pEnt == null) return false;
+                pEnt.SetValue(refBox, targetEnt);
+            }
+            _fieldBDataTargetRef.SetValue(bdata, refBox);
+            return true;
+        }
+
+        public static void GetEntityCombatAndMoveTargets(DXEntity entity, out ulong targetEntityId, out float moveX, out float moveY)
+        {
+            targetEntityId = 0UL;
+            moveX = float.NaN;
+            moveY = float.NaN;
+            if (entity == null || entity.Disposed) return;
+
+            try
+            {
+                object bdata = GetBDataFromEntity(entity);
+                if (bdata != null)
+                {
+                    if (_fieldBDataTargetRef == null)
+                        _fieldBDataTargetRef = bdata.GetType().GetField(ObfuscatedSymbols.Field_BData_TargetRef, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    object boxedRef = _fieldBDataTargetRef?.GetValue(bdata);
+                    if (boxedRef != null)
+                    {
+                        if (_propTargetRefId == null)
+                            _propTargetRefId = boxedRef.GetType().GetProperty("IDEntity", BindingFlags.Public | BindingFlags.Instance);
+                        if (_propTargetRefId != null)
+                            targetEntityId = Convert.ToUInt64(_propTargetRefId.GetValue(boxedRef));
+                    }
+                }
+
+                if (_mGetEntityMovable != null && _mGetEntityMovable.DeclaringType.IsInstanceOfType(entity))
+                {
+                    object movable = _mGetEntityMovable.Invoke(entity, null);
+                    if (movable != null && _propMovableTargetPosProp != null)
+                    {
+                        object val = _propMovableTargetPosProp.GetValue(movable);
+                        if (val is PointF pt)
+                        {
+                            moveX = pt.X;
+                            moveY = pt.Y;
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static bool TryAlignEntityCombatAndMoveTarget(DXEntity entity, ulong hostTargetId, float hostMoveX, float hostMoveY)
+        {
+            if (entity == null || entity.Disposed) return false;
+            bool changed = false;
+            try
+            {
+                GetEntityCombatAndMoveTargets(entity, out ulong localTargetId, out float localMoveX, out float localMoveY);
+                if (localTargetId != hostTargetId)
+                {
+                    object bdata = GetBDataFromEntity(entity);
+                    if (bdata != null && TrySetEntityTargetRefOnBData(bdata, hostTargetId))
+                        changed = true;
+                }
+
+                bool hostHasMove = !float.IsNaN(hostMoveX) && !float.IsNaN(hostMoveY) && !float.IsInfinity(hostMoveX) && !float.IsInfinity(hostMoveY);
+                bool localHasMove = !float.IsNaN(localMoveX) && !float.IsNaN(localMoveY);
+                bool moveDiff = hostHasMove != localHasMove;
+                if (hostHasMove && localHasMove)
+                {
+                    float dx = hostMoveX - localMoveX;
+                    float dy = hostMoveY - localMoveY;
+                    if (dx * dx + dy * dy >= 0.25f)
+                        moveDiff = true;
+                }
+
+                if (moveDiff && _mGetEntityMovable != null && _mGetEntityMovable.DeclaringType.IsInstanceOfType(entity))
+                {
+                    object movable = _mGetEntityMovable.Invoke(entity, null);
+                    if (movable != null && _propMovableTargetPosProp != null)
+                    {
+                        PointF? nextTarget = hostHasMove ? (PointF?)new PointF(hostMoveX, hostMoveY) : null;
+                        _propMovableTargetPosProp.SetValue(movable, nextTarget);
+                        (_propMovablePath?.GetValue(movable) as IList)?.Clear();
+                        _fieldMovablePendingPath?.SetValue(movable, null);
+                        changed = true;
+                    }
+                }
+            }
+            catch { }
+            return changed;
+        }
+
+        public static bool TryCaptureDynamicSpawnMeta(DXEntity entity, out ulong templateId, out byte teamRaw, out ulong targetId)
+        {
+            templateId = 0UL;
+            teamRaw = 0;
+            targetId = 0UL;
+            if (entity == null || entity.Disposed || entity.Template == null)
+                return false;
+
+            templateId = entity.Template.ID;
+            if (_propEntityTeam != null)
+            {
+                try { teamRaw = Convert.ToByte(_propEntityTeam.GetValue(entity)); } catch { }
+            }
+            GetEntityCombatAndMoveTargets(entity, out targetId, out _, out _);
+            return templateId != 0UL;
+        }
+
+        public static bool SpawnSyncedDynamicEntity(
+            ulong hostEntityId,
+            ulong templateId,
+            float x,
+            float y,
+            int life,
+            byte teamRaw,
+            ulong targetId)
+        {
+            var game = DXGame.Current;
+            var proj = DXProject.Current;
+            if (game == null || proj == null || hostEntityId == 0UL || templateId == 0UL)
+                return false;
+            if (game.GetEntityByID(hostEntityId) != null)
+                return false;
+
+            DXEntityTemplate tpl = proj.EntityTemplateFromID(templateId);
+            if (tpl == null) return false;
+
+            Determinism.LockstepClock.EnterVisualVfxContext();
+            try
+            {
+                DXEntity ent = tpl.CreateInstance() as DXEntity;
+                if (ent == null) return false;
+
+                ent.ID = hostEntityId;
+                if (_propEntityTeam != null)
+                    _propEntityTeam.SetValue(ent, Enum.ToObject(_propEntityTeam.PropertyType, teamRaw));
+
+                var pos = new PointF(
+                    Determinism.LockstepClock.QuantizeCoord(x),
+                    Determinism.LockstepClock.QuantizeCoord(y));
+                ent.LastPosition = pos;
+                ent.Position = pos;
+
+                ent.InvokeAddToScene();
+                FlushStartFramePostMethods();
+
+                if (life > 0)
+                    TrySetEntityLifeAbsolute(ent, life);
+
+                if (targetId != 0UL)
+                {
+                    object bdata = GetBDataFromEntity(ent);
+                    if (bdata != null)
+                        TrySetEntityTargetRefOnBData(bdata, targetId);
+                }
+
+                if (teamRaw == 0)
+                {
+                    object ls = CurrentLevelState;
+                    if (ls != null)
+                        _methodLevelStateRecordEntityCreated?.Invoke(ls, new object[] { ent });
+                }
+
+                if (ent.SceneObject != null)
+                {
+                    ent.SceneObject.Opacity = 0f;
+                    // Zombies carry CInvisibleWhenNotWatched which handles fog-gated fade-in (+0.09 / 4 ticks);
+                    // player units need an explicit short visual fade-in clip.
+                    if (!IsZombieType(ent.GetType()) && ent.SceneObject.Animation != null)
+                    {
+                        DXClip clip = ent.SceneObject.Animation.NewClip();
+                        DXTransition tr = clip.NewTransition(350, -1f);
+                        tr.RangeOpacity = new DXRange<float?>(0f, 1f);
+                        clip.OnFinished += delegate { try { clip.Clear(); } catch { } };
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] SpawnSyncedDynamicEntity(id={hostEntityId}, tpl={templateId}) failed: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                Determinism.LockstepClock.ExitVisualVfxContext();
             }
         }
 

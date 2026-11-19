@@ -29,6 +29,7 @@ namespace TABCoopMod.Determinism
         private const byte FlagIgnore = 1;
         private const byte FlagProjectile = 2;
         private const byte FlagZombie = 4;
+        private const byte FlagStructure = 8;
         private static readonly Dictionary<Type, byte> _entityTypeFlags = new Dictionary<Type, byte>();
 
         public struct EntityPosSample
@@ -38,6 +39,13 @@ namespace TABCoopMod.Determinism
             public float Y;
             public int Life;
             public bool IsDynamic;
+            public bool IsStructure;
+        }
+
+        public struct ProdQueueSample
+        {
+            public ulong EntityId;
+            public int[] CommandIds;
         }
 
         public struct LevelStateSnapshotDigest
@@ -77,8 +85,9 @@ namespace TABCoopMod.Determinism
             public ulong[] LifeBuckets;
             public ulong[] EntityBuckets;
             public List<EntityPosSample> DynamicPositions;
+            public List<ProdQueueSample> ProdQueues;
 
-            public void Reset(bool allocateBuckets, List<EntityPosSample> dynamicOut)
+            public void Reset(bool allocateBuckets, List<EntityPosSample> dynamicOut, List<ProdQueueSample> prodQueuesOut = null)
             {
                 EntityCount = 0;
                 ProjectileCount = 0;
@@ -94,6 +103,7 @@ namespace TABCoopMod.Determinism
                 LifeBuckets = allocateBuckets ? new ulong[BucketCount] : null;
                 EntityBuckets = allocateBuckets ? new ulong[BucketCount] : null;
                 DynamicPositions = dynamicOut;
+                ProdQueues = prodQueuesOut;
             }
         }
 
@@ -115,10 +125,11 @@ namespace TABCoopMod.Determinism
                 _acc.Reset(allocateBuckets: false, dynamicOut: null);
             }
 
-            public bool Step(int curTick, out LevelStateSnapshotDigest digest, out List<EntityPosSample> dynamicPositions)
+            public bool Step(int curTick, out LevelStateSnapshotDigest digest, out List<EntityPosSample> dynamicPositions, out List<ProdQueueSample> prodQueues)
             {
                 digest = default;
                 dynamicPositions = null;
+                prodQueues = null;
 
                 var game = DXGame.Current;
                 object ls = GameBridge.CurrentLevelState;
@@ -135,7 +146,7 @@ namespace TABCoopMod.Determinism
                 {
                     if (slot != 0)
                         return false;
-                    _acc.Reset(allocateBuckets: true, dynamicOut: new List<EntityPosSample>(2048));
+                    _acc.Reset(allocateBuckets: true, dynamicOut: new List<EntityPosSample>(2048), prodQueuesOut: new List<ProdQueueSample>(16));
                     _inEpoch = true;
                 }
 
@@ -176,13 +187,15 @@ namespace TABCoopMod.Determinism
                 _inEpoch = false;
                 digest = FinalizeDigest(game, ls, curTick, _acc);
                 dynamicPositions = _acc.DynamicPositions;
+                prodQueues = _acc.ProdQueues;
                 _acc.DynamicPositions = null;
+                _acc.ProdQueues = null;
                 _acc.PosBuckets = null;
                 return true;
             }
         }
 
-        public static LevelStateSnapshotDigest ComputeDigest(List<EntityPosSample> outDynamicPositions = null)
+        public static LevelStateSnapshotDigest ComputeDigest(List<EntityPosSample> outDynamicPositions = null, List<ProdQueueSample> outProdQueues = null)
         {
             var game = DXGame.Current;
             object ls = GameBridge.CurrentLevelState;
@@ -190,7 +203,7 @@ namespace TABCoopMod.Determinism
                 return new LevelStateSnapshotDigest();
 
             var acc = new DigestAccumulators();
-            acc.Reset(allocateBuckets: true, dynamicOut: outDynamicPositions);
+            acc.Reset(allocateBuckets: true, dynamicOut: outDynamicPositions, prodQueuesOut: outProdQueues);
 
             if (game.Entities != null)
             {
@@ -215,12 +228,16 @@ namespace TABCoopMod.Determinism
             if (!_entityTypeFlags.TryGetValue(entityType, out byte flags))
             {
                 string typeName = entityType.Name;
-                if (entityType == typeof(DXEntity) || string.Equals(typeName, "Raven", StringComparison.Ordinal))
+                if (entityType == typeof(DXEntity)
+                    || string.Equals(typeName, "Raven", StringComparison.Ordinal)
+                    || GameBridge.IsColonistType(entityType))
                     flags = FlagIgnore;
                 else if (IsProjectileName(typeName))
                     flags = FlagProjectile;
                 else if (GameBridge.IsZombieType(entityType))
                     flags = FlagZombie;
+                else if (GameBridge.IsStructureType(entityType))
+                    flags = FlagStructure;
                 _entityTypeFlags[entityType] = flags;
             }
             if ((flags & FlagIgnore) != 0)
@@ -245,10 +262,11 @@ namespace TABCoopMod.Determinism
             acc.EntityCount++;
 
             bool isDynamic = entity.PhysicalType == DXBodyType.Dynamic;
-            // Dynamic bodies carry position + HP for async alignment; static entities with HP
-            // (walls/buildings) are sampled too so host-authoritative HP correction covers them.
-            if (acc.DynamicPositions != null && (isDynamic || lifeValue > 0))
-                acc.DynamicPositions.Add(new EntityPosSample { Id = entity.ID, X = px, Y = py, Life = lifeValue, IsDynamic = isDynamic });
+            bool isStructure = (flags & FlagStructure) != 0;
+            // Dynamic bodies carry position + HP for async alignment; static structures / HP entities
+            // are sampled too so host-authoritative HP and static structure correction cover them.
+            if (acc.DynamicPositions != null && (isDynamic || isStructure || lifeValue > 0))
+                acc.DynamicPositions.Add(new EntityPosSample { Id = entity.ID, X = px, Y = py, Life = lifeValue, IsDynamic = isDynamic, IsStructure = isStructure });
 
             int bucketIdx = (int)(entity.ID & (ulong)(BucketCount - 1));
             long posMix = (long)entity.ID ^ (qx * 73856093L) ^ (qy * 19349663L);
@@ -277,7 +295,7 @@ namespace TABCoopMod.Determinism
             }
 
             if ((flags & FlagZombie) == 0)
-                acc.QueuedOrderCount += MixQueue(entity, ref acc.ProductionChecksum);
+                acc.QueuedOrderCount += MixQueue(entity, ref acc.ProductionChecksum, acc.ProdQueues);
         }
 
         private static LevelStateSnapshotDigest FinalizeDigest(DXGame game, object ls, int simTick, DigestAccumulators acc)
@@ -346,7 +364,7 @@ namespace TABCoopMod.Determinism
                 || typeName.IndexOf("Proyectile", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        private static int MixQueue(DXEntity entity, ref long productionChecksum)
+        private static int MixQueue(DXEntity entity, ref long productionChecksum, List<ProdQueueSample> prodQueuesOut)
         {
             IList orders;
             try { orders = GameBridge.GetOrdersQueued(GameBridge.GetCommandableObject(entity)); }
@@ -358,16 +376,25 @@ namespace TABCoopMod.Determinism
             if (orders == null || orders.Count == 0) return 0;
 
             int count = 0;
+            int[] captured = prodQueuesOut != null ? new int[orders.Count] : null;
             for (int slot = 0; slot < orders.Count; slot++)
             {
                 object item = orders[slot];
                 if (item == null) continue;
                 int commandId = GameBridge.GetOrderCommandId(item);
+                if (captured != null && count < captured.Length)
+                    captured[count] = commandId;
                 count++;
                 // Keyed by owner entity ID + slot + command id; deterministic and order-independent.
                 productionChecksum += (long)entity.ID
                     ^ ((long)(slot + 1) * 2654435761L)
                     ^ ((long)commandId * 2246822519L);
+            }
+            if (prodQueuesOut != null && count > 0)
+            {
+                if (count < captured.Length)
+                    Array.Resize(ref captured, count);
+                prodQueuesOut.Add(new ProdQueueSample { EntityId = entity.ID, CommandIds = captured });
             }
             return count;
         }

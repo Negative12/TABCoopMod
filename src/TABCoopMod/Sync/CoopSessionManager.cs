@@ -106,18 +106,23 @@ namespace TABCoopMod.Sync
         private static readonly HashSet<string> _versionMismatchAlertedKeys = new HashSet<string>();
         private static string _pendingVersionMismatchAlert;
 
-        // Tiered reload policy (async_align). Positions / HP / aggro / projectiles are corrected or
-        // re-derived continuously without pausing; only irreversible divergence forces a full reload.
-        private const int EconReloadStreak = 3;              // ~6s persistent resource/production/time mismatch
+        // Tiered reload policy (async_align). Positions / HP / aggro / projectiles / 5-resource econ /
+        // production queues / small structure & entity deltas are corrected continuously without pausing;
+        // only sustained or large-scale divergence forces a full reload.
+        private const int EconReloadStreak = 3;              // ~6s persistent time/unhandled econ mismatch
+        private const int AsyncEconFallbackStreak = 6;       // ~12s fallback if async econ/prod/resv fails to converge
         private const int StructuralReloadStreak = 6;        // ~12s entity-count delta beyond tolerance
         private const int MissingOnClientReloadStreak = 4;   // ~8s sustained unspawned/missing Host entities on Client
         private const int WidePosReloadStreak = 10;          // ~15-20s wide residual drift after corrections
         private const double StructuralResyncCooldownMs = 30000.0;
         private const double LongPeriodRealignMs = 300000.0; // 5 min continuous residual divergence
         private static int _consecutiveEconMismatch;
+        private static int _consecutiveAsyncEconMismatch;
         private static int _consecutiveStructuralMismatch;
         private static int _consecutiveMissingOnClient;
         private static int _consecutiveSubCoarsePosDrift;
+        private static int _lastClientMissingOnClient;
+        private static int _lastClientMissingOnHost;
         private static double _divergedSinceTicks = -1.0;
 
         // Periodic log throttling (verbose mode bypasses via ModLogger.IsVerbose)
@@ -135,9 +140,12 @@ namespace TABCoopMod.Sync
         private static void ResetTieredResyncState()
         {
             _consecutiveEconMismatch = 0;
+            _consecutiveAsyncEconMismatch = 0;
             _consecutiveStructuralMismatch = 0;
             _consecutiveMissingOnClient = 0;
             _consecutiveSubCoarsePosDrift = 0;
+            _lastClientMissingOnClient = 0;
+            _lastClientMissingOnHost = 0;
             _divergedSinceTicks = -1.0;
         }
         private static double _lastAutoResyncTicks = -100000.0;
@@ -294,6 +302,57 @@ namespace TABCoopMod.Sync
             public List<byte[]> Chunks;
         }
 
+        private struct EconSnapshot
+        {
+            public int Gold, Wood, Stone, Iron, Oil;
+        }
+
+        private struct StructSampleMeta
+        {
+            public ulong Id;
+            public ulong TemplateId;
+            public int CellX;
+            public int CellY;
+            public byte Width;
+            public byte Height;
+            public int Life;
+            public float BuildFactor;
+        }
+
+        private struct DynamicTargetSample
+        {
+            public ulong Id;
+            public ulong TargetEntityId;
+            public float MoveX;
+            public float MoveY;
+        }
+
+        private struct DynamicSpawnMeta
+        {
+            public ulong Id;
+            public ulong TemplateId;
+            public byte TeamRaw;
+            public ulong TargetEntityId;
+        }
+
+        private struct DynamicSpawnSample
+        {
+            public ulong Id;
+            public ulong TemplateId;
+            public float X;
+            public float Y;
+            public int Life;
+            public byte TeamRaw;
+            public ulong TargetEntityId;
+        }
+
+        private struct ProdQueueFixItem
+        {
+            public ulong EntityId;
+            public int[] ExpectedClientCommandIds;
+            public int[] HostCommandIds;
+        }
+
         private sealed class PendingPosAlignApply
         {
             public int Generation;
@@ -309,6 +368,13 @@ namespace TABCoopMod.Sync
             public List<EntityDeltaFix> Deltas;
             public List<EntityLifeFix> LifeFixes;
             public int LifeDiffCount, MissingOnHost, MissingOnClient;
+            public bool ApplyEconCorrection;
+            public int DeltaGold, DeltaWood, DeltaStone, DeltaIron, DeltaOil;
+            public List<ProdQueueFixItem> ProdQueueFixes;
+            public List<StructSampleMeta> StructBuilds;
+            public List<ulong> StructDestroys;
+            public Dictionary<ulong, DynamicTargetSample> TargetFixes;
+            public List<DynamicSpawnSample> DynamicSpawns;
         }
 
         public static readonly Dictionary<byte, AllyVisualState> AllyStates = new Dictionary<byte, AllyVisualState>();
@@ -354,6 +420,10 @@ namespace TABCoopMod.Sync
             new Dictionary<int, Dictionary<byte, TickDigestRecord>>();
         private static readonly Dictionary<int, List<StateHasher.EntityPosSample>> _tickPosCache =
             new Dictionary<int, List<StateHasher.EntityPosSample>>();
+        private static readonly Dictionary<int, EconSnapshot> _tickEconCache =
+            new Dictionary<int, EconSnapshot>();
+        private static readonly Dictionary<int, List<StateHasher.ProdQueueSample>> _tickProdCache =
+            new Dictionary<int, List<StateHasher.ProdQueueSample>>();
         private static readonly Queue<int> _tickPosCacheOrder = new Queue<int>();
         private static readonly Dictionary<int, PosSyncReceiveBuffer> _posSyncIncoming =
             new Dictionary<int, PosSyncReceiveBuffer>();
@@ -393,6 +463,8 @@ namespace TABCoopMod.Sync
             _hostTickDigests.Clear();
             _clientTickDigests.Clear();
             _tickPosCache.Clear();
+            _tickEconCache.Clear();
+            _tickProdCache.Clear();
             _tickPosCacheOrder.Clear();
             _posSyncIncoming.Clear();
             while (_outgoingPosSyncQueue.TryDequeue(out _)) { }
@@ -2218,15 +2290,17 @@ namespace TABCoopMod.Sync
             bool hasDigest = false;
             StateHasher.LevelStateSnapshotDigest digest = default;
             List<StateHasher.EntityPosSample> dynamicPositions = null;
+            List<StateHasher.ProdQueueSample> prodQueues = null;
 
             if (_lastCheckedSimTick < 0)
             {
                 dynamicPositions = new List<StateHasher.EntityPosSample>(2048);
-                digest = StateHasher.ComputeDigest(dynamicPositions);
+                prodQueues = new List<StateHasher.ProdQueueSample>(16);
+                digest = StateHasher.ComputeDigest(dynamicPositions, prodQueues);
                 _epochHasher.Reset();
                 hasDigest = true;
             }
-            else if (_epochHasher.Step(curTick, out digest, out dynamicPositions))
+            else if (_epochHasher.Step(curTick, out digest, out dynamicPositions, out prodQueues))
             {
                 hasDigest = true;
             }
@@ -2254,7 +2328,7 @@ namespace TABCoopMod.Sync
                 }
             }
 
-            CacheTickPositions(digest.SimTick, dynamicPositions);
+            CacheTickPositions(digest.SimTick, dynamicPositions, in digest, prodQueues);
 
             string digestSummary =
                 $"Pos={digest.PosChecksum:X16} Coarse={digest.CoarsePosChecksum:X16} Life={digest.LifeChecksum:X16} " +
@@ -2596,6 +2670,9 @@ namespace TABCoopMod.Sync
                     else
                         _consecutiveMissingOnClient = 0;
 
+                    _lastClientMissingOnClient = missingOnClient;
+                    _lastClientMissingOnHost = missingOnHost;
+
                     double statsNow = DXHelper_Environment.Ticks;
                     bool notablePosDrift = killsApplied > 0 || lifeApplied > 0
                         || missingOnClient >= 5 || missingOnHost >= 5
@@ -2749,15 +2826,34 @@ namespace TABCoopMod.Sync
             }
         }
 
-        private static void CacheTickPositions(int tick, List<StateHasher.EntityPosSample> samples)
+        private static void CacheTickPositions(
+            int tick,
+            List<StateHasher.EntityPosSample> samples,
+            in StateHasher.LevelStateSnapshotDigest digest,
+            List<StateHasher.ProdQueueSample> prodQueues)
         {
             if (samples == null) return;
             _tickPosCache[tick] = samples;
+            _tickEconCache[tick] = new EconSnapshot
+            {
+                Gold = digest.Gold,
+                Wood = digest.Wood,
+                Stone = digest.Stone,
+                Iron = digest.Iron,
+                Oil = digest.Oil
+            };
+            if (prodQueues != null && prodQueues.Count > 0)
+                _tickProdCache[tick] = prodQueues;
+            else
+                _tickProdCache.Remove(tick);
+
             _tickPosCacheOrder.Enqueue(tick);
             while (_tickPosCacheOrder.Count > 16)
             {
                 int old = _tickPosCacheOrder.Dequeue();
                 _tickPosCache.Remove(old);
+                _tickEconCache.Remove(old);
+                _tickProdCache.Remove(old);
             }
         }
 
@@ -2962,12 +3058,14 @@ namespace TABCoopMod.Sync
                 bool aggroDiff = host.ZombieAggroChecksum != client.ZombieAggroChecksum || host.AggroZombieCount != client.AggroZombieCount;
                 bool aggroCountDiff = host.AggroZombieCount != client.AggroZombieCount;
                 bool entityDiff = host.EntityCount != client.EntityCount;
-                bool econCoreDiff = host.Gold != client.Gold || host.Wood != client.Wood || host.Stone != client.Stone
-                    || host.Iron != client.Iron || host.Oil != client.Oil
-                    || host.ReservationChecksum != client.ReservationChecksum
-                    || host.ProductionChecksum != client.ProductionChecksum
-                    || host.GameTimeMs != client.GameTimeMs;
-                bool econDiff = econCoreDiff || host.QueuedOrderCount != client.QueuedOrderCount;
+                bool timeDiff = host.GameTimeMs != client.GameTimeMs;
+                bool resAmountDiff = host.Gold != client.Gold || host.Wood != client.Wood || host.Stone != client.Stone
+                    || host.Iron != client.Iron || host.Oil != client.Oil;
+                bool resvDiff = host.ReservationChecksum != client.ReservationChecksum;
+                bool prodDiff = host.ProductionChecksum != client.ProductionChecksum || host.QueuedOrderCount != client.QueuedOrderCount;
+                bool econAsyncDiff = resAmountDiff || resvDiff || prodDiff;
+                bool econCoreDiff = timeDiff || econAsyncDiff;
+                bool econDiff = econCoreDiff;
                 bool projDiff = host.ProjectileCount != client.ProjectileCount || host.ProjectileChecksum != client.ProjectileChecksum;
                 bool posDiff = host.PosChecksum != client.PosChecksum;
                 bool coarsePosDiff = host.CoarsePosChecksum != client.CoarsePosChecksum;
@@ -3003,9 +3101,10 @@ namespace TABCoopMod.Sync
                 bool longPeriodDue = false;
                 if (!IsStrictMode)
                 {
-                    _consecutiveEconMismatch = econCoreDiff ? _consecutiveEconMismatch + 1 : 0;
+                    _consecutiveEconMismatch = timeDiff ? _consecutiveEconMismatch + 1 : 0;
+                    _consecutiveAsyncEconMismatch = econAsyncDiff ? _consecutiveAsyncEconMismatch + 1 : 0;
                     _consecutiveStructuralMismatch = structuralDiff ? _consecutiveStructuralMismatch + 1 : 0;
-                    bool substantiveDiff = econCoreDiff || lifeDiff || absEntityDelta > 2;
+                    bool substantiveDiff = timeDiff || _consecutiveAsyncEconMismatch >= 3 || absEntityDelta > entityTol;
                     if (substantiveDiff)
                     {
                         if (_divergedSinceTicks < 0) _divergedSinceTicks = now;
@@ -3017,7 +3116,8 @@ namespace TABCoopMod.Sync
                     }
                 }
                 bool earlyEconBypass = !IsStrictMode && !_econEarlyBypassUsed
-                    && _verifiedChecksumCycles <= 3 && _consecutiveEconMismatch >= EconReloadStreak;
+                    && _verifiedChecksumCycles <= 3
+                    && (_consecutiveEconMismatch >= EconReloadStreak || _consecutiveAsyncEconMismatch >= AsyncEconFallbackStreak);
                 bool structuralCooldownElapsed = !IsStrictMode
                     && _consecutiveStructuralMismatch >= StructuralReloadStreak
                     && (now - _lastAutoResyncTicks >= StructuralResyncCooldownMs);
@@ -3028,6 +3128,7 @@ namespace TABCoopMod.Sync
                 bool triggerHardDesync = IsStrictMode
                     ? (hardCoreDiff || projDiff)
                     : canReloadNow && (_consecutiveEconMismatch >= EconReloadStreak
+                        || _consecutiveAsyncEconMismatch >= AsyncEconFallbackStreak
                         || _consecutiveStructuralMismatch >= StructuralReloadStreak
                         || longPeriodDue);
 
@@ -3038,7 +3139,8 @@ namespace TABCoopMod.Sync
                     _consecutiveHardMismatch = 0;
 
                     string reason = IsStrictMode ? "strict"
-                        : _consecutiveEconMismatch >= EconReloadStreak ? $"econ x{_consecutiveEconMismatch}"
+                        : _consecutiveEconMismatch >= EconReloadStreak ? $"time/econ x{_consecutiveEconMismatch}"
+                        : _consecutiveAsyncEconMismatch >= AsyncEconFallbackStreak ? $"asyncEconFallback x{_consecutiveAsyncEconMismatch}"
                         : _consecutiveStructuralMismatch >= StructuralReloadStreak ? $"entityDelta={absEntityDelta} x{_consecutiveStructuralMismatch}"
                         : $"long-period realign after {(now - _divergedSinceTicks) / 1000.0:F0}s";
                     ModLogger.Error($"[StateChecksum] HARD DESYNC DETECTED at Tick {tick} ({reason})! Life={lifeDiff} Aggro={aggroDiff} Entity={entityDiff} Econ={econDiff} Proj={projDiff} Pos={posDiff} (Host=0x{host.FullHash:X16}, Client({senderId})=0x{client.FullHash:X16})");
@@ -3079,25 +3181,43 @@ namespace TABCoopMod.Sync
                     {
                         _lastChecksumLogKind = "TRANSIENT";
                         _lastChecksumTransientLogMs = now;
-                        ModLogger.Warn($"[StateChecksum] TRANSIENT STATE DRIFT at Tick {tick} (Life={lifeDiff} Aggro={aggroDiff} Entity={entityDiff}(d={absEntityDelta}) Econ={econDiff} CoarseDiff={coarsePosDiff} streak={_consecutiveHardMismatch} econStreak={_consecutiveEconMismatch} entityStreak={_consecutiveStructuralMismatch}).");
+                        ModLogger.Warn($"[StateChecksum] TRANSIENT STATE DRIFT at Tick {tick} (Life={lifeDiff} Aggro={aggroDiff} Entity={entityDiff}(d={absEntityDelta}) Econ={econDiff} CoarseDiff={coarsePosDiff} streak={_consecutiveHardMismatch} econStreak={_consecutiveEconMismatch}/{_consecutiveAsyncEconMismatch} entityStreak={_consecutiveStructuralMismatch}).");
                         if (firstTransient || ModLogger.IsVerbose)
                         {
                             ModLogger.Info($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
                             ModLogger.Info($"[StateChecksum]   Client : {clientSummary ?? "(none)"}");
                         }
                     }
-                    if ((posDiff || lifeDiff || entityDiff) && (now - _lastPosSyncSentTicks >= AsyncPosAlignCooldownMs))
+                    bool needEcon = resAmountDiff && !IsStrictMode;
+                    bool needProd = prodDiff && !IsStrictMode;
+                    bool needStructMeta = (entityDiff || resvDiff) && !IsStrictMode;
+                    bool needSpawnMeta = (entityDiff || _lastClientMissingOnClient > 0) && !IsStrictMode;
+                    bool needAnySync = posDiff || lifeDiff || entityDiff || needEcon || needProd || resvDiff || aggroDiff;
+                    if (needAnySync && (now - _lastPosSyncSentTicks >= AsyncPosAlignCooldownMs))
                     {
                         _lastPosSyncSentTicks = now;
                         bool applyLife = EnableAsyncPosAlign || !IsStrictMode;
-                        bool applyPos = applyLife && (now - _lastFullPosAlignSentTicks >= AsyncSoftPosAlignCooldownMs);
+                        bool applyPos = applyLife && (posDiff || aggroDiff || entityDiff)
+                            && (now - _lastFullPosAlignSentTicks >= AsyncSoftPosAlignCooldownMs);
                         if (applyPos)
                             _lastFullPosAlignSentTicks = now;
-                        ushort lifeEntMask = (lifeDiff || entityDiff) ? ComputeLifeOrEntityDiffBucketMask(in host, in client) : (ushort)0;
-                        ushort posMask = (posDiff && applyPos) ? ComputeDiffBucketMask(in host, in client) : (ushort)0;
+                        bool needTargetMeta = (EnableAsyncPosAlign || !IsStrictMode) && (applyPos || aggroDiff);
+                        ushort lifeEntMask = (lifeDiff || entityDiff || resvDiff) ? ComputeLifeOrEntityDiffBucketMask(in host, in client) : (ushort)0;
+                        ushort posMask = (posDiff && (applyPos || needTargetMeta)) ? ComputeDiffBucketMask(in host, in client) : (ushort)0;
                         ushort mask = (ushort)(lifeEntMask | posMask);
-                        if (mask == 0 && (lifeDiff || entityDiff)) mask = 0xFFFF;
-                        TrySendPosDriftSync(senderId, tick, applyLifeCorrection: applyLife, applyPosCorrection: applyPos, bucketMask: mask, includeStatic: (lifeDiff || entityDiff));
+                        if (mask == 0 && (lifeDiff || entityDiff || resvDiff || aggroDiff)) mask = 0xFFFF;
+                        TrySendPosDriftSync(
+                            senderId,
+                            tick,
+                            applyLifeCorrection: applyLife,
+                            applyPosCorrection: applyPos,
+                            bucketMask: mask,
+                            includeStatic: (lifeDiff || entityDiff || resvDiff),
+                            applyEcon: needEcon,
+                            applyProd: needProd,
+                            includeStructMeta: needStructMeta,
+                            includeTargetMeta: needTargetMeta,
+                            includeSpawnMeta: needSpawnMeta);
                     }
                     continue;
                 }
@@ -3117,7 +3237,14 @@ namespace TABCoopMod.Sync
                     {
                         _lastFullPosAlignSentTicks = now;
                         _lastPosSyncSentTicks = now;
-                        TrySendPosDriftSync(senderId, tick, applyLifeCorrection: EnableAsyncPosAlign, applyPosCorrection: EnableAsyncPosAlign, bucketMask: ComputeDiffBucketMask(in host, in client), includeStatic: false);
+                        TrySendPosDriftSync(
+                            senderId,
+                            tick,
+                            applyLifeCorrection: EnableAsyncPosAlign,
+                            applyPosCorrection: EnableAsyncPosAlign,
+                            bucketMask: ComputeDiffBucketMask(in host, in client),
+                            includeStatic: false,
+                            includeTargetMeta: EnableAsyncPosAlign);
                     }
                     continue;
                 }
@@ -3179,7 +3306,14 @@ namespace TABCoopMod.Sync
                     {
                         _lastFullPosAlignSentTicks = now;
                         _lastPosSyncSentTicks = now;
-                        TrySendPosDriftSync(senderId, tick, applyLifeCorrection: EnableAsyncPosAlign, applyPosCorrection: EnableAsyncPosAlign, bucketMask: ComputeDiffBucketMask(in host, in client), includeStatic: false);
+                        TrySendPosDriftSync(
+                            senderId,
+                            tick,
+                            applyLifeCorrection: EnableAsyncPosAlign,
+                            applyPosCorrection: EnableAsyncPosAlign,
+                            bucketMask: ComputeDiffBucketMask(in host, in client),
+                            includeStatic: false,
+                            includeTargetMeta: EnableAsyncPosAlign);
                     }
                 }
             }
@@ -3188,6 +3322,18 @@ namespace TABCoopMod.Sync
                 byPeer.Remove(pid);
             if (byPeer.Count == 0)
                 _clientTickDigests.Remove(tick);
+        }
+
+        private static bool IntArraysEqual(int[] a, int[] b)
+        {
+            int alen = a != null ? a.Length : 0;
+            int blen = b != null ? b.Length : 0;
+            if (alen != blen) return false;
+            for (int i = 0; i < alen; i++)
+            {
+                if (a[i] != b[i]) return false;
+            }
+            return true;
         }
 
         private static void DrainAsyncQueues()
@@ -3231,8 +3377,86 @@ namespace TABCoopMod.Sync
                 int nCells = DXWorldGrid.NCells;
                 float maxCoord = nCells > 1 ? nCells - 0.5f : 10000f;
 
+                // Phase 2A: Resource deltas (same-tick diff preserved across transit)
+                if (item.ApplyEconCorrection && game != null
+                    && (item.DeltaGold != 0 || item.DeltaWood != 0 || item.DeltaStone != 0 || item.DeltaIron != 0 || item.DeltaOil != 0))
+                {
+                    if (item.DeltaGold != 0) GameBridge.AddLevelResourceDelta("Gold", item.DeltaGold);
+                    if (item.DeltaWood != 0) GameBridge.AddLevelResourceDelta("Wood", item.DeltaWood);
+                    if (item.DeltaStone != 0) GameBridge.AddLevelResourceDelta("Stone", item.DeltaStone);
+                    if (item.DeltaIron != 0) GameBridge.AddLevelResourceDelta("Iron", item.DeltaIron);
+                    if (item.DeltaOil != 0) GameBridge.AddLevelResourceDelta("Oil", item.DeltaOil);
+                    ModLogger.Info(
+                        $"[AsyncEconAlign] Tick={item.Tick} applied deltas: Gold={item.DeltaGold:+#;-#;0} Wood={item.DeltaWood:+#;-#;0} Stone={item.DeltaStone:+#;-#;0} Iron={item.DeltaIron:+#;-#;0} Oil={item.DeltaOil:+#;-#;0}");
+                }
+
+                // Phase 2B: Production queue alignment (guarded against stale transit overwrites)
+                int prodFixed = 0;
+                if (item.ProdQueueFixes != null && item.ProdQueueFixes.Count > 0 && game != null)
+                {
+                    for (int i = 0; i < item.ProdQueueFixes.Count; i++)
+                    {
+                        var pf = item.ProdQueueFixes[i];
+                        DXEntity e = game.GetEntityByID(pf.EntityId);
+                        if (e == null || e.Disposed) continue;
+                        int[] liveCmds = GameBridge.ReadOrdersQueuedCommandIds(e);
+                        if (!IntArraysEqual(liveCmds, pf.ExpectedClientCommandIds))
+                            continue;
+                        if (GameBridge.ApplyOrdersQueuedCommandIds(e, pf.HostCommandIds))
+                            prodFixed++;
+                    }
+                    if (prodFixed > 0)
+                    {
+                        GameBridge.RefreshCommandPanel();
+                        ModLogger.Info($"[AsyncProdAlign] Tick={item.Tick} aligned {prodFixed}/{item.ProdQueueFixes.Count} production queues.");
+                    }
+                }
+
+                // Phase 2C: Small static structure alignment (missing/extra <= 8)
+                int structBuilt = 0, structDestroyed = 0;
+                if (item.StructDestroys != null && item.StructDestroys.Count > 0 && game != null)
+                {
+                    for (int i = 0; i < item.StructDestroys.Count; i++)
+                    {
+                        DXEntity e = game.GetEntityByID(item.StructDestroys[i]);
+                        if (e == null || e.Disposed || !GameBridge.IsStructureType(e.GetType())) continue;
+                        if (GameBridge.DestroySyncedExtraStructure(e))
+                            structDestroyed++;
+                    }
+                }
+                if (item.StructBuilds != null && item.StructBuilds.Count > 0 && game != null)
+                {
+                    for (int i = 0; i < item.StructBuilds.Count; i++)
+                    {
+                        var sb = item.StructBuilds[i];
+                        if (game.GetEntityByID(sb.Id) != null) continue;
+                        if (GameBridge.PlaceSyncedStructure(sb.Id, sb.TemplateId, sb.CellX, sb.CellY, sb.Width, sb.Height, sb.Life, sb.BuildFactor))
+                            structBuilt++;
+                    }
+                }
+                if (structBuilt > 0 || structDestroyed > 0)
+                    ModLogger.Info($"[AsyncStructAlign] Tick={item.Tick} built={structBuilt} destroyed={structDestroyed}");
+
+                // Phase 3B: Small dynamic spawn alignment (1..32 missing entities, sorted by ID)
+                int dynSpawned = 0;
+                if (item.DynamicSpawns != null && item.DynamicSpawns.Count > 0 && game != null)
+                {
+                    for (int i = 0; i < item.DynamicSpawns.Count; i++)
+                    {
+                        var ds = item.DynamicSpawns[i];
+                        if (game.GetEntityByID(ds.Id) != null) continue;
+                        if (GameBridge.SpawnSyncedDynamicEntity(ds.Id, ds.TemplateId, ds.X, ds.Y, ds.Life, ds.TeamRaw, ds.TargetEntityId))
+                            dynSpawned++;
+                    }
+                    if (dynSpawned > 0)
+                        ModLogger.Info($"[AsyncSpawnAlign] Tick={item.Tick} spawned={dynSpawned}/{item.DynamicSpawns.Count} dynamic entities.");
+                }
+
                 int appliedCount = 0;
                 int protectedSelfOwned = 0;
+                int targetAligned = 0;
+                HashSet<ulong> targetAlignedIds = null;
+                byte localPid = Transport.LocalPlayerId;
                 if (item.ApplyPosCorrection && item.Deltas != null && game != null)
                 {
                     if (_lastEntityPosCorrectedTick.Count > 512)
@@ -3248,7 +3472,6 @@ namespace TABCoopMod.Sync
                             _lastEntityPosCorrectedTick.Remove(expiredIds[k]);
                     }
 
-                    byte localPid = Transport.LocalPlayerId;
                     for (int i = 0; i < item.Deltas.Count; i++)
                     {
                         var d = item.Deltas[i];
@@ -3298,7 +3521,29 @@ namespace TABCoopMod.Sync
                         _lastEntityPosCorrectedTick[e.ID] = item.Tick;
                         if (dist <= 3.5f)
                             RenderVisualInterpolationPatch.RecordVisualSnapOffset(e.ID, -actualDx, -actualDy);
+                        if (item.TargetFixes != null && item.TargetFixes.TryGetValue(e.ID, out var snappedTf))
+                        {
+                            if (GameBridge.TryAlignEntityCombatAndMoveTarget(e, snappedTf.TargetEntityId, snappedTf.MoveX, snappedTf.MoveY))
+                                targetAligned++;
+                            if (targetAlignedIds == null) targetAlignedIds = new HashSet<ulong>();
+                            targetAlignedIds.Add(e.ID);
+                        }
                         appliedCount++;
+                    }
+                }
+
+                // Phase 3A: Align combat/move targets for non-snapped dynamic entities (alerted zombies / desynced AI units)
+                if (item.TargetFixes != null && item.TargetFixes.Count > 0 && game != null)
+                {
+                    foreach (var kv in item.TargetFixes)
+                    {
+                        if (targetAlignedIds != null && targetAlignedIds.Contains(kv.Key)) continue;
+                        DXEntity e = game.GetEntityByID(kv.Key);
+                        if (e == null || e.Disposed || e.PhysicalType != DXBodyType.Dynamic) continue;
+                        if (TryGetActiveUnitOwner(e.ID, item.Tick, e, out byte ownerId) && ownerId == localPid)
+                            continue;
+                        if (GameBridge.TryAlignEntityCombatAndMoveTarget(e, kv.Value.TargetEntityId, kv.Value.MoveX, kv.Value.MoveY))
+                            targetAligned++;
                     }
                 }
 
@@ -3334,11 +3579,11 @@ namespace TABCoopMod.Sync
                     || item.MissingOnClient >= 5 || item.MissingOnHost >= 5
                     || item.MaxDelta >= 2.0f || item.ExceededThreshold
                     || ModLogger.IsVerbose;
-                if (notableAlign || alignNow < _lastAsyncPosAlignLogMs || (alignNow - _lastAsyncPosAlignLogMs) >= PosAlignLogIntervalMs)
+                if (notableAlign || targetAligned > 0 || alignNow < _lastAsyncPosAlignLogMs || (alignNow - _lastAsyncPosAlignLogMs) >= PosAlignLogIntervalMs)
                 {
                     _lastAsyncPosAlignLogMs = alignNow;
                     ModLogger.Info(
-                        $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}(pos={(item.ApplyPosCorrection ? 1 : 0)}:{appliedCount}/{item.ComparedCount}, selfProt={protectedSelfOwned}) " +
+                        $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}(pos={(item.ApplyPosCorrection ? 1 : 0)}:{appliedCount}/{item.ComparedCount}, selfProt={protectedSelfOwned}, tgt={targetAligned}) " +
                         $"Drifted(>0.001={item.Drifted001}, >0.01={item.Drifted01}, >0.1={item.Drifted1}, >0.5={item.Drifted5}) " +
                         $"MaxDelta={item.MaxDelta:F4} Rms={item.RmsDelta:F4} MaxType={maxType} Exceeded={item.ExceededThreshold} " +
                         $"LifeDiff={item.LifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={item.MissingOnHost} MissingOnClient={item.MissingOnClient}");
@@ -3438,7 +3683,18 @@ namespace TABCoopMod.Sync
             }
         }
 
-        private static void TrySendPosDriftSync(byte targetPlayerId, int tick, bool applyLifeCorrection, bool applyPosCorrection, ushort bucketMask, bool includeStatic = true)
+        private static void TrySendPosDriftSync(
+            byte targetPlayerId,
+            int tick,
+            bool applyLifeCorrection,
+            bool applyPosCorrection,
+            ushort bucketMask,
+            bool includeStatic = true,
+            bool applyEcon = false,
+            bool applyProd = false,
+            bool includeStructMeta = false,
+            bool includeTargetMeta = false,
+            bool includeSpawnMeta = false)
         {
             if (Transport == null || !Transport.IsHost) return;
             if (!_tickPosCache.TryGetValue(tick, out var samples) || samples == null || samples.Count == 0)
@@ -3449,23 +3705,115 @@ namespace TABCoopMod.Sync
             if (Interlocked.CompareExchange(ref _posSyncBuildInFlight, 1, 0) != 0)
                 return;
 
+            bool wantStatic = includeStatic || includeStructMeta;
             List<StateHasher.EntityPosSample> filtered = new List<StateHasher.EntityPosSample>(
                 effectiveMask == 0xFFFF ? samples.Count : (samples.Count / 4 + 16));
             for (int i = 0; i < samples.Count; i++)
             {
                 var s = samples[i];
-                if (!includeStatic && !s.IsDynamic) continue;
+                if (!wantStatic && !s.IsDynamic) continue;
                 if (effectiveMask == 0xFFFF || (effectiveMask & (1 << (int)(s.Id & 0xFUL))) != 0)
                     filtered.Add(s);
             }
-            if (filtered.Count == 0)
+
+            EconSnapshot econSnap = default;
+            bool hasEcon = applyEcon && _tickEconCache.TryGetValue(tick, out econSnap);
+            bool hasProd = applyProd;
+            StateHasher.ProdQueueSample[] prodSnap = null;
+            if (hasProd)
+            {
+                prodSnap = _tickProdCache.TryGetValue(tick, out var pqList) && pqList != null
+                    ? pqList.ToArray()
+                    : Array.Empty<StateHasher.ProdQueueSample>();
+            }
+
+            if (filtered.Count == 0 && !hasEcon && !hasProd)
             {
                 Interlocked.Exchange(ref _posSyncBuildInFlight, 0);
                 return;
             }
 
+            List<StructSampleMeta> structMetas = null;
+            List<DynamicTargetSample> targetMetas = null;
+            List<DynamicSpawnMeta> spawnMetas = null;
+            if (includeStructMeta || includeTargetMeta || includeSpawnMeta)
+            {
+                var game = DXGame.Current;
+                if (game != null)
+                {
+                    for (int i = 0; i < filtered.Count; i++)
+                    {
+                        var s = filtered[i];
+                        DXEntity ent = game.GetEntityByID(s.Id);
+                        if (ent == null || ent.Disposed) continue;
+
+                        if (includeStructMeta && s.IsStructure)
+                        {
+                            if (GameBridge.TryCaptureStructureMeta(ent, out ulong tplId, out int cx, out int cy, out byte w, out byte h, out float bf))
+                            {
+                                if (structMetas == null) structMetas = new List<StructSampleMeta>(32);
+                                structMetas.Add(new StructSampleMeta
+                                {
+                                    Id = s.Id,
+                                    TemplateId = tplId,
+                                    CellX = cx,
+                                    CellY = cy,
+                                    Width = w,
+                                    Height = h,
+                                    Life = s.Life,
+                                    BuildFactor = bf
+                                });
+                            }
+                        }
+
+                        if (includeTargetMeta && s.IsDynamic)
+                        {
+                            GameBridge.GetEntityCombatAndMoveTargets(ent, out ulong tgtId, out float mx, out float my);
+                            if (tgtId != 0 || !float.IsNaN(mx) || !GameBridge.IsZombieType(ent.GetType()))
+                            {
+                                if (targetMetas == null) targetMetas = new List<DynamicTargetSample>(64);
+                                targetMetas.Add(new DynamicTargetSample
+                                {
+                                    Id = s.Id,
+                                    TargetEntityId = tgtId,
+                                    MoveX = mx,
+                                    MoveY = my
+                                });
+                            }
+                        }
+
+                        if (includeSpawnMeta && s.IsDynamic)
+                        {
+                            if (GameBridge.TryCaptureDynamicSpawnMeta(ent, out ulong dTplId, out byte teamRaw, out ulong dTgtId))
+                            {
+                                if (spawnMetas == null) spawnMetas = new List<DynamicSpawnMeta>(64);
+                                spawnMetas.Add(new DynamicSpawnMeta
+                                {
+                                    Id = s.Id,
+                                    TemplateId = dTplId,
+                                    TeamRaw = teamRaw,
+                                    TargetEntityId = dTgtId
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            bool hasStructMeta = includeStructMeta && structMetas != null && structMetas.Count > 0;
+            bool hasTargetMeta = includeTargetMeta && targetMetas != null && targetMetas.Count > 0;
+            bool hasSpawnMeta = includeSpawnMeta && spawnMetas != null && spawnMetas.Count > 0;
+
             ushort sentMask = effectiveMask;
-            byte flags = (byte)((applyLifeCorrection ? 1 : 0) | (applyPosCorrection ? 2 : 0) | (includeStatic ? 4 : 0));
+            byte flags = (byte)(
+                (applyLifeCorrection ? 1 : 0)
+                | (applyPosCorrection ? 2 : 0)
+                | (wantStatic ? 4 : 0)
+                | (hasEcon ? 8 : 0)
+                | (hasProd ? 16 : 0)
+                | (hasStructMeta ? 32 : 0)
+                | (hasTargetMeta ? 64 : 0)
+                | (hasSpawnMeta ? 128 : 0));
             int seq = ++_posSyncSeq;
             Task.Run(() =>
             {
@@ -3474,7 +3822,11 @@ namespace TABCoopMod.Sync
                     if (gen != _asyncGeneration) return;
 
                     byte[] compressed;
-                    using (var rawMs = new MemoryStream(filtered.Count * 20 + 12))
+                    int estCap = filtered.Count * 20 + 64
+                        + (hasStructMeta ? structMetas.Count * 32 : 0)
+                        + (hasTargetMeta ? targetMetas.Count * 24 : 0)
+                        + (hasSpawnMeta ? spawnMetas.Count * 25 : 0);
+                    using (var rawMs = new MemoryStream(estCap))
                     using (var bw = new BinaryWriter(rawMs))
                     {
                         bw.Write(sentMask);
@@ -3486,6 +3838,68 @@ namespace TABCoopMod.Sync
                             bw.Write(filtered[i].X);
                             bw.Write(filtered[i].Y);
                             bw.Write(filtered[i].Life);
+                        }
+                        if (hasEcon)
+                        {
+                            bw.Write(econSnap.Gold);
+                            bw.Write(econSnap.Wood);
+                            bw.Write(econSnap.Stone);
+                            bw.Write(econSnap.Iron);
+                            bw.Write(econSnap.Oil);
+                        }
+                        if (hasProd)
+                        {
+                            int pCount = prodSnap != null ? prodSnap.Length : 0;
+                            bw.Write(pCount);
+                            for (int i = 0; i < pCount; i++)
+                            {
+                                var pq = prodSnap[i];
+                                bw.Write(pq.EntityId);
+                                int len = pq.CommandIds != null ? Math.Min(255, pq.CommandIds.Length) : 0;
+                                bw.Write((byte)len);
+                                for (int j = 0; j < len; j++)
+                                    bw.Write(pq.CommandIds[j]);
+                            }
+                        }
+                        if (hasStructMeta)
+                        {
+                            bw.Write(structMetas.Count);
+                            for (int i = 0; i < structMetas.Count; i++)
+                            {
+                                var sm = structMetas[i];
+                                bw.Write(sm.Id);
+                                bw.Write(sm.TemplateId);
+                                bw.Write(sm.CellX);
+                                bw.Write(sm.CellY);
+                                bw.Write(sm.Width);
+                                bw.Write(sm.Height);
+                                bw.Write(sm.Life);
+                                bw.Write(sm.BuildFactor);
+                            }
+                        }
+                        if (hasTargetMeta)
+                        {
+                            bw.Write(targetMetas.Count);
+                            for (int i = 0; i < targetMetas.Count; i++)
+                            {
+                                var tm = targetMetas[i];
+                                bw.Write(tm.Id);
+                                bw.Write(tm.TargetEntityId);
+                                bw.Write(tm.MoveX);
+                                bw.Write(tm.MoveY);
+                            }
+                        }
+                        if (hasSpawnMeta)
+                        {
+                            bw.Write(spawnMetas.Count);
+                            for (int i = 0; i < spawnMetas.Count; i++)
+                            {
+                                var dsm = spawnMetas[i];
+                                bw.Write(dsm.Id);
+                                bw.Write(dsm.TemplateId);
+                                bw.Write(dsm.TeamRaw);
+                                bw.Write(dsm.TargetEntityId);
+                            }
                         }
                         bw.Flush();
                         byte[] rawBytes = rawMs.ToArray();
@@ -3579,6 +3993,11 @@ namespace TABCoopMod.Sync
             }
 
             var clientSnapshot = clientSamples.ToArray();
+            bool hasClientEcon = _tickEconCache.TryGetValue(buf.SimTick, out EconSnapshot clientEcon);
+            StateHasher.ProdQueueSample[] clientProdSnap =
+                _tickProdCache.TryGetValue(buf.SimTick, out var clientProdList) && clientProdList != null
+                    ? clientProdList.ToArray()
+                    : Array.Empty<StateHasher.ProdQueueSample>();
             int gen = _asyncGeneration;
             int simTick = buf.SimTick;
             bool apply = buf.ApplyCorrection;
@@ -3597,7 +4016,18 @@ namespace TABCoopMod.Sync
                     ushort hostMask;
                     bool flagApplyLife;
                     bool flagApplyPos;
+                    bool flagIncludeStatic;
+                    bool flagHasEcon;
+                    bool flagHasProd;
+                    bool flagHasStructMeta;
+                    bool flagHasTargetMeta;
+                    bool flagHasSpawnMeta;
                     List<StateHasher.EntityPosSample> hostSamples;
+                    EconSnapshot hostEcon = default;
+                    List<StateHasher.ProdQueueSample> hostProds = null;
+                    List<StructSampleMeta> hostStructMetas = null;
+                    Dictionary<ulong, DynamicTargetSample> hostTargetMetas = null;
+                    List<DynamicSpawnMeta> hostSpawnMetas = null;
                     using (var inMs = new MemoryStream(compressed))
                     using (var ds = new DeflateStream(inMs, CompressionMode.Decompress))
                     using (var br = new BinaryReader(ds))
@@ -3606,6 +4036,12 @@ namespace TABCoopMod.Sync
                         byte flags = br.ReadByte();
                         flagApplyLife = (flags & 1) != 0;
                         flagApplyPos = (flags & 2) != 0;
+                        flagIncludeStatic = (flags & 4) != 0;
+                        flagHasEcon = (flags & 8) != 0;
+                        flagHasProd = (flags & 16) != 0;
+                        flagHasStructMeta = (flags & 32) != 0;
+                        flagHasTargetMeta = (flags & 64) != 0;
+                        flagHasSpawnMeta = (flags & 128) != 0;
                         count = br.ReadInt32();
                         hostSamples = new List<StateHasher.EntityPosSample>(count);
                         for (int i = 0; i < count; i++)
@@ -3617,6 +4053,81 @@ namespace TABCoopMod.Sync
                                 Y = br.ReadSingle(),
                                 Life = br.ReadInt32()
                             });
+                        }
+                        if (flagHasEcon)
+                        {
+                            hostEcon = new EconSnapshot
+                            {
+                                Gold = br.ReadInt32(),
+                                Wood = br.ReadInt32(),
+                                Stone = br.ReadInt32(),
+                                Iron = br.ReadInt32(),
+                                Oil = br.ReadInt32()
+                            };
+                        }
+                        if (flagHasProd)
+                        {
+                            int pCount = br.ReadInt32();
+                            hostProds = new List<StateHasher.ProdQueueSample>(pCount);
+                            for (int i = 0; i < pCount; i++)
+                            {
+                                ulong eid = br.ReadUInt64();
+                                int len = br.ReadByte();
+                                var cmdIds = len > 0 ? new int[len] : Array.Empty<int>();
+                                for (int j = 0; j < len; j++)
+                                    cmdIds[j] = br.ReadInt32();
+                                hostProds.Add(new StateHasher.ProdQueueSample { EntityId = eid, CommandIds = cmdIds });
+                            }
+                        }
+                        if (flagHasStructMeta)
+                        {
+                            int sCount = br.ReadInt32();
+                            hostStructMetas = new List<StructSampleMeta>(sCount);
+                            for (int i = 0; i < sCount; i++)
+                            {
+                                hostStructMetas.Add(new StructSampleMeta
+                                {
+                                    Id = br.ReadUInt64(),
+                                    TemplateId = br.ReadUInt64(),
+                                    CellX = br.ReadInt32(),
+                                    CellY = br.ReadInt32(),
+                                    Width = br.ReadByte(),
+                                    Height = br.ReadByte(),
+                                    Life = br.ReadInt32(),
+                                    BuildFactor = br.ReadSingle()
+                                });
+                            }
+                        }
+                        if (flagHasTargetMeta)
+                        {
+                            int tCount = br.ReadInt32();
+                            hostTargetMetas = new Dictionary<ulong, DynamicTargetSample>(tCount);
+                            for (int i = 0; i < tCount; i++)
+                            {
+                                var tm = new DynamicTargetSample
+                                {
+                                    Id = br.ReadUInt64(),
+                                    TargetEntityId = br.ReadUInt64(),
+                                    MoveX = br.ReadSingle(),
+                                    MoveY = br.ReadSingle()
+                                };
+                                hostTargetMetas[tm.Id] = tm;
+                            }
+                        }
+                        if (flagHasSpawnMeta)
+                        {
+                            int dCount = br.ReadInt32();
+                            hostSpawnMetas = new List<DynamicSpawnMeta>(dCount);
+                            for (int i = 0; i < dCount; i++)
+                            {
+                                hostSpawnMetas.Add(new DynamicSpawnMeta
+                                {
+                                    Id = br.ReadUInt64(),
+                                    TemplateId = br.ReadUInt64(),
+                                    TeamRaw = br.ReadByte(),
+                                    TargetEntityId = br.ReadUInt64()
+                                });
+                            }
                         }
                     }
 
@@ -3633,11 +4144,15 @@ namespace TABCoopMod.Sync
                     List<EntityDeltaFix> deltas = apply ? new List<EntityDeltaFix>(64) : null;
                     List<EntityLifeFix> lifeFixes = effectiveApplyLife ? new List<EntityLifeFix>(64) : null;
                     var hostIds = new HashSet<ulong>();
+                    var hostSampleMap = (flagHasSpawnMeta || flagHasStructMeta)
+                        ? new Dictionary<ulong, StateHasher.EntityPosSample>(hostSamples.Count)
+                        : null;
 
                     for (int i = 0; i < hostSamples.Count; i++)
                     {
                         var hs = hostSamples[i];
                         hostIds.Add(hs.Id);
+                        if (hostSampleMap != null) hostSampleMap[hs.Id] = hs;
                         if (hs.Id > hostMaxId) hostMaxId = hs.Id;
                         if (!clientMap.TryGetValue(hs.Id, out StateHasher.EntityPosSample cs))
                         {
@@ -3700,6 +4215,126 @@ namespace TABCoopMod.Sync
                             lifeFixes.Add(new EntityLifeFix { Id = missingOnHostDynamicIds[i], Delta = 0, Kill = true });
                     }
 
+                    // Phase 2A: Resource deltas
+                    bool applyEconCorrection = false;
+                    int deltaGold = 0, deltaWood = 0, deltaStone = 0, deltaIron = 0, deltaOil = 0;
+                    if (apply && flagHasEcon && hasClientEcon)
+                    {
+                        deltaGold = hostEcon.Gold - clientEcon.Gold;
+                        deltaWood = hostEcon.Wood - clientEcon.Wood;
+                        deltaStone = hostEcon.Stone - clientEcon.Stone;
+                        deltaIron = hostEcon.Iron - clientEcon.Iron;
+                        deltaOil = hostEcon.Oil - clientEcon.Oil;
+                        applyEconCorrection = deltaGold != 0 || deltaWood != 0 || deltaStone != 0 || deltaIron != 0 || deltaOil != 0;
+                    }
+
+                    // Phase 2B: Production queue fixes
+                    List<ProdQueueFixItem> prodQueueFixes = null;
+                    if (apply && flagHasProd)
+                    {
+                        var clientProdMap = new Dictionary<ulong, int[]>(clientProdSnap.Length);
+                        for (int i = 0; i < clientProdSnap.Length; i++)
+                            clientProdMap[clientProdSnap[i].EntityId] = clientProdSnap[i].CommandIds ?? Array.Empty<int>();
+                        var hostProdMap = new Dictionary<ulong, int[]>(hostProds != null ? hostProds.Count : 0);
+                        if (hostProds != null)
+                        {
+                            for (int i = 0; i < hostProds.Count; i++)
+                            {
+                                var hp = hostProds[i];
+                                int[] hCmds = hp.CommandIds ?? Array.Empty<int>();
+                                hostProdMap[hp.EntityId] = hCmds;
+                                int[] cCmds = clientProdMap.TryGetValue(hp.EntityId, out var found) ? found : Array.Empty<int>();
+                                if (!IntArraysEqual(hCmds, cCmds))
+                                {
+                                    if (prodQueueFixes == null) prodQueueFixes = new List<ProdQueueFixItem>(8);
+                                    prodQueueFixes.Add(new ProdQueueFixItem
+                                    {
+                                        EntityId = hp.EntityId,
+                                        ExpectedClientCommandIds = cCmds,
+                                        HostCommandIds = hCmds
+                                    });
+                                }
+                            }
+                        }
+                        foreach (var kvp in clientProdMap)
+                        {
+                            if (!hostProdMap.ContainsKey(kvp.Key))
+                            {
+                                if (prodQueueFixes == null) prodQueueFixes = new List<ProdQueueFixItem>(8);
+                                prodQueueFixes.Add(new ProdQueueFixItem
+                                {
+                                    EntityId = kvp.Key,
+                                    ExpectedClientCommandIds = kvp.Value,
+                                    HostCommandIds = Array.Empty<int>()
+                                });
+                            }
+                        }
+                    }
+
+                    // Phase 2C: Small static structure alignment (missing/extra <= 8)
+                    List<StructSampleMeta> structBuilds = null;
+                    List<ulong> structDestroys = null;
+                    if (apply && flagHasStructMeta && flagIncludeStatic && hostStructMetas != null)
+                    {
+                        var missingStructs = new List<StructSampleMeta>(8);
+                        for (int i = 0; i < hostStructMetas.Count; i++)
+                        {
+                            var sm = hostStructMetas[i];
+                            if (!clientMap.ContainsKey(sm.Id))
+                                missingStructs.Add(sm);
+                        }
+                        var extraStructs = new List<ulong>(8);
+                        for (int i = 0; i < clientSnapshot.Length; i++)
+                        {
+                            var cs = clientSnapshot[i];
+                            if (!cs.IsStructure) continue;
+                            if ((hostMask & (1 << (int)(cs.Id & 0xFUL))) == 0) continue;
+                            if (!hostIds.Contains(cs.Id))
+                                extraStructs.Add(cs.Id);
+                        }
+                        if (missingStructs.Count <= 8 && extraStructs.Count <= 8)
+                        {
+                            if (missingStructs.Count > 0)
+                            {
+                                missingStructs.Sort((a, b) => a.Id.CompareTo(b.Id));
+                                structBuilds = missingStructs;
+                            }
+                            if (extraStructs.Count > 0)
+                            {
+                                extraStructs.Sort();
+                                structDestroys = extraStructs;
+                            }
+                        }
+                    }
+
+                    // Phase 3B: Small dynamic entity spawns (1..32 missing on client, <= 8 missing on host)
+                    List<DynamicSpawnSample> dynamicSpawns = null;
+                    if (apply && flagHasSpawnMeta && hostSpawnMetas != null && hostSampleMap != null && missingOnHost <= 8)
+                    {
+                        var pendingSpawns = new List<DynamicSpawnSample>(32);
+                        for (int i = 0; i < hostSpawnMetas.Count; i++)
+                        {
+                            var dsm = hostSpawnMetas[i];
+                            if (clientMap.ContainsKey(dsm.Id)) continue;
+                            if (!hostSampleMap.TryGetValue(dsm.Id, out var hs)) continue;
+                            pendingSpawns.Add(new DynamicSpawnSample
+                            {
+                                Id = dsm.Id,
+                                TemplateId = dsm.TemplateId,
+                                X = hs.X,
+                                Y = hs.Y,
+                                Life = hs.Life,
+                                TeamRaw = dsm.TeamRaw,
+                                TargetEntityId = dsm.TargetEntityId
+                            });
+                        }
+                        if (pendingSpawns.Count > 0 && pendingSpawns.Count <= 32)
+                        {
+                            pendingSpawns.Sort((a, b) => a.Id.CompareTo(b.Id));
+                            dynamicSpawns = pendingSpawns;
+                        }
+                    }
+
                     float rmsDelta = drifted001 > 0 ? (float)Math.Sqrt(sumSq / drifted001) : 0f;
                     bool exceededThreshold = maxDelta >= MaxAsyncTeleportCells;
                     bool emergencyPosOverride = maxDelta >= 3.5f || rmsDelta >= 1.2f;
@@ -3726,7 +4361,18 @@ namespace TABCoopMod.Sync
                         LifeFixes = lifeFixes,
                         LifeDiffCount = lifeDiffCount,
                         MissingOnHost = missingOnHost,
-                        MissingOnClient = missingOnClient
+                        MissingOnClient = missingOnClient,
+                        ApplyEconCorrection = applyEconCorrection,
+                        DeltaGold = deltaGold,
+                        DeltaWood = deltaWood,
+                        DeltaStone = deltaStone,
+                        DeltaIron = deltaIron,
+                        DeltaOil = deltaOil,
+                        ProdQueueFixes = prodQueueFixes,
+                        StructBuilds = structBuilds,
+                        StructDestroys = structDestroys,
+                        TargetFixes = (apply && flagHasTargetMeta) ? hostTargetMetas : null,
+                        DynamicSpawns = dynamicSpawns
                     });
                 }
                 catch (Exception ex)
@@ -3759,7 +4405,7 @@ namespace TABCoopMod.Sync
                 {
                     if (e == null || e.Disposed) continue;
                     if ((e.ID & 0x8000000000000000UL) != 0) continue;
-                    if (e.GetType() == typeof(DXEntity) || string.Equals(e.GetType().Name, "Raven", StringComparison.Ordinal)) continue;
+                    if (e.GetType() == typeof(DXEntity) || string.Equals(e.GetType().Name, "Raven", StringComparison.Ordinal) || GameBridge.IsColonistType(e.GetType())) continue;
                     var b = e.Body;
                     float bx = b != null ? b.PositionComputed.X : float.NaN;
                     float by = b != null ? b.PositionComputed.Y : float.NaN;

@@ -1,12 +1,12 @@
 # 06 — 当前项目状态、门禁验收报告与下一步计划 (Project Status)
 
-> **最后更新**: 2026-11-19（基于 `v0.1.8` 基线整理全量文档）
-> **构建基线**: `v0.1.8` (`0.1.8.0`) `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=64, failed-tolerant=0`**。
-> **历史过程记录**: 早期排查过程与会话 1~6 演进流水已归档至 [`docs/archive/`](archive/SESSION_CHANGELOG_S1_TO_S6.md)；Steam P2P 实测分析与近期专项修复见 [`10`](10_STEAM_P2P_TEST_ANALYSIS_AND_OPTIMIZATION_PLAN.md)、[`11`](11_SYNC_OWNERSHIP_AND_VISUAL_SMOOTHING.md)、[`12`](12_STEAM_P2P_BUGS_AND_FIXES_20261116.md)。
+> **最后更新**: 2026-11-19（发布 `v0.1.9`：文档 13 异步增量对齐与重载降频实装）
+> **构建基线**: `v0.1.9` (`0.1.9.0`) `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing (verified=143)`，Harmony 补丁 **`Classes OK=65, failed-tolerant=0`**。
+> **历史过程记录**: 早期排查过程与会话 1~6 演进流水已归档至 [`docs/archive/`](archive/SESSION_CHANGELOG_S1_TO_S6.md)；Steam P2P 实测分析与近期专项修复见 [`10`](10_STEAM_P2P_TEST_ANALYSIS_AND_OPTIMIZATION_PLAN.md)、[`11`](11_SYNC_OWNERSHIP_AND_VISUAL_SMOOTHING.md)、[`12`](12_STEAM_P2P_BUGS_AND_FIXES_20261116.md)、[`13`](13_ASYNC_ALIGNMENT_AND_RESYNC_OPTIMIZATION_PLAN.md)。
 
 ---
 
-## 0. 近期版本发布演进总览（`v0.1.0` ~ `v0.1.8`）
+## 0. 近期版本发布演进总览（`v0.1.0` ~ `v0.1.9`）
 
 | 版本 | 日期 | 核心更新内容 |
 | :---: | :---: | :--- |
@@ -19,6 +19,7 @@
 | **`v0.1.6`** | 2026-11-18 | **异构算力对称化与零事件 ID 漂移**：`VisualVfxIsolationPatch` 隔离视野门控 `ZXMapEvent`/`OMessageQueue` 防止实体 ID 偏移触发重载；绑定真实 `LogicThreadId` 与 Tick 末 `FlushStartFramePostMethods`；20Hz `AllyCursorAndCamera`/`ClientInputReport` 上报进度并平缓主机反压（`5t/6t/9t`）；`DirectFastPath` 线速 RTT 驱动 `InputDelayTicks` 并采用快降慢升 EWMA；保留慢客机 1-tick 异步并行流水线并增强大厅 20s STUN 保活。 |
 | **`v0.1.7`** | 2026-11-18 | **局内编队保留与原版快捷键跟随**：局内 `Auto-resync` 快照重载前按确定性实体 ID 备份并在 `OnLevelLoadComplete` 恢复各自本地 `1~8` 编队且刷新左下角 HUD 槽位；`PauseAndSpeedInputPatch` 改为经 `GameBridge.IsKeyBoundToCommand` 查询玩家当前 `ZXKeyboardCommand.Pause` 绑定（`Standard`/`WASD`/`Custom`），取消硬编码空格。 |
 | **`v0.1.8`** | 2026-11-19 | **日志异步写入与大幅降噪精简**：`ModLogger` 改为 `ConcurrentQueue` + 独立后台线程（`TABCoopMod.Logger`）每 `500ms` 批量刷盘、`Error`/`InfoImmediate`/`WarnImmediate` 立即刷盘与 `ProcessExit` 排空，彻底消除主线程同步开关双文件 I/O；默认汇总输出 `[GameBridge]`/`[Harmony]` 校验（可用 `TABCOOP_VERBOSE_LOG=1` 还原明细），`[StateChecksum]`/`[PosDriftStats]`/`[AsyncPosAlign]` 改为状态跳变直出 + `30s` 汇总，并节流 `[CommandExecutor] Rejected`（`3s`）、`[LoadFade]`（`>=300` 帧）与 `SetEngineMultiplayerMode` 重复行。 |
+| **`v0.1.9`** | 2026-11-19 | **异步增量对齐与重载降频（文档 13 Phase 1~3）**：① `StateHasher`/`DumpPeerEntities` 跳过纯表现 `Colonist` 平民并隔离 `Building.SpawnColonists`，回放期挂起/恢复 `OCellAreaCursor` 供电网格预览并放宽 `Structure.HasNearEnemies` 动态近敌微差否决，收紧 `LongPeriodRealignMs` 判定；② `PosDriftSyncChunk` 扩展五维库存资源同 tick 差值、兵营 `OrdersQueued` 队列（含过时防误写与命令面板刷新）及 `<= 8` 座静态建筑异步补建/补拆，`AsyncEconFallbackStreak=6` 兜底；③ 同步动态单位 `BData.TargetRef`/`CMovable.TargetPosition` 转向与 `1..32` 缺失动态实体按 ID 升序异步补生（僵尸靠 `CInvisibleWhenNotWatched` 视野渐显、玩家单位 `350ms` 淡入）。 |
 
 ---
 
@@ -51,6 +52,7 @@
 | **异构延迟对称化与操作触发 ID 偏移/重载修复 (`v0.1.6`)** | `1_Backup.zxsav` 120t 回放 + `6666.zxsav` 异构双开（`-ClientExtraTickMs 30` 模拟主机 30Hz vs 客机 ~20Hz） | ① `VisualVfxIsolationPatch` 隔离受本地视野门控的 `ZXMapEvent`（`.ctor`/`OnPoolNew`）与 `OMessageQueue`，阻断战斗告警导致 `_syncedEntityIdCounter` 单边偏移及连带 `MissingOnClient` 自动重载；② `LockstepClock` 新增精确 `LogicThreadId` 并统一于 `UpdatePhysics` 后、`StateChecksum` 前排空 `PostMethods`（`GameBridge.FlushStartFramePostMethods` 与 `ShowBannerOutsideDet` 清除外层 `InDeterministicContext`）；③ `CoopSessionManager` 通过 20Hz `AllyCursorAndCamera` / `ClientInputReport` 高频上报客机进度并收敛主机反压（`5t/1.15x/max2`、`6t/1.38x/max1`、`>=9t` 暂停）、优先以 `DirectFastPath` 线速 RTT 及快降慢升 EWMA 驱动 `InputDelayTicks`、在 `StateChecksumReport` 捎带 `SyncedIdCounter`；④ 客机在单 tick `>16ms` 时保留 1-tick 异步并行流水线（帧耗时由 `85.6~89ms` 降至 `47.7~51.1ms`），`DirectFastPath` 与 `SteamP2PTransport` 增加大厅 20s STUN 保活与 3s 未验证重推，并新增 `TABCOOP_SIM_MIN_FRAME_MS` / `TABCOOP_SIM_EXTRA_TICK_MS` 测试开关；实测 `Classes OK=64, failed-tolerant=0`，异构 `Client +30ms/tick` 下 `clientLag` 稳定 `6~8t`（原 `13~14t`）、`delay=1t`、连续 12/12 `StateChecksum MATCH`，`1_Backup` 回放 `120 ticks identical` | ✅ 通过 |
 | **局内重载保留编队与原版暂停热键跟随 (`v0.1.7`)** | `1_Backup.zxsav` 120t 回放 + `ChaosTransport` (`latency=80;jitter=20;loss=0.01;seed=7`) 双开验证 | ① `GameBridge` 新增 `CaptureSelectionGroupEntityIds` / `RestoreSelectionGroupEntityIds`（经 `ZXLevelState.#=zjt55PivoReTlHchOXA==` 采集/回写 `ulong entity.ID` 并调用 `ZXSystemGameLevel.#=zOAZllFnsly4T` 刷新左下角 1~8 编队槽位 HUD）；`CoopSessionManager` 以 `_hasEnteredSyncedLevelInMatch` 门控仅在局内重同步（`BroadcastCurrentLevelSnapshot` / `BeginClientSnapshotLoad`）前备份并在 `OnLevelLoadComplete` 恢复各自本地编队；② `GameBridge.IsKeyBoundToCommand` 接入 `#=zyMMweQL9LzVp8ZCJ7w==.#=zRtXKxIY=`，`PauseAndSpeedInputPatch` 改为读取玩家当前 `ZXKeyboardCommand.Pause` 绑定（`Standard`/`WASD`/`Custom`），取消硬编码 `Space`；实测 Release 0 警告 0 错误、`GameBridge 0 missing`、`Classes OK=64, failed-tolerant=0`、`1_Backup` 回放 `120 ticks identical`、`Chaos` 双开 7/7 `StateChecksum MATCH`、`0 ERROR` | ✅ 通过 |
 | **日志异步化与降噪精简 (`v0.1.8`)** | `1_Backup.zxsav` 120t 回放 + `Chaos` 20s 双开 + `verify_lobby_flow.ps1` | ① `ModLogger` 改为非阻塞队列 + 后台线程 `500ms` 批量刷盘（`Error`/`*Immediate` 立即刷盘，`TABCOOP_VERBOSE_LOG=1` 保留全量明细）；② 精简启动逐条自检及局内 `[StateChecksum]`/`[PosDriftStats]`/`[AsyncPosAlign]`/`[CommandExecutor] Rejected`/`[LoadFade]`/`SetEngineMultiplayerMode` 冗余刷屏；实测 `1_Backup` 回放 `120 ticks identical`、`Chaos` 20s 双端日志缩减至 Host `106` 行 (`15.2 KB`) / Client `96` 行 (`13.4 KB`)、`verify_lobby_flow` `9/9` 通过（`0 missing`、`Classes OK=64, failed-tolerant=0`） | ✅ 通过 |
+| **文档 13 Phase 1~3 异步增量对齐与重载降频** | `1_Backup.zxsav` (120t) + `6666.zxsav` (180t) + `6666.zxsav` 30s `ChaosTransport` 双开 | **Phase 1**：`StateHasher`/`DumpPeerEntities` 跳过纯表现 `Colonist` 实体，隔离 `Building.SpawnColonists`，回放期 `CommandExecutor` 挂起/恢复 `OCellAreaCursor` 供电网格预览，`StructureNearEnemiesReplayPatch` 抑制回放期近敌微差否决，收紧 `LongPeriodRealignMs`；**Phase 2**：`PosDriftSyncChunk` 新增 bit 3~5 同步五维资源同 tick 差值、`OrdersQueued` 队列（含过时防误写与命令面板刷新）及 `<= 8` 静态建筑异步补建/补拆，`AsyncEconFallbackStreak=6` 兜底；**Phase 3**：bit 6~7 同步动态单位 `BData.TargetRef`/`CMovable.TargetPosition` 与 `1..32` 缺失动态实体按 ID 升序异步补生（僵尸靠 `CInvisibleWhenNotWatched` 视野渐显、玩家单位 `350ms` 淡入）；实测 Release `0 警告 0 错误`，`0 missing (verified=143)`、`Classes OK=65, failed-tolerant=0`，Gate A1 `120 ticks identical`（`2053` 实体）、Gate A2 `180 ticks identical`（`7487` 实体）、`6666.zxsav` Chaos 30s 双开 `0 DESYNC` / `0 Auto-resync` / `0 ERROR`（人工长局并发建造与多网络实玩待专项桌面覆盖） | ✅ 通过 |
 
 ---
 

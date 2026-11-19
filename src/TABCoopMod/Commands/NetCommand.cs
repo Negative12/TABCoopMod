@@ -196,6 +196,7 @@ namespace TABCoopMod.Commands
             bool prevReplaying = IsReplayingCommand;
             bool prevLocalBuild = IsReplayingLocalBuild;
             bool prevDet = LockstepClock.InDeterministicContext;
+            object suspendedBuildCursor = GameBridge.SuspendLocalBuildCursorEnergyPreview();
             IsReplayingCommand = true;
             IsReplayingLocalBuild = TABCoopMod.Sync.CoopSessionManager.IsSessionActive
                 && netCmd.PlayerId == TABCoopMod.Patches.CommandInterceptor.LocalPlayerId
@@ -297,6 +298,7 @@ namespace TABCoopMod.Commands
                 LockstepClock.InDeterministicContext = prevDet;
                 IsReplayingLocalBuild = prevLocalBuild;
                 IsReplayingCommand = prevReplaying;
+                GameBridge.RestoreLocalBuildCursorEnergyPreview(suspendedBuildCursor);
             }
         }
 

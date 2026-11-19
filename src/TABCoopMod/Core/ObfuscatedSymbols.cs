@@ -277,5 +277,25 @@ namespace TABCoopMod.Core
         // ====================================================================
         public const string Type_KeyboardBindingsManager       = "#=zyMMweQL9LzVp8ZCJ7w==";
         public const string Method_Keyboard_IsKeyForCommand  = "#=zRtXKxIY=";
+
+        // ====================================================================
+        // 17. Phase 1 Async-Align Noise & Desync Isolation Symbols
+        // ====================================================================
+        public const string Type_Colonist                      = "ZX.Entities.Colonist";
+        public const string Type_Building                      = "ZX.Entities.Building";
+        public const string Method_Building_SpawnColonists     = "#=z0RIVd3YfBl848VD92A==";
+        public const string Type_OCellAreaCursor               = "ZX.GUI.OCellAreaCursor";
+        public const string Field_OCellAreaCursor_LastEnergyCell = "#=zOgOjDSANK0WHtgVX_wzbxBg=";
+        public const string Method_OCellAreaCursor_ClearEnergyPreview = "#=zglihyOZQi982dUVN0g==";
+        public const string Method_OCellAreaCursor_UpdateVisual = "#=zwffgY1s=";
+
+        // ====================================================================
+        // 18. Phase 2 & 3 Async Delta Patching Symbols
+        // ====================================================================
+        public const string Type_ZXOrder                       = "ZX.Commands.ZXOrder";
+        public const string Type_CBuildable                    = "ZX.Components.CBuildable";
+        public const string Method_Building_RecalcResources    = "#=z3rO8Jok=";
+        public const string Method_Structure_UpdateEnabled     = "#=zUBPru1Ew_PxN";
+        public const string Method_LevelState_RecordEntityCreated = "#=zw0DWH2yCwj1E";
     }
 }
