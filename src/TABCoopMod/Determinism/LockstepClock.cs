@@ -2330,15 +2330,54 @@ namespace TABCoopMod.Determinism
             return tLevelSys != null ? AccessTools.Method(tLevelSys, "OnSetCamera", Type.EmptyTypes) : null;
         }
 
+        private static FieldInfo _fIntroAnim;
+        private static PropertyInfo _pNewCamCenter;
+        private static IntPtr _ownHwnd;
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        private static bool IsGameWindowForeground(DXGame game)
+        {
+            if (game == null || !game.Focused) return false;
+            try
+            {
+                IntPtr fg = GetForegroundWindow();
+                if (fg == IntPtr.Zero) return false;
+                if (_ownHwnd == IntPtr.Zero)
+                    _ownHwnd = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle;
+                return _ownHwnd == IntPtr.Zero || fg == _ownHwnd;
+            }
+            catch { return game.Focused; }
+        }
+
         [HarmonyPrefix]
-        public static void Prefix(out CamState __state)
+        public static bool Prefix(object __instance, out CamState __state)
         {
             __state = default;
             if (!LockstepClock.IsDeterministicModeActive || LockstepClock.LoadingLevel)
-                return;
+                return true;
             var scene = DXScene.Current;
             if (scene == null)
-                return;
+                return true;
+
+            // In FullBorderless mode, an unfocused window's ResetInput() (or a virtual-display
+            // idle cursor at (0,0)) matches ViewArea.TopLeft (0,0) and causes vanilla OnSetCamera
+            // to continuously edge-scroll toward the top-left corner of the map.
+            var game = DXGame.Current;
+            bool suppressIdleDrift = !IsGameWindowForeground(game)
+                || (Testing.TestHarnessConfig.ControlPort > 0 && DXMouseState.Current.Position.IsEmpty);
+            if (suppressIdleDrift && __instance != null)
+            {
+                if (_fIntroAnim == null)
+                    _fIntroAnim = AccessTools.Field(__instance.GetType(), ObfuscatedSymbols.Field_LevelSys_CameraIntroAnim);
+                if (_pNewCamCenter == null)
+                    _pNewCamCenter = AccessTools.Property(__instance.GetType(), "NewCameraCenter");
+                bool introActive = _fIntroAnim != null && _fIntroAnim.GetValue(null) is bool b && b;
+                bool hasNewCenter = _pNewCamCenter != null && _pNewCamCenter.GetValue(__instance, null) != null;
+                if (!introActive && !hasNewCenter)
+                    return false;
+            }
 
             long nowTs = System.Diagnostics.Stopwatch.GetTimestamp();
             double rawDtMs = _lastCamTs > 0 ? (nowTs - _lastCamTs) * _swToMs : 16.67;
@@ -2352,6 +2391,7 @@ namespace TABCoopMod.Determinism
             __state.PrevCam = scene.CameraArea;
             __state.UsedDtMs = useDtMs;
             scene.ElapsedTime = useDtMs;
+            return true;
         }
 
         [HarmonyFinalizer]

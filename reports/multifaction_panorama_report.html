@@ -1,0 +1,2596 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>《亿万僵尸》独立基地（多阵营）模式 — 全 6 生态地图生成全景检视报告</title>
+  <style>
+    :root {
+      --bg: #0c0e11;
+      --panel: #151921;
+      --panel-2: #1b212c;
+      --border: #2e3746;
+      --brass: #d4a656;
+      --brass-bright: #f0c975;
+      --brass-dim: rgba(212, 166, 86, 0.16);
+      --text: #e6ebf2;
+      --muted: #93a0b4;
+      --green: #4cd48c;
+      --red: #f26b6b;
+      --cyan: #59c8f0;
+      --amber: #f2a94d;
+      --p1: #1e90ff;
+      --p2: #00ff7f;
+      --p3: #ff9f43;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top center, #1a202c 0%, var(--bg) 55%);
+      color: var(--text);
+      font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+      line-height: 1.6;
+    }
+    .container { max-width: 1560px; margin: 0 auto; padding: 28px 24px 72px; }
+    header.hero {
+      background: linear-gradient(135deg, rgba(28,34,46,0.95), rgba(16,19,25,0.98));
+      border: 1px solid rgba(212,166,86,0.35);
+      border-radius: 14px;
+      padding: 26px 32px;
+      margin-bottom: 22px;
+      box-shadow: 0 18px 44px rgba(0,0,0,0.45);
+    }
+    .hero-top {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .hero-tag {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      color: var(--brass-bright);
+      background: var(--brass-dim);
+      border: 1px solid rgba(212,166,86,0.4);
+    }
+    .nav-link {
+      color: var(--cyan);
+      text-decoration: none;
+      font-size: 13px;
+      padding: 5px 11px;
+      border-radius: 8px;
+      border: 1px solid rgba(89,200,240,0.3);
+      background: rgba(89,200,240,0.08);
+    }
+    .nav-link:hover { background: rgba(89,200,240,0.18); }
+    h1 { margin: 0 0 8px; font-size: 27px; font-weight: 700; color: #fff; }
+    .hero-sub { color: var(--muted); margin: 0 0 20px; max-width: 1080px; font-size: 14px; }
+    .hero-sub code { color: var(--brass-bright); background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 4px; }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 14px;
+    }
+    .kpi {
+      background: rgba(12,14,17,0.65);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .kpi .label { font-size: 12px; color: var(--muted); letter-spacing: 0.04em; }
+    .kpi .val { font-size: 20px; font-weight: 700; color: var(--brass-bright); margin: 4px 0; }
+    .kpi .desc { font-size: 12.5px; color: var(--muted); }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 22px;
+      background: rgba(21, 25, 33, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 16px;
+      position: sticky;
+      top: 10px;
+      z-index: 30;
+      backdrop-filter: blur(10px);
+    }
+    .tabs, .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    button.pill {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 13px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    button.pill:hover { border-color: var(--brass); color: var(--brass-bright); }
+    button.pill.active {
+      background: linear-gradient(135deg, #c79542, #a27327);
+      color: #111;
+      border-color: var(--brass-bright);
+    }
+    button.pill.toggle-on {
+      background: rgba(76, 212, 140, 0.16);
+      border-color: var(--green);
+      color: var(--green);
+    }
+
+    .scenario-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px 24px;
+      margin-bottom: 26px;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.35);
+    }
+    .sc-head {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .sc-title { margin: 0; font-size: 21px; color: var(--brass-bright); }
+    .sc-meta { font-size: 13px; color: var(--muted); }
+    .sc-note {
+      background: rgba(212,166,86,0.08);
+      border-left: 3px solid var(--brass);
+      padding: 10px 14px;
+      border-radius: 0 8px 8px 0;
+      font-size: 13.5px;
+      margin-bottom: 16px;
+      color: #dbe2ec;
+    }
+
+    .pano-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+    @media (max-width: 980px) {
+      .pano-grid { grid-template-columns: 1fr; }
+    }
+    .pano-box {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .pano-bar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 13px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13.5px;
+      font-weight: 600;
+    }
+    .mode-pill {
+      font-size: 11.5px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    .mode-2p { background: rgba(76,212,140,0.16); color: var(--green); border: 1px solid rgba(76,212,140,0.35); }
+    .mode-3p { background: rgba(89,200,240,0.16); color: var(--cyan); border: 1px solid rgba(89,200,240,0.35); }
+
+    .pano-img-wrap {
+      position: relative;
+      cursor: zoom-in;
+      background: #06080b;
+      aspect-ratio: 1 / 1;
+      overflow: hidden;
+    }
+    .pano-img-wrap img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .cc-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .cc-overlay.hidden { display: none; }
+    .cc-marker {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      border: 2.5px solid #fff;
+      box-shadow: 0 0 0 2px rgba(0,0,0,0.75), 0 0 14px rgba(0,0,0,0.9);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .cc-marker::after {
+      content: attr(data-label);
+      position: absolute;
+      top: -22px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(10,12,16,0.9);
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 5px;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .cc-p1 { border-color: var(--p1); color: #7cc0ff; }
+    .cc-p2 { border-color: var(--p2); color: #6effb3; }
+    .cc-p3 { border-color: var(--p3); color: #ffbe76; }
+
+    .zoom-hint {
+      position: absolute;
+      right: 10px;
+      bottom: 10px;
+      background: rgba(12,14,17,0.82);
+      border: 1px solid rgba(255,255,255,0.22);
+      border-radius: 6px;
+      font-size: 11.5px;
+      padding: 3px 8px;
+      color: var(--text);
+      pointer-events: none;
+    }
+    .pano-foot {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 6px 12px;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+    .pano-foot strong { color: var(--text); }
+
+    table.metrics {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      margin-top: 8px;
+      background: rgba(10,12,16,0.45);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    table.metrics th, table.metrics td {
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      text-align: right;
+    }
+    table.metrics th:first-child, table.metrics td:first-child,
+    table.metrics th:nth-child(2), table.metrics td:nth-child(2) {
+      text-align: left;
+    }
+    table.metrics th {
+      color: var(--brass-bright);
+      background: rgba(255,255,255,0.03);
+      font-weight: 600;
+      font-size: 12px;
+    }
+    table.metrics tr:hover td { background: rgba(255,255,255,0.025); }
+
+    .badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 5px;
+      margin-left: 4px;
+    }
+    .b-bad { background: rgba(242,107,107,0.18); color: var(--red); border: 1px solid rgba(242,107,107,0.35); }
+    .b-warn { background: rgba(242,169,77,0.16); color: var(--amber); border: 1px solid rgba(242,169,77,0.35); }
+    .b-ok { background: rgba(76,212,140,0.14); color: var(--green); border: 1px solid rgba(76,212,140,0.28); }
+    .dot {
+      display: inline-block;
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+
+    .summary-card {
+      background: linear-gradient(135deg, rgba(21,25,33,0.96), rgba(16,19,25,0.98));
+      border: 1px solid rgba(89,200,240,0.3);
+      border-radius: 14px;
+      padding: 22px 26px;
+      margin-top: 12px;
+    }
+    .summary-card h3 { margin: 0 0 12px; color: var(--cyan); font-size: 18px; }
+    .summary-card ul { margin: 0; padding-left: 20px; color: #dbe2ec; font-size: 14px; }
+    .summary-card li { margin-bottom: 8px; }
+
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      background: rgba(5,7,10,0.93);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 20px;
+    }
+    .lightbox.open { display: flex; }
+    .lb-frame {
+      position: relative;
+      max-width: min(92vw, 90vh);
+      max-height: 90vh;
+      aspect-ratio: 1 / 1;
+      border: 1px solid var(--brass);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+    }
+    .lb-frame img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .lb-caption {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(15,19,26,0.92);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 14px;
+      font-size: 13px;
+      color: var(--brass-bright);
+    }
+    .lb-close {
+      position: fixed;
+      top: 18px;
+      right: 24px;
+      background: rgba(21,25,33,0.92);
+      border: 1px solid var(--border);
+      color: #fff;
+      font-size: 18px;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <header class="hero">
+    <div class="hero-top">
+      <span class="hero-tag">PHASE 4 MULTI-FACTION · 地图生成全景检视</span>
+      <a class="nav-link" href="panorama_comparison.html">↗ 查看执政官模式同种子平衡性对比页</a>
+    </div>
+    <h1>《亿万僵尸》独立基地模式 — 全 6 生态地图生成全景演示</h1>
+    <p class="hero-sub">
+      本页基于当前 <code>dev/multi-faction</code> 分支原型（<code>CoopBalanceManager.PlaceMultiFactionStarterBases</code>），在全部 <strong>6 种生存生态</strong>（<code>BR / AL / TM / DS / FA / VO</code>）下各自取 <strong>2 组独立种子 × 2P(296格) &amp; 3P(336格)</strong>，共实机生成并截取 <strong>24 张 2048×2048 全图无迷雾全景</strong>，并同步采样每座主基地周边资源与最近僵尸距离，用于评估下一阶段 <code>M4 MultiBaseMapGenerator</code> 的选址与资源保底方案。
+    </p>
+    <div class="kpi-grid" id="kpiGrid"></div>
+  </header>
+
+  <div class="toolbar">
+    <div class="tabs" id="themeTabs"></div>
+    <div class="controls">
+      <button class="pill active" data-pfilter="all">全部 2P + 3P</button>
+      <button class="pill" data-pfilter="mf2p">仅 2P (296格)</button>
+      <button class="pill" data-pfilter="mf3p">仅 3P (336格)</button>
+      <button class="pill toggle-on" id="toggleMarkersBtn">◎ 显示基地标靶圈</button>
+    </div>
+  </div>
+
+  <main id="app"></main>
+
+  <section class="summary-card">
+    <h3>当前原型实测暴露出的地图生成待调优项（供 M4 设计决策参考）</h3>
+    <ul>
+      <li><strong>① 开局“贴脸僵尸”仍大量存在（<code>Z = 0 ~ 8 格</code>）</strong>：原版 <code>MapGenerator</code> 在扩展后的 296/336 格上生成的游荡怪/建筑衍生怪会出现在副基地（<code>CC2/CC3</code>）<code>0 ~ 10</code> 格内；现有仅靠局内 <code>tick ≤ 5</code> 补救，且全景中直接可见部分副基地贴邻大片僵尸群（如 <code>AL s1</code> 右侧、<code>VO s1/s2</code>）。正式 <code>MultiBaseMapGenerator</code> 应以全部 <code>CC_1..N</code> 的<strong>多中心最小距离场 d<sub>min</sub></strong> 驱动安全无怪圈与强度同心环。</li>
+      <li><strong>② 副基地周边出现极端“天谴缺项”</strong>：因目前只找“无山无水空地”，部分基地出现 <strong>0 树木（<code>br_s2_mf3p P2 W=0</code>、<code>tm_s2_mf3p P1 W=0</code>）</strong>、<strong>0 石矿（<code>fa_s1_mf2p/3p P1 S=0</code>）</strong>、<strong>0 草地（<code>al_s2_mf3p P1 G=0</code>）</strong> 或被冰崖/水体半包围（<code>al_s1</code>、<code>tm_s1</code>）。</li>
+      <li><strong>③ 基地间距与外环利用偏保守</strong>：目前围绕原版中心 <code>CC</code> 的固定半径（约 <code>40~50</code> 格）落位，导致部分地图上三座基地全挤在中央（尤其 <code>336 格</code> 大图外围大量空地未利用），且相邻玩家发展走廊宽窄差异极大；适合后续改用扇区均匀分布（如 2P 对角、3P 等边三角形带随机扰动）+ Top-K 自然评分择优 + A* 连通走廊校验。</li>
+    </ul>
+  </section>
+</div>
+
+<div class="lightbox" id="lightbox">
+  <button class="lb-close" id="lightboxClose" title="关闭 (ESC)">×</button>
+  <div class="lb-frame" id="lbFrame">
+    <img id="lightboxImg" src="" alt="" />
+    <div class="cc-overlay" id="lbOverlay"></div>
+  </div>
+  <div class="lb-caption" id="lightboxCaption"></div>
+</div>
+
+<script>
+const THEME_META = {
+  BR: {
+    cnTitle: "暗黑荒原 · The Dark Moorland",
+    tag: "BR · 标准 100% 平衡基准",
+    note: "标准沼泽森林地图：植被与水源较分散，原型落位时仍出现 P2 周边无木（s2 3P: W=0）及中心外副基地贴邻游荡僵尸（Z=0~5）。"
+  },
+  AL: {
+    cnTitle: "极寒高地 · The Frozen Highlands",
+    tag: "AL · 冰崖窄口 · 草地稀缺",
+    note: "冰川地形多大片不可通行冰崖与冰湖，绿草极少集中在零星口袋：s2 3P 出现主副基地近圈草地 G=0、树 W=1 的极端不均。"
+  },
+  TM: {
+    cnTitle: "宁静低地 · The Peaceful Lowlands",
+    tag: "TM · 大片湖泊分隔 · 开阔走廊",
+    note: "地表开阔但大湖分割强烈：s1 中主副基地分列大湖两侧、一侧紧邻 Doom Village；s2 3P 出现某基地近圈 W=0 的无树死角。"
+  },
+  DS: {
+    cnTitle: "荒芜荒漠 · The Desolated Wasteland",
+    tag: "DS · 高密感染村落 · 低木稀疏",
+    note: "沙地广袤但天然树木少、感染城镇密集（65~84 座建筑）：s2 3P 出现某基地近圈石矿仅 3 格且邻居资源悬殊。"
+  },
+  FA: {
+    cnTitle: "幽暗深林 · The Deep Forest",
+    tag: "FA · 密林山体屏障 · 矿脉易偏",
+    note: "秋林极茂密且山丘块多：天然树木最充足，但 s1 出现主基地 24 格内完全无石矿（S=0），3P s2 外侧基地树木仅 W=8。"
+  },
+  VO: {
+    cnTitle: "酸蚀之地 · The Caustic Lands",
+    tag: "VO · 超大毒潭与高压巨型村落",
+    note: "环境压迫感最强：毒沼占格多且中上角巨型感染区密集（88~129 座巢穴），若多基地安全半径不足极易开局直接触发近距僵尸（Z=0~1）。"
+  }
+};
+
+const DATA = [
+    {
+        "cnName":  "暗黑荒原 (BR)",
+        "cases":  [
+                      {
+                          "id":  "br_s1_mf2p",
+                          "seedIndex":  1,
+                          "sizeKB":  540.3,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202611,
+                          "image":  "panoramas_mf/br_s1_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "BR",
+                                          "seed":  202611,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  203,
+                                                                     "y":  244,
+                                                                     "normX":  0.3965,
+                                                                     "normY":  0.4766,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  110,
+                                                                     "grass16":  408,
+                                                                     "water16":  32,
+                                                                     "stone24":  31,
+                                                                     "iron48":  74,
+                                                                     "gold30":  18,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  1
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  251,
+                                                                     "y":  251,
+                                                                     "normX":  0.4902,
+                                                                     "normY":  0.4902,
+                                                                     "distToCc1":  48.5,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  60,
+                                                                     "grass16":  264,
+                                                                     "water16":  164,
+                                                                     "stone24":  5,
+                                                                     "iron48":  50,
+                                                                     "gold30":  0,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  27.7
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  9980,
+                                          "giants":  1,
+                                          "mutants":  1,
+                                          "doomVillages":  9,
+                                          "oilSources":  17,
+                                          "pickables":  21,
+                                          "terrainTreeCells":  2367,
+                                          "terrainGoldCells":  150,
+                                          "terrainStoneCells":  380,
+                                          "terrainIronCells":  245,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "br_s1_mf3p",
+                          "seedIndex":  1,
+                          "sizeKB":  558.9,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202611,
+                          "image":  "panoramas_mf/br_s1_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "BR",
+                                          "seed":  202611,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  258,
+                                                                     "y":  203,
+                                                                     "normX":  0.5039,
+                                                                     "normY":  0.3965,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  146,
+                                                                     "grass16":  431,
+                                                                     "water16":  188,
+                                                                     "stone24":  2,
+                                                                     "iron48":  21,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  7.2
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  207,
+                                                                     "y":  269,
+                                                                     "normX":  0.4043,
+                                                                     "normY":  0.5254,
+                                                                     "distToCc1":  83.4,
+                                                                     "minOtherCcDist":  47.5,
+                                                                     "trees16":  36,
+                                                                     "grass16":  232,
+                                                                     "water16":  0,
+                                                                     "stone24":  18,
+                                                                     "iron48":  34,
+                                                                     "gold30":  19,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  2.8
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  251,
+                                                                     "y":  251,
+                                                                     "normX":  0.4902,
+                                                                     "normY":  0.4902,
+                                                                     "distToCc1":  48.5,
+                                                                     "minOtherCcDist":  47.5,
+                                                                     "trees16":  60,
+                                                                     "grass16":  264,
+                                                                     "water16":  164,
+                                                                     "stone24":  33,
+                                                                     "iron48":  50,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  28
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  14340,
+                                          "giants":  1,
+                                          "mutants":  2,
+                                          "doomVillages":  11,
+                                          "oilSources":  21,
+                                          "pickables":  34,
+                                          "terrainTreeCells":  3182,
+                                          "terrainGoldCells":  274,
+                                          "terrainStoneCells":  556,
+                                          "terrainIronCells":  218,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "br_s2_mf2p",
+                          "seedIndex":  2,
+                          "sizeKB":  526.5,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202612,
+                          "image":  "panoramas_mf/br_s2_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "BR",
+                                          "seed":  202612,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  228,
+                                                                     "y":  222,
+                                                                     "normX":  0.4453,
+                                                                     "normY":  0.4336,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  110,
+                                                                     "grass16":  549,
+                                                                     "water16":  187,
+                                                                     "stone24":  6,
+                                                                     "iron48":  42,
+                                                                     "gold30":  19,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  1
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  266,
+                                                                     "y":  251,
+                                                                     "normX":  0.5195,
+                                                                     "normY":  0.4902,
+                                                                     "distToCc1":  47.8,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  42,
+                                                                     "grass16":  109,
+                                                                     "water16":  135,
+                                                                     "stone24":  41,
+                                                                     "iron48":  88,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  29.7
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  9752,
+                                          "giants":  1,
+                                          "mutants":  1,
+                                          "doomVillages":  6,
+                                          "oilSources":  17,
+                                          "pickables":  32,
+                                          "terrainTreeCells":  2005,
+                                          "terrainGoldCells":  239,
+                                          "terrainStoneCells":  425,
+                                          "terrainIronCells":  199,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "br_s2_mf3p",
+                          "seedIndex":  2,
+                          "sizeKB":  551.1,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202612,
+                          "image":  "panoramas_mf/br_s2_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "BR",
+                                          "seed":  202612,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  218,
+                                                                     "y":  244,
+                                                                     "normX":  0.4258,
+                                                                     "normY":  0.4766,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  111,
+                                                                     "grass16":  428,
+                                                                     "water16":  197,
+                                                                     "stone24":  10,
+                                                                     "iron48":  36,
+                                                                     "gold30":  8,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  5.4
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  295,
+                                                                     "y":  213,
+                                                                     "normX":  0.5762,
+                                                                     "normY":  0.416,
+                                                                     "distToCc1":  83,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  0,
+                                                                     "grass16":  339,
+                                                                     "water16":  125,
+                                                                     "stone24":  8,
+                                                                     "iron48":  38,
+                                                                     "gold30":  8,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  0
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  266,
+                                                                     "y":  251,
+                                                                     "normX":  0.5195,
+                                                                     "normY":  0.4902,
+                                                                     "distToCc1":  48.5,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  42,
+                                                                     "grass16":  109,
+                                                                     "water16":  135,
+                                                                     "stone24":  26,
+                                                                     "iron48":  44,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  27.5
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  13294,
+                                          "giants":  2,
+                                          "mutants":  2,
+                                          "doomVillages":  4,
+                                          "oilSources":  22,
+                                          "pickables":  38,
+                                          "terrainTreeCells":  2521,
+                                          "terrainGoldCells":  189,
+                                          "terrainStoneCells":  554,
+                                          "terrainIronCells":  351,
+                                          "levelEventsCount":  6
+                                      }
+                      }
+                  ],
+        "enName":  "The Dark Moorland",
+        "theme":  "BR"
+    },
+    {
+        "cnName":  "宁静低地 / 林间 (AL)",
+        "cases":  [
+                      {
+                          "id":  "al_s1_mf2p",
+                          "seedIndex":  1,
+                          "sizeKB":  964.4,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202631,
+                          "image":  "panoramas_mf/al_s1_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "AL",
+                                          "seed":  202631,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  256,
+                                                                     "y":  260,
+                                                                     "normX":  0.5,
+                                                                     "normY":  0.5078,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  73,
+                                                                     "grass16":  168,
+                                                                     "water16":  165,
+                                                                     "stone24":  45,
+                                                                     "iron48":  48,
+                                                                     "gold30":  0,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  25.1
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  294,
+                                                                     "y":  231,
+                                                                     "normX":  0.5742,
+                                                                     "normY":  0.4512,
+                                                                     "distToCc1":  47.8,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  20,
+                                                                     "grass16":  149,
+                                                                     "water16":  0,
+                                                                     "stone24":  25,
+                                                                     "iron48":  49,
+                                                                     "gold30":  10,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  7.1
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  10841,
+                                          "giants":  1,
+                                          "mutants":  3,
+                                          "doomVillages":  24,
+                                          "oilSources":  18,
+                                          "pickables":  36,
+                                          "terrainTreeCells":  1917,
+                                          "terrainGoldCells":  141,
+                                          "terrainStoneCells":  528,
+                                          "terrainIronCells":  241,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "al_s1_mf3p",
+                          "seedIndex":  1,
+                          "sizeKB":  1036,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202631,
+                          "image":  "panoramas_mf/al_s1_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "AL",
+                                          "seed":  202631,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  218,
+                                                                     "y":  289,
+                                                                     "normX":  0.4258,
+                                                                     "normY":  0.5645,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  13,
+                                                                     "grass16":  234,
+                                                                     "water16":  0,
+                                                                     "stone24":  15,
+                                                                     "iron48":  91,
+                                                                     "gold30":  0,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  3.2
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  256,
+                                                                     "y":  260,
+                                                                     "normX":  0.5,
+                                                                     "normY":  0.5078,
+                                                                     "distToCc1":  47.8,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  73,
+                                                                     "grass16":  168,
+                                                                     "water16":  165,
+                                                                     "stone24":  43,
+                                                                     "iron48":  61,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  26.2
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  304,
+                                                                     "y":  254,
+                                                                     "normX":  0.5938,
+                                                                     "normY":  0.4961,
+                                                                     "distToCc1":  92.8,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  26,
+                                                                     "grass16":  22,
+                                                                     "water16":  145,
+                                                                     "stone24":  7,
+                                                                     "iron48":  54,
+                                                                     "gold30":  12,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  0
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  18599,
+                                          "giants":  2,
+                                          "mutants":  3,
+                                          "doomVillages":  32,
+                                          "oilSources":  21,
+                                          "pickables":  36,
+                                          "terrainTreeCells":  2856,
+                                          "terrainGoldCells":  153,
+                                          "terrainStoneCells":  606,
+                                          "terrainIronCells":  391,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "al_s2_mf2p",
+                          "seedIndex":  2,
+                          "sizeKB":  962.6,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202632,
+                          "image":  "panoramas_mf/al_s2_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "AL",
+                                          "seed":  -88751598,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  265,
+                                                                     "y":  206,
+                                                                     "normX":  0.5176,
+                                                                     "normY":  0.4023,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  1,
+                                                                     "grass16":  91,
+                                                                     "water16":  0,
+                                                                     "stone24":  30,
+                                                                     "iron48":  58,
+                                                                     "gold30":  5,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  2
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  258,
+                                                                     "y":  254,
+                                                                     "normX":  0.5039,
+                                                                     "normY":  0.4961,
+                                                                     "distToCc1":  48.5,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  86,
+                                                                     "grass16":  234,
+                                                                     "water16":  0,
+                                                                     "stone24":  52,
+                                                                     "iron48":  21,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  27.3
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  10704,
+                                          "giants":  1,
+                                          "mutants":  3,
+                                          "doomVillages":  39,
+                                          "oilSources":  18,
+                                          "pickables":  27,
+                                          "terrainTreeCells":  2134,
+                                          "terrainGoldCells":  102,
+                                          "terrainStoneCells":  704,
+                                          "terrainIronCells":  207,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "al_s2_mf3p",
+                          "seedIndex":  2,
+                          "sizeKB":  1015.6,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202632,
+                          "image":  "panoramas_mf/al_s2_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "AL",
+                                          "seed":  -88751598,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  210,
+                                                                     "y":  247,
+                                                                     "normX":  0.4102,
+                                                                     "normY":  0.4824,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  26,
+                                                                     "grass16":  0,
+                                                                     "water16":  109,
+                                                                     "stone24":  16,
+                                                                     "iron48":  39,
+                                                                     "gold30":  5,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  5.4
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  265,
+                                                                     "y":  206,
+                                                                     "normX":  0.5176,
+                                                                     "normY":  0.4023,
+                                                                     "distToCc1":  68.6,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  1,
+                                                                     "grass16":  91,
+                                                                     "water16":  0,
+                                                                     "stone24":  30,
+                                                                     "iron48":  68,
+                                                                     "gold30":  3,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  5.7
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  258,
+                                                                     "y":  254,
+                                                                     "normX":  0.5039,
+                                                                     "normY":  0.4961,
+                                                                     "distToCc1":  48.5,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  86,
+                                                                     "grass16":  234,
+                                                                     "water16":  0,
+                                                                     "stone24":  52,
+                                                                     "iron48":  57,
+                                                                     "gold30":  0,
+                                                                     "oil48":  1,
+                                                                     "nearestZombieDist":  27.5
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  15355,
+                                          "giants":  2,
+                                          "mutants":  3,
+                                          "doomVillages":  53,
+                                          "oilSources":  20,
+                                          "pickables":  35,
+                                          "terrainTreeCells":  2896,
+                                          "terrainGoldCells":  141,
+                                          "terrainStoneCells":  993,
+                                          "terrainIronCells":  312,
+                                          "levelEventsCount":  6
+                                      }
+                      }
+                  ],
+        "enName":  "The Peaceful Lowlands",
+        "theme":  "AL"
+    },
+    {
+        "cnName":  "荒芜旷野 / 冻地 (TM)",
+        "cases":  [
+                      {
+                          "id":  "tm_s1_mf2p",
+                          "seedIndex":  1,
+                          "sizeKB":  645.6,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202621,
+                          "image":  "panoramas_mf/tm_s1_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "TM",
+                                          "seed":  -731995773,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  208,
+                                                                     "y":  249,
+                                                                     "normX":  0.4062,
+                                                                     "normY":  0.4863,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  63,
+                                                                     "grass16":  423,
+                                                                     "water16":  233,
+                                                                     "stone24":  23,
+                                                                     "iron48":  28,
+                                                                     "gold30":  11,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  2
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  256,
+                                                                     "y":  256,
+                                                                     "normX":  0.5,
+                                                                     "normY":  0.5,
+                                                                     "distToCc1":  48.5,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  131,
+                                                                     "grass16":  480,
+                                                                     "water16":  58,
+                                                                     "stone24":  32,
+                                                                     "iron48":  65,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  30.4
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  11400,
+                                          "giants":  1,
+                                          "mutants":  1,
+                                          "doomVillages":  117,
+                                          "oilSources":  17,
+                                          "pickables":  20,
+                                          "terrainTreeCells":  2658,
+                                          "terrainGoldCells":  99,
+                                          "terrainStoneCells":  409,
+                                          "terrainIronCells":  232,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "tm_s1_mf3p",
+                          "seedIndex":  1,
+                          "sizeKB":  674.6,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202621,
+                          "image":  "panoramas_mf/tm_s1_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "TM",
+                                          "seed":  -731995773,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  250,
+                                                                     "y":  208,
+                                                                     "normX":  0.4883,
+                                                                     "normY":  0.4062,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  131,
+                                                                     "grass16":  742,
+                                                                     "water16":  11,
+                                                                     "stone24":  9,
+                                                                     "iron48":  44,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  4.1
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  208,
+                                                                     "y":  262,
+                                                                     "normX":  0.4062,
+                                                                     "normY":  0.5117,
+                                                                     "distToCc1":  68.4,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  64,
+                                                                     "grass16":  498,
+                                                                     "water16":  0,
+                                                                     "stone24":  18,
+                                                                     "iron48":  105,
+                                                                     "gold30":  7,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  5.4
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  256,
+                                                                     "y":  256,
+                                                                     "normX":  0.5,
+                                                                     "normY":  0.5,
+                                                                     "distToCc1":  48.4,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  131,
+                                                                     "grass16":  480,
+                                                                     "water16":  58,
+                                                                     "stone24":  32,
+                                                                     "iron48":  60,
+                                                                     "gold30":  0,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  26.2
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  16692,
+                                          "giants":  2,
+                                          "mutants":  2,
+                                          "doomVillages":  91,
+                                          "oilSources":  24,
+                                          "pickables":  34,
+                                          "terrainTreeCells":  3364,
+                                          "terrainGoldCells":  158,
+                                          "terrainStoneCells":  665,
+                                          "terrainIronCells":  318,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "tm_s2_mf2p",
+                          "seedIndex":  2,
+                          "sizeKB":  652.6,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202622,
+                          "image":  "panoramas_mf/tm_s2_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "TM",
+                                          "seed":  202622,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  257,
+                                                                     "y":  257,
+                                                                     "normX":  0.502,
+                                                                     "normY":  0.502,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  47.9,
+                                                                     "trees16":  74,
+                                                                     "grass16":  282,
+                                                                     "water16":  46,
+                                                                     "stone24":  40,
+                                                                     "iron48":  40,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  27.6
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  301,
+                                                                     "y":  276,
+                                                                     "normX":  0.5879,
+                                                                     "normY":  0.5391,
+                                                                     "distToCc1":  47.9,
+                                                                     "minOtherCcDist":  47.9,
+                                                                     "trees16":  33,
+                                                                     "grass16":  138,
+                                                                     "water16":  115,
+                                                                     "stone24":  15,
+                                                                     "iron48":  20,
+                                                                     "gold30":  0,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  3.6
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  12225,
+                                          "giants":  1,
+                                          "mutants":  1,
+                                          "doomVillages":  97,
+                                          "oilSources":  19,
+                                          "pickables":  26,
+                                          "terrainTreeCells":  2203,
+                                          "terrainGoldCells":  131,
+                                          "terrainStoneCells":  378,
+                                          "terrainIronCells":  283,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "tm_s2_mf3p",
+                          "seedIndex":  2,
+                          "sizeKB":  684.5,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202622,
+                          "image":  "panoramas_mf/tm_s2_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "TM",
+                                          "seed":  202622,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  264,
+                                                                     "y":  209,
+                                                                     "normX":  0.5156,
+                                                                     "normY":  0.4082,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  0,
+                                                                     "grass16":  122,
+                                                                     "water16":  0,
+                                                                     "stone24":  60,
+                                                                     "iron48":  53,
+                                                                     "gold30":  42,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  0
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  213,
+                                                                     "y":  275,
+                                                                     "normX":  0.416,
+                                                                     "normY":  0.5371,
+                                                                     "distToCc1":  83.4,
+                                                                     "minOtherCcDist":  47.5,
+                                                                     "trees16":  23,
+                                                                     "grass16":  224,
+                                                                     "water16":  0,
+                                                                     "stone24":  28,
+                                                                     "iron48":  61,
+                                                                     "gold30":  5,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  8.9
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  257,
+                                                                     "y":  257,
+                                                                     "normX":  0.502,
+                                                                     "normY":  0.502,
+                                                                     "distToCc1":  48.5,
+                                                                     "minOtherCcDist":  47.5,
+                                                                     "trees16":  74,
+                                                                     "grass16":  282,
+                                                                     "water16":  46,
+                                                                     "stone24":  29,
+                                                                     "iron48":  56,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  26.8
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  16459,
+                                          "giants":  2,
+                                          "mutants":  2,
+                                          "doomVillages":  94,
+                                          "oilSources":  24,
+                                          "pickables":  27,
+                                          "terrainTreeCells":  3172,
+                                          "terrainGoldCells":  215,
+                                          "terrainStoneCells":  630,
+                                          "terrainIronCells":  311,
+                                          "levelEventsCount":  6
+                                      }
+                      }
+                  ],
+        "enName":  "The Frozen Highlands",
+        "theme":  "TM"
+    },
+    {
+        "cnName":  "干旱高地 / 荒漠 (DS)",
+        "cases":  [
+                      {
+                          "id":  "ds_s1_mf2p",
+                          "seedIndex":  1,
+                          "sizeKB":  916.3,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202641,
+                          "image":  "panoramas_mf/ds_s1_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "DS",
+                                          "seed":  202641,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  201,
+                                                                     "y":  265,
+                                                                     "normX":  0.3926,
+                                                                     "normY":  0.5176,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  76,
+                                                                     "grass16":  168,
+                                                                     "water16":  12,
+                                                                     "stone24":  38,
+                                                                     "iron48":  40,
+                                                                     "gold30":  11,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  8.1
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  249,
+                                                                     "y":  259,
+                                                                     "normX":  0.4863,
+                                                                     "normY":  0.5059,
+                                                                     "distToCc1":  48.4,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  100,
+                                                                     "grass16":  79,
+                                                                     "water16":  6,
+                                                                     "stone24":  36,
+                                                                     "iron48":  35,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  22.6
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  14008,
+                                          "giants":  1,
+                                          "mutants":  4,
+                                          "doomVillages":  65,
+                                          "oilSources":  21,
+                                          "pickables":  38,
+                                          "terrainTreeCells":  5120,
+                                          "terrainGoldCells":  103,
+                                          "terrainStoneCells":  541,
+                                          "terrainIronCells":  261,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "ds_s1_mf3p",
+                          "seedIndex":  1,
+                          "sizeKB":  944,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202641,
+                          "image":  "panoramas_mf/ds_s1_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "DS",
+                                          "seed":  202641,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  201,
+                                                                     "y":  252,
+                                                                     "normX":  0.3926,
+                                                                     "normY":  0.4922,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  43,
+                                                                     "grass16":  226,
+                                                                     "water16":  14,
+                                                                     "stone24":  54,
+                                                                     "iron48":  38,
+                                                                     "gold30":  7,
+                                                                     "oil48":  6,
+                                                                     "nearestZombieDist":  2.8
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  256,
+                                                                     "y":  211,
+                                                                     "normX":  0.5,
+                                                                     "normY":  0.4121,
+                                                                     "distToCc1":  68.6,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  77,
+                                                                     "grass16":  158,
+                                                                     "water16":  19,
+                                                                     "stone24":  18,
+                                                                     "iron48":  84,
+                                                                     "gold30":  13,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  1
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  249,
+                                                                     "y":  259,
+                                                                     "normX":  0.4863,
+                                                                     "normY":  0.5059,
+                                                                     "distToCc1":  48.5,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  100,
+                                                                     "grass16":  79,
+                                                                     "water16":  6,
+                                                                     "stone24":  36,
+                                                                     "iron48":  38,
+                                                                     "gold30":  0,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  25
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  16992,
+                                          "giants":  2,
+                                          "mutants":  5,
+                                          "doomVillages":  79,
+                                          "oilSources":  32,
+                                          "pickables":  45,
+                                          "terrainTreeCells":  6459,
+                                          "terrainGoldCells":  194,
+                                          "terrainStoneCells":  897,
+                                          "terrainIronCells":  378,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "ds_s2_mf2p",
+                          "seedIndex":  2,
+                          "sizeKB":  918.4,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202642,
+                          "image":  "panoramas_mf/ds_s2_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "DS",
+                                          "seed":  202642,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  208,
+                                                                     "y":  278,
+                                                                     "normX":  0.4062,
+                                                                     "normY":  0.543,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  47.5,
+                                                                     "trees16":  23,
+                                                                     "grass16":  335,
+                                                                     "water16":  2,
+                                                                     "stone24":  63,
+                                                                     "iron48":  75,
+                                                                     "gold30":  15,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  4.5
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  252,
+                                                                     "y":  260,
+                                                                     "normX":  0.4922,
+                                                                     "normY":  0.5078,
+                                                                     "distToCc1":  47.5,
+                                                                     "minOtherCcDist":  47.5,
+                                                                     "trees16":  78,
+                                                                     "grass16":  86,
+                                                                     "water16":  3,
+                                                                     "stone24":  97,
+                                                                     "iron48":  54,
+                                                                     "gold30":  0,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  22.4
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  14604,
+                                          "giants":  1,
+                                          "mutants":  4,
+                                          "doomVillages":  70,
+                                          "oilSources":  21,
+                                          "pickables":  37,
+                                          "terrainTreeCells":  4054,
+                                          "terrainGoldCells":  182,
+                                          "terrainStoneCells":  768,
+                                          "terrainIronCells":  380,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "ds_s2_mf3p",
+                          "seedIndex":  2,
+                          "sizeKB":  957.7,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202642,
+                          "image":  "panoramas_mf/ds_s2_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "DS",
+                                          "seed":  202642,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  214,
+                                                                     "y":  289,
+                                                                     "normX":  0.418,
+                                                                     "normY":  0.5645,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  51,
+                                                                     "grass16":  273,
+                                                                     "water16":  18,
+                                                                     "stone24":  3,
+                                                                     "iron48":  57,
+                                                                     "gold30":  5,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  10
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  252,
+                                                                     "y":  260,
+                                                                     "normX":  0.4922,
+                                                                     "normY":  0.5078,
+                                                                     "distToCc1":  47.8,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  78,
+                                                                     "grass16":  86,
+                                                                     "water16":  3,
+                                                                     "stone24":  41,
+                                                                     "iron48":  90,
+                                                                     "gold30":  0,
+                                                                     "oil48":  5,
+                                                                     "nearestZombieDist":  23
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  300,
+                                                                     "y":  267,
+                                                                     "normX":  0.5859,
+                                                                     "normY":  0.5215,
+                                                                     "distToCc1":  88.8,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  83,
+                                                                     "grass16":  159,
+                                                                     "water16":  10,
+                                                                     "stone24":  66,
+                                                                     "iron48":  78,
+                                                                     "gold30":  2,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  5.4
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  19343,
+                                          "giants":  2,
+                                          "mutants":  5,
+                                          "doomVillages":  84,
+                                          "oilSources":  33,
+                                          "pickables":  48,
+                                          "terrainTreeCells":  5389,
+                                          "terrainGoldCells":  222,
+                                          "terrainStoneCells":  888,
+                                          "terrainIronCells":  498,
+                                          "levelEventsCount":  6
+                                      }
+                      }
+                  ],
+        "enName":  "The Desolated Wasteland",
+        "theme":  "DS"
+    },
+    {
+        "cnName":  "深寒苔原 / 冰原 (FA)",
+        "cases":  [
+                      {
+                          "id":  "fa_s1_mf2p",
+                          "seedIndex":  1,
+                          "sizeKB":  738.4,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202651,
+                          "image":  "panoramas_mf/fa_s1_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "FA",
+                                          "seed":  202651,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  209,
+                                                                     "y":  263,
+                                                                     "normX":  0.4082,
+                                                                     "normY":  0.5137,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  75,
+                                                                     "grass16":  705,
+                                                                     "water16":  20,
+                                                                     "stone24":  0,
+                                                                     "iron48":  18,
+                                                                     "gold30":  17,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  6.1
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  257,
+                                                                     "y":  257,
+                                                                     "normX":  0.502,
+                                                                     "normY":  0.502,
+                                                                     "distToCc1":  48.4,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  98,
+                                                                     "grass16":  338,
+                                                                     "water16":  0,
+                                                                     "stone24":  19,
+                                                                     "iron48":  48,
+                                                                     "gold30":  0,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  29.4
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  9392,
+                                          "giants":  0,
+                                          "mutants":  0,
+                                          "doomVillages":  7,
+                                          "oilSources":  12,
+                                          "pickables":  30,
+                                          "terrainTreeCells":  6127,
+                                          "terrainGoldCells":  146,
+                                          "terrainStoneCells":  375,
+                                          "terrainIronCells":  225,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "fa_s1_mf3p",
+                          "seedIndex":  1,
+                          "sizeKB":  759.8,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202651,
+                          "image":  "panoramas_mf/fa_s1_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "FA",
+                                          "seed":  202651,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  209,
+                                                                     "y":  263,
+                                                                     "normX":  0.4082,
+                                                                     "normY":  0.5137,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  75,
+                                                                     "grass16":  705,
+                                                                     "water16":  20,
+                                                                     "stone24":  0,
+                                                                     "iron48":  27,
+                                                                     "gold30":  5,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  6.4
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  264,
+                                                                     "y":  209,
+                                                                     "normX":  0.5156,
+                                                                     "normY":  0.4082,
+                                                                     "distToCc1":  77.1,
+                                                                     "minOtherCcDist":  48.5,
+                                                                     "trees16":  325,
+                                                                     "grass16":  466,
+                                                                     "water16":  3,
+                                                                     "stone24":  40,
+                                                                     "iron48":  24,
+                                                                     "gold30":  13,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  5.8
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  257,
+                                                                     "y":  257,
+                                                                     "normX":  0.502,
+                                                                     "normY":  0.502,
+                                                                     "distToCc1":  48.4,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  98,
+                                                                     "grass16":  338,
+                                                                     "water16":  0,
+                                                                     "stone24":  21,
+                                                                     "iron48":  23,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  31.2
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  12964,
+                                          "giants":  0,
+                                          "mutants":  0,
+                                          "doomVillages":  7,
+                                          "oilSources":  15,
+                                          "pickables":  34,
+                                          "terrainTreeCells":  8265,
+                                          "terrainGoldCells":  124,
+                                          "terrainStoneCells":  436,
+                                          "terrainIronCells":  190,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "fa_s2_mf2p",
+                          "seedIndex":  2,
+                          "sizeKB":  700,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202652,
+                          "image":  "panoramas_mf/fa_s2_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "FA",
+                                          "seed":  202652,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  208,
+                                                                     "y":  269,
+                                                                     "normX":  0.4062,
+                                                                     "normY":  0.5254,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  47,
+                                                                     "grass16":  534,
+                                                                     "water16":  0,
+                                                                     "stone24":  18,
+                                                                     "iron48":  44,
+                                                                     "gold30":  41,
+                                                                     "oil48":  1,
+                                                                     "nearestZombieDist":  1
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  256,
+                                                                     "y":  263,
+                                                                     "normX":  0.5,
+                                                                     "normY":  0.5137,
+                                                                     "distToCc1":  48.4,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  118,
+                                                                     "grass16":  553,
+                                                                     "water16":  6,
+                                                                     "stone24":  14,
+                                                                     "iron48":  59,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  30
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  8828,
+                                          "giants":  0,
+                                          "mutants":  0,
+                                          "doomVillages":  5,
+                                          "oilSources":  14,
+                                          "pickables":  25,
+                                          "terrainTreeCells":  5617,
+                                          "terrainGoldCells":  137,
+                                          "terrainStoneCells":  322,
+                                          "terrainIronCells":  197,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "fa_s2_mf3p",
+                          "seedIndex":  2,
+                          "sizeKB":  735.1,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202652,
+                          "image":  "panoramas_mf/fa_s2_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "FA",
+                                          "seed":  202652,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  208,
+                                                                     "y":  269,
+                                                                     "normX":  0.4062,
+                                                                     "normY":  0.5254,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  47,
+                                                                     "grass16":  534,
+                                                                     "water16":  0,
+                                                                     "stone24":  30,
+                                                                     "iron48":  40,
+                                                                     "gold30":  17,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  2
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  256,
+                                                                     "y":  263,
+                                                                     "normX":  0.5,
+                                                                     "normY":  0.5137,
+                                                                     "distToCc1":  48.4,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  118,
+                                                                     "grass16":  553,
+                                                                     "water16":  6,
+                                                                     "stone24":  9,
+                                                                     "iron48":  60,
+                                                                     "gold30":  0,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  27.8
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  304,
+                                                                     "y":  257,
+                                                                     "normX":  0.5938,
+                                                                     "normY":  0.502,
+                                                                     "distToCc1":  96.7,
+                                                                     "minOtherCcDist":  48.4,
+                                                                     "trees16":  8,
+                                                                     "grass16":  410,
+                                                                     "water16":  0,
+                                                                     "stone24":  45,
+                                                                     "iron48":  61,
+                                                                     "gold30":  14,
+                                                                     "oil48":  1,
+                                                                     "nearestZombieDist":  8.5
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  14415,
+                                          "giants":  0,
+                                          "mutants":  0,
+                                          "doomVillages":  2,
+                                          "oilSources":  18,
+                                          "pickables":  29,
+                                          "terrainTreeCells":  7000,
+                                          "terrainGoldCells":  179,
+                                          "terrainStoneCells":  481,
+                                          "terrainIronCells":  319,
+                                          "levelEventsCount":  6
+                                      }
+                      }
+                  ],
+        "enName":  "The Frozen Lake / Tundra",
+        "theme":  "FA"
+    },
+    {
+        "cnName":  "酸蚀之地 (VO)",
+        "cases":  [
+                      {
+                          "id":  "vo_s1_mf2p",
+                          "seedIndex":  1,
+                          "sizeKB":  709.7,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202661,
+                          "image":  "panoramas_mf/vo_s1_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "VO",
+                                          "seed":  202661,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  218,
+                                                                     "y":  285,
+                                                                     "normX":  0.4258,
+                                                                     "normY":  0.5566,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  51,
+                                                                     "grass16":  419,
+                                                                     "water16":  3,
+                                                                     "stone24":  27,
+                                                                     "iron48":  24,
+                                                                     "gold30":  12,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  0
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  256,
+                                                                     "y":  256,
+                                                                     "normX":  0.5,
+                                                                     "normY":  0.5,
+                                                                     "distToCc1":  47.8,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  37,
+                                                                     "grass16":  435,
+                                                                     "water16":  4,
+                                                                     "stone24":  11,
+                                                                     "iron48":  50,
+                                                                     "gold30":  14,
+                                                                     "oil48":  5,
+                                                                     "nearestZombieDist":  22.2
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  17129,
+                                          "giants":  3,
+                                          "mutants":  5,
+                                          "doomVillages":  95,
+                                          "oilSources":  18,
+                                          "pickables":  21,
+                                          "terrainTreeCells":  3286,
+                                          "terrainGoldCells":  298,
+                                          "terrainStoneCells":  476,
+                                          "terrainIronCells":  113,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "vo_s1_mf3p",
+                          "seedIndex":  1,
+                          "sizeKB":  711.4,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202661,
+                          "image":  "panoramas_mf/vo_s1_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "VO",
+                                          "seed":  202661,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  218,
+                                                                     "y":  227,
+                                                                     "normX":  0.4258,
+                                                                     "normY":  0.4434,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  37.2,
+                                                                     "trees16":  10,
+                                                                     "grass16":  568,
+                                                                     "water16":  28,
+                                                                     "stone24":  17,
+                                                                     "iron48":  51,
+                                                                     "gold30":  19,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  0
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  250,
+                                                                     "y":  208,
+                                                                     "normX":  0.4883,
+                                                                     "normY":  0.4062,
+                                                                     "distToCc1":  37.2,
+                                                                     "minOtherCcDist":  37.2,
+                                                                     "trees16":  152,
+                                                                     "grass16":  431,
+                                                                     "water16":  0,
+                                                                     "stone24":  22,
+                                                                     "iron48":  28,
+                                                                     "gold30":  33,
+                                                                     "oil48":  1,
+                                                                     "nearestZombieDist":  1
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  256,
+                                                                     "y":  256,
+                                                                     "normX":  0.5,
+                                                                     "normY":  0.5,
+                                                                     "distToCc1":  47.8,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  37,
+                                                                     "grass16":  435,
+                                                                     "water16":  4,
+                                                                     "stone24":  15,
+                                                                     "iron48":  43,
+                                                                     "gold30":  20,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  19.3
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  18577,
+                                          "giants":  2,
+                                          "mutants":  6,
+                                          "doomVillages":  113,
+                                          "oilSources":  20,
+                                          "pickables":  33,
+                                          "terrainTreeCells":  4639,
+                                          "terrainGoldCells":  447,
+                                          "terrainStoneCells":  554,
+                                          "terrainIronCells":  279,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "vo_s2_mf2p",
+                          "seedIndex":  2,
+                          "sizeKB":  703.7,
+                          "playerCount":  2,
+                          "mode":  "mf2p",
+                          "seed":  202662,
+                          "image":  "panoramas_mf/vo_s2_mf2p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  296,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  172,
+                                          "theme":  "VO",
+                                          "seed":  202662,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  2,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  205,
+                                                                     "y":  267,
+                                                                     "normX":  0.4004,
+                                                                     "normY":  0.5215,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  47.5,
+                                                                     "trees16":  28,
+                                                                     "grass16":  248,
+                                                                     "water16":  44,
+                                                                     "stone24":  14,
+                                                                     "iron48":  23,
+                                                                     "gold30":  19,
+                                                                     "oil48":  2,
+                                                                     "nearestZombieDist":  0
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  249,
+                                                                     "y":  249,
+                                                                     "normX":  0.4863,
+                                                                     "normY":  0.4863,
+                                                                     "distToCc1":  47.5,
+                                                                     "minOtherCcDist":  47.5,
+                                                                     "trees16":  136,
+                                                                     "grass16":  603,
+                                                                     "water16":  0,
+                                                                     "stone24":  18,
+                                                                     "iron48":  41,
+                                                                     "gold30":  13,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  19.4
+                                                                 }
+                                                             ],
+                                          "rangers":  8,
+                                          "soldiers":  2,
+                                          "zombiesTotal":  12242,
+                                          "giants":  3,
+                                          "mutants":  5,
+                                          "doomVillages":  88,
+                                          "oilSources":  15,
+                                          "pickables":  29,
+                                          "terrainTreeCells":  4027,
+                                          "terrainGoldCells":  394,
+                                          "terrainStoneCells":  416,
+                                          "terrainIronCells":  202,
+                                          "levelEventsCount":  6
+                                      }
+                      },
+                      {
+                          "id":  "vo_s2_mf3p",
+                          "seedIndex":  2,
+                          "sizeKB":  721.9,
+                          "playerCount":  3,
+                          "mode":  "mf3p",
+                          "seed":  202662,
+                          "image":  "panoramas_mf/vo_s2_mf3p.jpg",
+                          "metrics":  {
+                                          "survivalNCells":  336,
+                                          "gridNCells":  512,
+                                          "playableAreaWidth":  196,
+                                          "theme":  "VO",
+                                          "seed":  202662,
+                                          "ccExtraWorkers":  0,
+                                          "ccExtraFood":  0,
+                                          "commandCenterCount":  3,
+                                          "commandCenters":  [
+                                                                 {
+                                                                     "index":  1,
+                                                                     "x":  205,
+                                                                     "y":  267,
+                                                                     "normX":  0.4004,
+                                                                     "normY":  0.5215,
+                                                                     "distToCc1":  0,
+                                                                     "minOtherCcDist":  47.5,
+                                                                     "trees16":  28,
+                                                                     "grass16":  248,
+                                                                     "water16":  44,
+                                                                     "stone24":  14,
+                                                                     "iron48":  56,
+                                                                     "gold30":  12,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  1.4
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "x":  249,
+                                                                     "y":  249,
+                                                                     "normX":  0.4863,
+                                                                     "normY":  0.4863,
+                                                                     "distToCc1":  47.5,
+                                                                     "minOtherCcDist":  47.5,
+                                                                     "trees16":  136,
+                                                                     "grass16":  603,
+                                                                     "water16":  0,
+                                                                     "stone24":  18,
+                                                                     "iron48":  31,
+                                                                     "gold30":  9,
+                                                                     "oil48":  3,
+                                                                     "nearestZombieDist":  19.8
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "x":  287,
+                                                                     "y":  278,
+                                                                     "normX":  0.5605,
+                                                                     "normY":  0.543,
+                                                                     "distToCc1":  82.7,
+                                                                     "minOtherCcDist":  47.8,
+                                                                     "trees16":  83,
+                                                                     "grass16":  296,
+                                                                     "water16":  100,
+                                                                     "stone24":  37,
+                                                                     "iron48":  26,
+                                                                     "gold30":  24,
+                                                                     "oil48":  4,
+                                                                     "nearestZombieDist":  12.2
+                                                                 }
+                                                             ],
+                                          "rangers":  12,
+                                          "soldiers":  3,
+                                          "zombiesTotal":  15569,
+                                          "giants":  3,
+                                          "mutants":  6,
+                                          "doomVillages":  129,
+                                          "oilSources":  19,
+                                          "pickables":  35,
+                                          "terrainTreeCells":  5326,
+                                          "terrainGoldCells":  576,
+                                          "terrainStoneCells":  643,
+                                          "terrainIronCells":  262,
+                                          "levelEventsCount":  6
+                                      }
+                      }
+                  ],
+        "enName":  "The Caustic Lands",
+        "theme":  "VO"
+    }
+];
+
+let activeTheme = "ALL";
+let activePFilter = "all";
+let showMarkers = true;
+
+function fmt(n) { return Number(n || 0).toLocaleString("zh-CN"); }
+
+function ccPinCoords(cc, metrics) {
+  const nCells = metrics.gridNCells || 512;
+  const playableW = metrics.playableAreaWidth || 172;
+  // Exact inverse of DXWorldGrid.ScenePointFromWorldPoint over PlayableArea square
+  const sceneDx = (cc.x - cc.y) * 0.70710677;
+  const sceneDy = (cc.x + cc.y - nCells) * 0.5;
+  const px = 50 + (sceneDx / playableW) * 100;
+  const py = 50 + (sceneDy / playableW) * 100;
+  return {
+    x: Math.max(3, Math.min(97, px)),
+    y: Math.max(3, Math.min(97, py))
+  };
+}
+
+function renderOverlayHtml(c) {
+  const m = c.metrics;
+  const ccs = m.commandCenters || [];
+  return ccs.map(cc => {
+    const pos = ccPinCoords(cc, m);
+    const cls = cc.index === 1 ? "cc-p1" : (cc.index === 2 ? "cc-p2" : "cc-p3");
+    return `<div class="cc-marker ${cls}" data-label="CC${cc.index} (${cc.x},${cc.y})" style="left:${pos.x.toFixed(2)}%;top:${pos.y.toFixed(2)}%;"></div>`;
+  }).join("");
+}
+
+function renderKpis() {
+  let totalCases = 0, totalCcs = 0;
+  let zeroOrLowWood = 0, zeroGrass = 0, lowStone = 0, unsafeZombie = 0;
+  let sepMin = Infinity, sepMax = 0, sepSum = 0, sepCnt = 0;
+
+  DATA.forEach(th => {
+    th.cases.forEach(c => {
+      totalCases++;
+      const ccs = c.metrics.commandCenters || [];
+      ccs.forEach(cc => {
+        totalCcs++;
+        if (cc.trees16 <= 15) zeroOrLowWood++;
+        if (cc.grass16 <= 0) zeroGrass++;
+        if (cc.stone24 < 4) lowStone++;
+        if (cc.nearestZombieDist >= 0 && cc.nearestZombieDist < 18) unsafeZombie++;
+        if (cc.minOtherCcDist > 0) {
+          sepMin = Math.min(sepMin, cc.minOtherCcDist);
+          sepMax = Math.max(sepMax, cc.minOtherCcDist);
+          sepSum += cc.minOtherCcDist;
+          sepCnt++;
+        }
+      });
+    });
+  });
+
+  const avgSep = sepCnt > 0 ? (sepSum / sepCnt).toFixed(1) : "—";
+  document.getElementById("kpiGrid").innerHTML = `
+    <div class="kpi">
+      <div class="label">全景样本覆盖</div>
+      <div class="val">${DATA.length} 大生态 · ${totalCases} 张全图</div>
+      <div class="desc">每图 2 组种子 × (2P 296格 / 3P 336格)，含 ${totalCcs} 座独立基地采样</div>
+    </div>
+    <div class="kpi">
+      <div class="label">原型基地间距 (CC-CC)</div>
+      <div class="val">${sepMin === Infinity ? "—" : sepMin} ~ ${sepMax} 格</div>
+      <div class="desc">均值 ${avgSep} 格（当前仅绕中心 CC1 约 40~50 格固定圈选点）</div>
+    </div>
+    <div class="kpi">
+      <div class="label">资源天谴暴露次数</div>
+      <div class="val" style="color:var(--amber)">缺木 ${zeroOrLowWood} · 缺石 ${lowStone} · 无草 ${zeroGrass}</div>
+      <div class="desc">统计口径：近圈木≤15 / 近圈石&lt;4 / 近圈草地=0（共 ${totalCcs} 座基地）</div>
+    </div>
+    <div class="kpi">
+      <div class="label">开局近距僵尸风险 (&lt;18格)</div>
+      <div class="val" style="color:var(--red)">${unsafeZombie} / ${totalCcs} 座基地</div>
+      <div class="desc">验证 M4 必须用多中心最小距离场 d_min 统一重建无怪安全区</div>
+    </div>
+  `;
+}
+
+function renderTabs() {
+  const wrap = document.getElementById("themeTabs");
+  const btns = [
+    { key: "ALL", label: "全部 6 生态 (24张)" },
+    ...DATA.map(th => ({ key: th.theme, label: `${th.theme} ${THEME_META[th.theme].cnTitle.split(" · ")[0]}` }))
+  ];
+  wrap.innerHTML = btns.map(b =>
+    `<button class="pill ${activeTheme === b.key ? "active" : ""}" data-theme="${b.key}">${b.label}</button>`
+  ).join("");
+  wrap.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      activeTheme = btn.dataset.theme;
+      renderTabs();
+      renderMain();
+    });
+  });
+}
+
+function badgeWood(v) {
+  if (v === 0) return `<span class="badge b-bad">0木!</span>`;
+  if (v <= 15) return `<span class="badge b-warn">偏少</span>`;
+  return "";
+}
+function badgeStone(v) {
+  if (v === 0) return `<span class="badge b-bad">无石!</span>`;
+  if (v < 4) return `<span class="badge b-warn">&lt;4</span>`;
+  return "";
+}
+function badgeGrass(g, w) {
+  if (g === 0 && w === 0) return `<span class="badge b-bad">0草0水!</span>`;
+  if (g === 0) return `<span class="badge b-warn">0草(有水)</span>`;
+  return "";
+}
+function badgeZombie(z) {
+  if (z >= 0 && z < 10) return `<span class="badge b-bad">贴脸!</span>`;
+  if (z >= 10 && z < 18) return `<span class="badge b-warn">&lt;18格</span>`;
+  return `<span class="badge b-ok">安全</span>`;
+}
+
+function renderBaseTable(cases) {
+  const rows = [];
+  cases.forEach(c => {
+    const m = c.metrics;
+    const ccs = m.commandCenters || [];
+    ccs.forEach((cc, idx) => {
+      const colorVar = cc.index === 1 ? "var(--p1)" : (cc.index === 2 ? "var(--p2)" : "var(--p3)");
+      const caseLabel = idx === 0
+        ? `<strong>Seed #${c.seedIndex}</strong> (${c.seed}) · <span class="mode-pill ${c.mode === "mf3p" ? "mode-3p" : "mode-2p"}">${c.playerCount}P ${m.survivalNCells}格</span>`
+        : `<span style="color:var(--muted);font-size:12px;">↳ 同局基地 ${cc.index}</span>`;
+      rows.push(`
+        <tr>
+          <td>${caseLabel}</td>
+          <td><span class="dot" style="background:${colorVar}"></span><strong>CC${cc.index}</strong> (${cc.x}, ${cc.y})</td>
+          <td>${cc.minOtherCcDist} 格</td>
+          <td>${fmt(cc.trees16)}${badgeWood(cc.trees16)}</td>
+          <td>${fmt(cc.grass16)} / ${fmt(cc.water16)}${badgeGrass(cc.grass16, cc.water16)}</td>
+          <td>${fmt(cc.stone24)}${badgeStone(cc.stone24)}</td>
+          <td>${fmt(cc.iron48)}</td>
+          <td>${fmt(cc.gold30)}</td>
+          <td>${fmt(cc.oil48)}</td>
+          <td>${cc.nearestZombieDist} 格${badgeZombie(cc.nearestZombieDist)}</td>
+        </tr>
+      `);
+    });
+  });
+
+  return `
+    <table class="metrics">
+      <thead>
+        <tr>
+          <th>样本批次</th>
+          <th>基地 (坐标)</th>
+          <th>最近友军 CC</th>
+          <th>近木 r≤16</th>
+          <th>草地 / 水源 r≤16</th>
+          <th>石矿 r≤24</th>
+          <th>铁矿 r≤48</th>
+          <th>金矿 r≤30</th>
+          <th>油井 r≤48</th>
+          <th>最近僵尸距离</th>
+        </tr>
+      </thead>
+      <tbody>${rows.join("")}</tbody>
+    </table>
+  `;
+}
+
+function renderMain() {
+  const app = document.getElementById("app");
+  const themes = activeTheme === "ALL" ? DATA : DATA.filter(t => t.theme === activeTheme);
+
+  app.innerHTML = themes.map(th => {
+    const meta = THEME_META[th.theme] || { cnTitle: th.cnName, tag: th.theme, note: "" };
+    const filteredCases = activePFilter === "all"
+      ? th.cases
+      : th.cases.filter(c => c.mode === activePFilter);
+
+    const gridHtml = filteredCases.map(c => {
+      const m = c.metrics;
+      const is3p = c.mode === "mf3p";
+      const ccs = (m.commandCenters || []).map(cc => `CC${cc.index}(${cc.x},${cc.y})`).join(" · ");
+      const caption = `${meta.cnTitle} — Seed #${c.seedIndex} (${c.seed}) · ${c.playerCount}P (${m.survivalNCells}格)`;
+      return `
+        <div class="pano-box">
+          <div class="pano-bar">
+            <span>Seed #${c.seedIndex} (<code>${c.seed}</code>) · ${ccs}</span>
+            <span class="mode-pill ${is3p ? "mode-3p" : "mode-2p"}">${c.playerCount}P 多基地 · ${m.survivalNCells} 格</span>
+          </div>
+          <div class="pano-img-wrap" data-case="${c.id}" data-caption="${caption}">
+            <img src="${c.image}" loading="lazy" alt="${c.id}" />
+            <div class="cc-overlay ${showMarkers ? "" : "hidden"}">${renderOverlayHtml(c)}</div>
+            <span class="zoom-hint">点击放大 2048×2048</span>
+          </div>
+          <div class="pano-foot">
+            <span>可建区: <strong>${m.playableAreaWidth}×${m.playableAreaWidth}</strong></span>
+            <span>僵尸: <strong>${fmt(m.zombiesTotal)}</strong> (G=${m.giants}/M=${m.mutants})</span>
+            <span>村镇: <strong>${m.doomVillages}</strong></span>
+            <span>全图木/石/铁/油: <strong>${fmt(m.terrainTreeCells)}/${fmt(m.terrainStoneCells)}/${fmt(m.terrainIronCells)}/${m.oilSources}</strong></span>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    return `
+      <section class="scenario-card" id="sec_${th.theme}">
+        <div class="sc-head">
+          <div>
+            <h2 class="sc-title">${meta.cnTitle}</h2>
+            <div class="sc-meta">${meta.tag} · 2 组独立种子 × 2P/3P 多基地对照</div>
+          </div>
+        </div>
+        <div class="sc-note">${meta.note}</div>
+        <div class="pano-grid">${gridHtml}</div>
+        ${renderBaseTable(filteredCases)}
+      </section>
+    `;
+  }).join("");
+
+  const caseById = {};
+  DATA.forEach(th => th.cases.forEach(c => { caseById[c.id] = c; }));
+
+  document.querySelectorAll(".pano-img-wrap[data-case]").forEach(el => {
+    el.addEventListener("click", () => {
+      const c = caseById[el.dataset.case];
+      document.getElementById("lightboxImg").src = c.image;
+      const ov = document.getElementById("lbOverlay");
+      ov.innerHTML = renderOverlayHtml(c);
+      ov.classList.toggle("hidden", !showMarkers);
+      document.getElementById("lightboxCaption").textContent = el.dataset.caption + " (2048×2048)";
+      document.getElementById("lightbox").classList.add("open");
+    });
+  });
+}
+
+document.querySelectorAll("button[data-pfilter]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("button[data-pfilter]").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    activePFilter = btn.dataset.pfilter;
+    renderMain();
+  });
+});
+
+const toggleBtn = document.getElementById("toggleMarkersBtn");
+toggleBtn.addEventListener("click", () => {
+  showMarkers = !showMarkers;
+  toggleBtn.classList.toggle("toggle-on", showMarkers);
+  toggleBtn.textContent = showMarkers ? "◎ 显示基地标靶圈" : "○ 已隐藏基地标靶圈";
+  document.querySelectorAll(".cc-overlay").forEach(ov => ov.classList.toggle("hidden", !showMarkers));
+});
+
+const lb = document.getElementById("lightbox");
+document.getElementById("lightboxClose").addEventListener("click", () => lb.classList.remove("open"));
+lb.addEventListener("click", (e) => { if (e.target === lb) lb.classList.remove("open"); });
+window.addEventListener("keydown", (e) => { if (e.key === "Escape") lb.classList.remove("open"); });
+
+renderKpis();
+renderTabs();
+renderMain();
+</script>
+</body>
+</html>

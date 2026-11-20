@@ -217,6 +217,22 @@ namespace TABCoopMod.Testing
                     return CapturePanoramaTool(args);
                 case "map_metrics":
                     return GameBridge.CollectCurrentMapMetrics();
+                case "faction_state":
+                    return GetFactionState();
+                case "wonder_status":
+                    return GetWonderStatus();
+                case "transfer_resource":
+                    return DispatchTransferResource(args);
+                case "wonder_contribute":
+                    return DispatchWonderCrowdfund(args, withdraw: false);
+                case "wonder_withdraw":
+                    return DispatchWonderCrowdfund(args, withdraw: true);
+                case "toggle_mf_panel":
+                    return ToggleMfPanel(args);
+                case "test_grant_resources":
+                    return TestGrantResources(args);
+                case "find_build_spot":
+                    return FindBuildSpot(args);
                 default: throw new InvalidOperationException($"unknown tool '{tool}'");
             }
         }
@@ -293,6 +309,13 @@ namespace TABCoopMod.Testing
                 ["commandCenterExtraWorkers"] = ccExtraWorkers,
                 ["commandCenterExtraFood"] = ccExtraFood,
                 ["balancePreset"] = Sync.CoopSessionManager.BalancePreset.ToString(),
+                ["coopGameMode"] = Sync.CoopSessionManager.GameMode.ToString(),
+                ["defeatRule"] = Sync.CoopSessionManager.DefeatRule.ToString(),
+                ["spawnMode"] = Sync.FactionOwnershipTracker.ActiveSpawnMode.ToString(),
+                ["mutationTendency"] = Sync.FactionOwnershipTracker.ActiveMutationTendency.ToString(),
+                ["trackedOwners"] = Sync.FactionOwnershipTracker.TrackedEntityCount,
+                ["aliveCommandCenters"] = Sync.FactionOwnershipTracker.CountAliveCommandCenters(),
+                ["localPlayerExiled"] = Sync.FactionOwnershipTracker.IsExiled(Patches.CommandInterceptor.LocalPlayerId),
                 ["hudDiag"] = GameBridge.GetHudDiagSummary(),
                 ["gold"] = GameBridge.GetLevelInt("Gold"),
                 ["wood"] = GameBridge.GetLevelInt("Wood"),
@@ -349,6 +372,7 @@ namespace TABCoopMod.Testing
                         ["y"] = Math.Round(e.Position.Y, 2),
                         ["hp"] = GameBridge.GetLifeValue(e),
                         ["player"] = GameBridge.IsPlayerEntity(e),
+                        ["owner"] = Sync.FactionOwnershipTracker.GetOwner(e.ID),
                         ["movable"] = GameBridge.HasComponent(e, GameBridge.TypeCMovable)
                     });
                 }
@@ -501,9 +525,18 @@ namespace TABCoopMod.Testing
         private static object GetCamera()
         {
             var c = CameraProbe.Capture();
+            float wx = 0f, wy = 0f;
+            if (c.Valid)
+            {
+                var wpt = DXWorldGrid.WorldPointFromScenePoint(new PointF(c.X + c.W / 2f, c.Y + c.H / 2f));
+                wx = wpt.X;
+                wy = wpt.Y;
+            }
             return new Dictionary<string, object>
             {
                 ["valid"] = c.Valid,
+                ["worldX"] = wx,
+                ["worldY"] = wy,
                 ["x"] = c.X,
                 ["y"] = c.Y,
                 ["w"] = c.W,
@@ -677,6 +710,9 @@ namespace TABCoopMod.Testing
                 ["roomPhase"] = Sync.CoopSessionManager.RoomPhase.ToString(),
                 ["canStart"] = Sync.CoopSessionManager.CanHostStartGame,
                 ["balancePreset"] = Sync.CoopSessionManager.BalancePreset.ToString(),
+                ["coopGameMode"] = Sync.CoopSessionManager.GameMode.ToString(),
+                ["defeatRule"] = Sync.CoopSessionManager.DefeatRule.ToString(),
+                ["spawnMode"] = Sync.CoopSessionManager.SpawnMode.ToString(),
                 ["sessionSeed"] = Sync.CoopSessionManager.CurrentSessionSeed,
                 ["survivalGenBusy"] = GameBridge.SurvivalGenInProgress,
                 ["survivalGenOk"] = GameBridge.SurvivalGenLastOk,
@@ -700,6 +736,35 @@ namespace TABCoopMod.Testing
                     var modal = DXVision.GUI.DXModalScreen.CurrentModalObject;
                     if (modal != null) GameBridge.CloseZXWindow(modal);
                     return new Dictionary<string, object> { ["ok"] = modal != null };
+                case "test_select":
+                {
+                    ulong eid = GetULong(args, "entityId", 0);
+                    var ent = eid != 0UL ? DXGame.Current?.GetEntityByID(eid) : null;
+                    if (ent == null) return new Dictionary<string, object> { ["ok"] = false, ["selectedCount"] = 0 };
+                    GameBridge.SelectOnlyEntity(ent);
+                    var selIds = GameBridge.GetSelectedPlayerEntityIds();
+                    bool canSel = Sync.FactionOwnershipTracker.CanLocalPlayerSelect(ent);
+                    bool selected = GameBridge.IsEntitySelected(ent);
+                    return new Dictionary<string, object>
+                    {
+                        ["ok"] = true,
+                        ["canSelect"] = canSel,
+                        ["selectedCount"] = selIds.Length,
+                        ["isEntitySelected"] = selected
+                    };
+                }
+                case "test_kill_entity":
+                {
+                    ulong eid = GetULong(args, "entityId", 0);
+                    var ent = eid != 0UL ? DXGame.Current?.GetEntityByID(eid) : null;
+                    bool killed = ent != null && GameBridge.TryCorrectLife(ent, 0, forceKill: true);
+                    return new Dictionary<string, object> { ["ok"] = killed };
+                }
+                case "test_swarm_audit":
+                {
+                    bool triggerLive = GetBool(args, "triggerLive", false);
+                    return Patches.MultiWaveSwarmContext.RunSwarmAudit(triggerLive);
+                }
                 case "confirm_modal":
                 {
                     var topModal = DXVision.GUI.DXModalScreen.CurrentModalObject;
@@ -734,9 +799,14 @@ namespace TABCoopMod.Testing
                     if (!Sync.CoopSessionManager.CanHostStartGame)
                         return new Dictionary<string, object> { ["ok"] = false, ["error"] = "cannot start before clients are ready" };
                     string save = GetStr(args, "save") ?? "1_Backup";
+                    ModLogger.InfoImmediate($"[ControlServer] load_save('{save}') requested (inModal={DXVision.GUI.DXModalScreen.IsInModal}, lobbyOpen={CoopLobbyWindow.IsOpen}).");
                     CoopLobbyWindow.ForceHideWithoutStopping();
+                    DXVision.GUI.DXModalScreen.CloseAll();
                     Sync.CoopSessionManager.SetHostRoomPhase(Sync.LobbyRoomPhase.HostLoadingLevel, "房主正在加载存档...");
+                    GameBridge.PrepareForProgrammaticLoad();
                     GameBridge.LoadSaveFileAndEnter(save);
+                    Sync.CoopSessionManager.NotifyExternalLoadStarted();
+                    GameBridge.KickLoadingFade(700.0);
                     return new Dictionary<string, object> { ["ok"] = true, ["save"] = save };
                 case "probe":
                     var res = Networking.LocalTcpLoopbackTransport.ProbeLocalHost();
@@ -782,6 +852,7 @@ namespace TABCoopMod.Testing
 
             Sync.CoopBalancePreset preset = Sync.CoopBalancePreset.Vanilla;
             int playerCount = 1;
+            bool? multiFaction = args != null && args.ContainsKey("multiFaction") ? (bool?)GetBool(args, "multiFaction", false) : null;
             if (mode == "coop2p")
             {
                 preset = Sync.CoopBalancePreset.Balanced;
@@ -792,13 +863,36 @@ namespace TABCoopMod.Testing
                 preset = Sync.CoopBalancePreset.Balanced;
                 playerCount = 3;
             }
+            else if (mode == "mf2p")
+            {
+                preset = Sync.CoopBalancePreset.Balanced;
+                playerCount = 2;
+                multiFaction = true;
+            }
+            else if (mode == "mf3p")
+            {
+                preset = Sync.CoopBalancePreset.Balanced;
+                playerCount = 3;
+                multiFaction = true;
+            }
 
-            bool started = GameBridge.StartSurvivalAsync(seed, theme, factorPop, factorDuration, preset, playerCount);
+            Sync.MultiFactionSpawnMode? spawnMode = null;
+            string rawSpawn = GetStr(args, "spawnMode");
+            if (!string.IsNullOrEmpty(rawSpawn))
+            {
+                if (string.Equals(rawSpawn, "clustered", StringComparison.OrdinalIgnoreCase))
+                    spawnMode = Sync.MultiFactionSpawnMode.Clustered;
+                else if (string.Equals(rawSpawn, "separated", StringComparison.OrdinalIgnoreCase))
+                    spawnMode = Sync.MultiFactionSpawnMode.Separated;
+            }
+
+            bool started = GameBridge.StartSurvivalAsync(seed, theme, factorPop, factorDuration, preset, playerCount, multiFaction, spawnMode);
             return new Dictionary<string, object>
             {
                 ["ok"] = started,
                 ["started"] = started,
-                ["mode"] = mode
+                ["mode"] = mode,
+                ["spawnMode"] = spawnMode?.ToString() ?? Sync.CoopSessionManager.SpawnMode.ToString()
             };
         }
 
@@ -961,6 +1055,209 @@ namespace TABCoopMod.Testing
         // ====================================================================
         // JSON helpers
         // ====================================================================
+
+        private static object GetFactionState()
+        {
+            FactionContextManager.FlushActiveOwnerFromLevelState();
+            int maxP = Math.Max(1, Math.Min(3, (int)FactionOwnershipTracker.ActivePlayerCount));
+            var players = new List<Dictionary<string, object>>();
+            for (byte pid = 1; pid <= maxP; pid++)
+            {
+                var l = FactionContextManager.GetLedger(pid);
+                if (l == null) continue;
+                var e = l.Economy;
+                players.Add(new Dictionary<string, object>
+                {
+                    ["playerId"] = pid,
+                    ["exiled"] = FactionOwnershipTracker.IsExiled(pid),
+                    ["gold"] = e.Gold,
+                    ["wood"] = e.Wood,
+                    ["stone"] = e.Stone,
+                    ["iron"] = e.Iron,
+                    ["oil"] = e.Oil,
+                    ["foodSupply"] = e.FoodSupply,
+                    ["foodNeeded"] = e.FoodNeeded,
+                    ["workersSupply"] = e.WorkersSupply,
+                    ["workersNeeded"] = e.WorkersNeeded,
+                    ["energySupply"] = e.EnergySupply,
+                    ["energyNeeded"] = e.EnergyNeeded,
+                    ["ownEnergySupply"] = l.OwnEnergySupply,
+                    ["ownEnergyNeeded"] = l.OwnEnergyNeeded,
+                    ["nMarkets"] = e.NMarkets,
+                    ["showFullMap"] = l.ShowFullMap,
+                    ["onlyOneCmdCount"] = l.OnlyOneExecutedCommands.Count
+                });
+            }
+
+            return new Dictionary<string, object>
+            {
+                ["isMultiFaction"] = CoopSessionManager.IsMultiFactionActive,
+                ["initialized"] = FactionContextManager.IsInitialized,
+                ["localPlayerId"] = CommandInterceptor.LocalPlayerId,
+                ["hasAnyAliveMarket"] = FactionContextManager.HasAnyAliveMarket(),
+                ["zeroTransferFeeActive"] = FactionContextManager.ZeroTransferFeeActive,
+                ["sharedEnergyGridActive"] = FactionContextManager.SharedEnergyGridActive,
+                ["sharedEnergySupply"] = FactionContextManager.SharedEnergySupply,
+                ["sharedEnergyNeeded"] = FactionContextManager.SharedEnergyNeeded,
+                ["economyHash"] = $"0x{FactionContextManager.ComputeEconomyHash():X16}",
+                ["players"] = players
+            };
+        }
+
+        private static object GetWonderStatus()
+        {
+            var wonders = new List<Dictionary<string, object>>();
+            for (int i = 0; i < 3; i++)
+            {
+                var k = (FunctionalWonderType)i;
+                var st = WonderCrowdfundManager.GetState(k);
+                if (st == null) continue;
+                wonders.Add(new Dictionary<string, object>
+                {
+                    ["kind"] = k.ToString(),
+                    ["phase"] = st.Phase.ToString(),
+                    ["researchUnlocked"] = st.ResearchUnlocked,
+                    ["builderPlayerId"] = st.BuilderPlayerId,
+                    ["buildingEntityId"] = st.BuildingEntityId,
+                    ["researchTarget"] = BundleToDict(st.ResearchTarget),
+                    ["researchContributed"] = BundleToDict(st.ResearchContributed),
+                    ["buildTarget"] = BundleToDict(st.BuildTarget),
+                    ["buildContributed"] = BundleToDict(st.BuildContributed)
+                });
+            }
+            return new Dictionary<string, object>
+            {
+                ["initialized"] = WonderCrowdfundManager.IsInitialized,
+                ["playerCount"] = WonderCrowdfundManager.PlayerCount,
+                ["scaledSpireEnergy"] = WonderCrowdfundManager.GetScaledSpireEnergy(800),
+                ["wonderHash"] = $"0x{WonderCrowdfundManager.ComputeHash():X16}",
+                ["wonders"] = wonders
+            };
+        }
+
+        private static Dictionary<string, object> BundleToDict(WonderCrowdfundManager.CostBundle b)
+        {
+            return new Dictionary<string, object>
+            {
+                ["gold"] = b.Gold,
+                ["wood"] = b.Wood,
+                ["stone"] = b.Stone,
+                ["iron"] = b.Iron,
+                ["oil"] = b.Oil
+            };
+        }
+
+        private static ResourceTransferKind ParseResourceKind(string raw)
+        {
+            if (Enum.TryParse<ResourceTransferKind>(raw ?? "Gold", true, out var k))
+                return k;
+            return ResourceTransferKind.Gold;
+        }
+
+        private static FunctionalWonderType ParseWonderKind(string raw)
+        {
+            if (Enum.TryParse<FunctionalWonderType>(raw ?? "Telescope", true, out var w))
+                return w;
+            return FunctionalWonderType.Telescope;
+        }
+
+        private static object DispatchTransferResource(Dictionary<string, object> args)
+        {
+            byte toPlayer = (byte)GetInt(args, "toPlayer", 2);
+            var res = ParseResourceKind(GetStr(args, "resource"));
+            int amount = GetInt(args, "amount", 100);
+            CommandInterceptor.Dispatch(new NetCommand
+            {
+                Type = NetCommandType.TransferResource,
+                PlayerId = CommandInterceptor.LocalPlayerId,
+                MayorOptionIndex = toPlayer,
+                QueueSlotIndex = (byte)res,
+                CommandId = amount
+            });
+            return new Dictionary<string, object> { ["dispatched"] = true, ["toPlayer"] = toPlayer, ["resource"] = res.ToString(), ["amount"] = amount };
+        }
+
+        private static object DispatchWonderCrowdfund(Dictionary<string, object> args, bool withdraw)
+        {
+            var wonder = ParseWonderKind(GetStr(args, "wonder"));
+            var res = ParseResourceKind(GetStr(args, "resource"));
+            int amount = GetInt(args, "amount", 100);
+            CommandInterceptor.Dispatch(new NetCommand
+            {
+                Type = withdraw ? NetCommandType.WonderWithdraw : NetCommandType.WonderContribute,
+                PlayerId = CommandInterceptor.LocalPlayerId,
+                MayorOptionIndex = (byte)wonder,
+                QueueSlotIndex = (byte)res,
+                CommandId = amount
+            });
+            return new Dictionary<string, object> { ["dispatched"] = true, ["withdraw"] = withdraw, ["wonder"] = wonder.ToString(), ["resource"] = res.ToString(), ["amount"] = amount };
+        }
+
+        private static object ToggleMfPanel(Dictionary<string, object> args)
+        {
+            bool open = GetBool(args, "open", !MultiFactionPanel.IsOpen);
+            int? tab = args != null && args.ContainsKey("tab") ? (int?)GetInt(args, "tab", 0) : null;
+            FunctionalWonderType? wonder = args != null && args.ContainsKey("wonder") ? (FunctionalWonderType?)ParseWonderKind(GetStr(args, "wonder")) : null;
+            MultiFactionPanel.SetOpen(open, tab, wonder);
+            return new Dictionary<string, object> { ["isOpen"] = MultiFactionPanel.IsOpen, ["tab"] = MultiFactionPanel.ActiveTab, ["wonder"] = MultiFactionPanel.SelectedWonder.ToString() };
+        }
+
+        private static object TestGrantResources(Dictionary<string, object> args)
+        {
+            byte pid = (byte)GetInt(args, "playerId", CommandInterceptor.LocalPlayerId);
+            int g = GetInt(args, "gold", 0);
+            int w = GetInt(args, "wood", 0);
+            int s = GetInt(args, "stone", 0);
+            int i = GetInt(args, "iron", 0);
+            int o = GetInt(args, "oil", 0);
+            int extraStorage = GetInt(args, "extraStorage", 0);
+            int extraWorkers = GetInt(args, "extraWorkers", 0);
+            FactionContextManager.AdjustResourcesForTesting(pid, g, w, s, i, o, extraStorage, extraWorkers);
+            return GetFactionState();
+        }
+
+        private static object FindBuildSpot(Dictionary<string, object> args)
+        {
+            string typeName = GetStr(args, "buildingType") ?? "ZX.Entities.TentHouse";
+            float cx = GetFloat(args, "cx");
+            float cy = GetFloat(args, "cy");
+            int w = GetInt(args, "sizeW", 3);
+            int h = GetInt(args, "sizeH", 3);
+            int maxR = Math.Max(4, Math.Min(36, GetInt(args, "maxRadius", 28)));
+
+            Type bt = GameBridge.GameAssembly?.GetType(typeName);
+            if (bt == null) throw new ArgumentException($"unknown building type '{typeName}'");
+
+            var size = new SizeF(w, h);
+            for (int r = 4; r <= maxR; r++)
+            {
+                int step = r <= 20 ? 1 : 2;
+                for (int dx = -r; dx <= r; dx += step)
+                {
+                    for (int dy = -r; dy <= r; dy += step)
+                    {
+                        if (Math.Max(Math.Abs(dx), Math.Abs(dy)) != r) continue;
+                        int ix = (int)cx + dx;
+                        int iy = (int)cy + dy;
+                        if (!DXWorldGrid.ExistCell(ix, iy) || !DXWorldGrid.IsCellAvailable(ix, iy))
+                            continue;
+
+                        var pt = new PointF(ix, iy);
+                        if (GameBridge.CanPlaceBuildingAtTarget(bt, pt, size, pt))
+                        {
+                            return new Dictionary<string, object>
+                            {
+                                ["found"] = true,
+                                ["x"] = pt.X,
+                                ["y"] = pt.Y
+                            };
+                        }
+                    }
+                }
+            }
+
+            return new Dictionary<string, object> { ["found"] = false };
+        }
 
         private static string OkResponse(long id, object result)
         {

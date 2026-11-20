@@ -1,11 +1,11 @@
 # 14 — 多人多阵营（独立基地）模式设计规划与技术选型 (Phase 4)
 
 > **整理日期**: 2026-11-20  
-> **基准基线**: `v0.1.9`（执政官模式已跑通确定性 Lockstep、双栈直连 / Steam 中继、`coop_host_snapshot` 存档流与异步增量对齐）  
-> **当前状态**: **核心玩法规则已全部拍板定稿**（共用电网边界、市长方案 A + 新增 0 手续费市长、3+3 奇观划分、功能奇观双阶段 `+50%/人` 众筹、闪电尖塔全队能源并网、胜利者雕像允许叠加、大厅可切双胜负模式、跨阵营光环共享且维持个人限建上限、市场解锁 20% 手续费资源转账）；当前仅**多基地地图生成改造（第 3 章 / 第 7 章）暂搁置**，待后续专题讨论。  
+> **基准基线**: `v0.1.9`（执政官模式已跑通确定性 Lockstep、双栈直连 / Steam 中继、`coop_host_snapshot` 存档流与异步增量对齐；`dev/multi-faction` 分支已完成 Phase 4 M1~M3）  
+> **当前状态**: **Phase 4 M1~M4 核心玩法、正式多基地生成器与多路尸潮已全部实现并验收通过**（共用电网边界、市长方案 A + 新增 0 手续费市长、3+3 奇观划分、功能奇观双阶段 `+50%/人` 众筹、闪电尖塔全队能源并网、胜利者雕像允许叠加、大厅可切双胜负模式、跨阵营光环共享且维持个人限建上限、市场解锁 20% 手续费资源转账；M4 已实装 `360/416` 格扩图、大厅可选聚集/分离双出生模式、共用电网飞地借矿、恶魔村仅扩数量 `1.5×/2.0×` 与 `>=32` 格单栋边缘安全裁剪、生成期三环僵尸浓缩与种子随机精英倾向、`N` 股独立尸潮与受控合流/借道、后期攻城变异体折算控帧）。  
 > **定位**: 本文档面向 Phase 4「独立基地合作模式（Multi-Faction Co-op Mode）」开展立项规划沉淀。为避免业务规则与底层实现混杂，文档严格拆分为三部分：  
-> - **第一篇（第 1~3 章）**：面向**策划与游戏性决策** —— 玩法边界、已定稿规则总表与 3+3 奇观众筹细则、暂搁置的地图生成尺度预设参考；  
-> - **第二篇（第 4~7 章）**：面向**开发与架构技术选型** —— `TheyAreBillions.exe` 逆向实锤、复杂度评估、阵营隔离方案、市场转账 / 自定义市长与奇观众筹实现、延迟与即时性分层结论；  
+> - **第一篇（第 1~3 章）**：面向**策划与游戏性决策** —— 玩法边界、已定稿规则总表与 3+3 奇观众筹细则、M4 多基地地图生成/双出生模式/三环折算与多路尸潮设计；  
+> - **第二篇（第 4~7 章）**：面向**开发与架构技术选型** —— `TheyAreBillions.exe` 逆向实锤、复杂度评估、阵营隔离方案、市场转账 / 自定义市长与奇观众筹实现、延迟与即时性分层结论、M4 `ZXMapDrawer` / `ZXLevelEvent` / `CUnitGenerator` 底层预规划；  
 > - **第三篇（第 8 章）**：**M1~M4 分阶段研发路线与验收门禁**。
 
 ---
@@ -69,43 +69,77 @@ Phase 4 的 V1 版本明确限定为 **2~3 人多阵营合作抗尸潮（Co-op M
 
 ---
 
-## 第 3 章：多基地地图规模、间距预设与“天谴图”控频目标 `[暂搁置 · 待后续专题讨论]`
+## 第 3 章：多基地地图规模、双出生模式、僵尸折算与多路尸潮设计（M4 已定稿）
 
 > [!NOTE]
-> **当前状态说明**：根据讨论结论，**多基地地图生成与开局资源分布调整方案暂搁置**，待后续专题继续讨论细化（下方保留初步尺度与控频分析作为参考基线）。
+> **M1 原型缺陷复盘**：M1 原型（`reports/multifaction_panorama_report.html` 全 6 生态 24 图采样）暴露出三大结构性问题：① 沿用 `296/336` 格尺寸使 3P 人均土地仅单人原版 `0.57×`，外侧基地距边缘仅剩 `35` 格；② 1 号独占正中心、2/3 号流放中环 `~48` 格，导致 `60` 座采样基地中有 `36` 座 `<18` 格贴脸有怪，且副基地频现 `0 木` / `0 石` / `0 草` 或被湖/冰崖截断；③ 单股尸潮与未浓缩外围低级怪在多人大图下存在体验与帧率瓶颈。以下 M4 策划规则已全部拍板定稿。
 
-### 3.1 地图有效尺寸 `NCells` 与性能上限控制
-原版网格最大边长为 `512`，执政官模式（`v0.1.0+`）已实机验证非 2 的幂次尺寸会自动升格至 `512` 网格并通过 `FactorPlayableArea` 与边界刷怪框裁剪稳定运行。多阵营模式下每人需独立发展内环与中环，地图面积必须显著放大，同时要严防全图实体突破 4 万大关导致后期 30Hz 单核逻辑超时（`>33ms/tick`）：
+### 3.1 地图有效尺寸 `NCells` 理论推导与定档
+在引擎等距网格（`NCells > 256` 自动升格 `512` 底层网格并由 `FactorPlayableArea = NCells / 512` 裁剪正方形可玩区）中，从地图中心 `(256, 256)` 到左右可玩边界的欧氏距离满足：
 
-| 玩家数 | 建议有效边长 `NCells` | 相对原版（256）有效面积 | 游荡僵尸局部密度系数 | 全图游荡总量（面积×密度） | 尸潮配平策略 |
-| :---: | :---: | :---: | :---: | :---: | :--- |
-| **1P 原版** | `256` | `1.00×` | `1.00×` | `1.00×` | 原版基准 |
-| **2P 独立基地** | **`352 ~ 368`** | **`1.89× ~ 2.06×`** | **`0.85× ~ 0.90×`** | **`~1.65× ~ 1.80×`** | 略压游荡密度控制后期实体数；将难度增量更多转移至周期尸潮与最终尸潮分流。 |
-| **3P 独立基地** | **`400 ~ 432`** | **`2.44× ~ 2.85×`** | **`0.80× ~ 0.85×`** | **`~1.95× ~ 2.35×`** | 建议将 **`NCells <= 448`** 设为安全上限，确保每家均有独立纵深且帧预算可控。 |
+$$R_{\text{edge}} \approx 0.289 \times \text{NCells}$$
 
-### 3.2 多基地锚点拓扑与“黄金间距”
-- **2P 对称布局**：沿随机偏转角度（避免每次固定左右死板方位）分布在相对两极，**两座 CC 间距控制在 `75 ~ 95` 格**（各自距地图中心 `~38 ~ 48` 格，外侧距可玩边界保留 `>= 90` 格纵深）。
-- **3P 等边三角形布局**：以地图中心为圆心、半径 **`50 ~ 60` 格**的正三角形（带随机整体旋转角，**相邻两基地间距 `~86 ~ 104` 格**）。
-- **间距选择的玩法依据**：
-  - **过近（`< 55` 格）**：开局 10 天住宅区、农场与锯木厂即撞车抢地，退化为“两人挤一个基地”；
-  - **过远（`> 130` 格）**：基地贴近地图外缘，高阶怪与边缘尸潮刷怪条带直接贴脸，且前期互相跑图支援耗时过长，沦为各玩各的单机；
-  - **黄金区间（`75 ~ 100` 格）**：前 20 天每家拥有完整的 `35 ~ 45` 格独立安全圈扩展；中期（Day 20~40）刚好打通两家之间走廊实现防线连片或兵力合流；后期背靠背或并肩抵御外圈总攻。
-- **大厅间距预设（可选）**：可在开局界面提供 3 档间距风格：**紧邻联防（~55 格）** / **标准双城（~85 格，默认）** / **远距开荒（~115 格）**。
+扣去四周边缘固定约 **`14` 格**的尸潮刷怪条带与禁建缓冲后，单家独立基地需占用 **内环核心区（`0~18` 格）** + **中环农矿工业区（`18~36` 格）** + **外侧防线与恶魔村纵深（`50~55` 格）**。按“每家保留 `0.85×~1.00×` 单人可用地 + 分离外侧纵深足够刷出恶魔村与终局双层防线”反推并定档：
 
-### 3.3 开局资源分布与“天谴图”控频目标
-多人局最怕两种极端：**一是“必死废档”（开局零石矿/被山封死）**导致被迫频繁退房重随；**二是“把把塑料对称神图”**失去《亿万僵尸》开局随机地形博弈的刺激感。
+| 模式 / 档位 | `NCells` | 相对原版面积 | 人均分摊面积 | 中心至边界半径 | 推荐游荡密度系数 | 定位与纵深评估 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **1P 原版基准** | `256` | $1.00\times$ | $1.00\times$ | $74$ 格 *(可建 `60`)* | $1.00\times$ | 单核同心圆基准 |
+| **M1 原型（淘汰）** | `296` / `336` | `1.34×` / `1.72×` | `0.67×` / `0.57×` | `85` / `97` 格 | `1.04×` / `1.08×` | 3P 空间严重过挤，外侧仅剩 `35` 格纵深 |
+| ✅ **2P 独立基地** | **`360`** | **$1.98\times$** | **$0.99\times$** | **$104$ 格** | **`0.85×`** | 双家各自拥有近乎完整单人级发育圈与 `50~52` 格外防线纵深 |
+| ✅ **3P 独立基地** | **`416`** | **$2.64\times$** | **$0.88\times$** | **$120$ 格** | **`0.80×`** | 三足鼎立：内留 `~50` 格中心会师腹地，外留 `~55` 格防线纵深 |
 
-因此策划目标应当**明确区分“死档”与“轻度天谴图”**：
+### 3.2 大厅可选「双出生模式」与「共用电网飞地借矿」机制
+在开局等候大厅提供 **`出生模式（SpawnMode）`** 切换开关，所有模式均为每位玩家配齐**全额满编初始部队（每家 `4 游侠 + 1 士兵`，即 2P `8R+2S` / 3P `12R+3S`）**：
 
-| 开局评级 | 典型特征描述 | 目标占比 | 应对策略 |
-| :--- | :--- | :---: | :--- |
-| **彻底不可玩死档** | 任一玩家基地与其他基地/外部完全不连通；内圈彻底无木可砍；或扩展半径内完全无石矿导致卡死兵营科技。 | **`< 1%`** | **由生成器保底逻辑兜底消除**（连通性开凿 + 分区矿脉重试 + 极端匮乏微补）。 |
-| **正常舒适开局** | 内圈树林充足，可放得下 1~2 座采石场与前期猎屋/农场，中圈有铁矿、油井与金矿，与队友发展空间均衡。 | **`85% ~ 90%`** | **依靠“扇区自然择优 + 分区原生噪声重掷”自然达成**，不做人工方格矿堆。 |
-| **轻度天谴挑战图** | 某家草地极少（需靠猎屋/渔屋过渡），或石矿略偏远（需向外多拉 1~2 根电塔抢矿），或相邻路口僵尸压迫更强，但仍可解。 | **`5% ~ 10%`** | **刻意保留的趣味波动**：通过第 2 章的**盟友资源援助（转账）**与**早期游侠协防**把单人局的挫败感转化为联机互助爽点。 |
+| 维度 | 模式 A：聚集出生（Clustered · 抱团联城） | 模式 B：分离出生（Separated · 诸侯分城） |
+| :--- | :--- | :--- |
+| **基地落位与间距** | 围绕地图中心盆地面对面紧邻落位，CC 间距 **`18 ~ 24` 格**。 | **彻底取消中心 `CC1` 特权**：全员绕中心对称分布（2P 对角 **`80 ~ 95` 格**，3P 正三角形 **`85 ~ 105` 格**），地图正中心留作无恶魔村的会师过渡区。 |
+| **开局供电关系** | 因原版 CC 初始供电半径为 `14` 格，间距 `≤24` 格使 **Day 1 开局电网直接交叠并网**。 | 开局互不接通电网与视野边区，中期各自向地图中心清剿后接通电网会师。 |
+| **发展与战术体验** | **合兵快扩、空间紧凑**：Day 1 即可全军合兵速推抢地、合建中心共享商业区（银行/市场/胜利者雕像光环），但内圈建房与草地需分扇区协商规划。 | **空间宽裕、前期孤立**：每家拥有完整 `360°` 内中环自由铺开，前期无法跨图派兵救火，依赖**市场转账**与中期会师协同。 |
 
-**生态差异化保护原则**：
-- **常规生态（`BR` 暗黑荒原 / `AL` 绿野 / `TM` 森林）**：原生木草丰沛，仅靠扇区自然择优即可自然达到 `92%~95%` 舒适率，**不人工填土造绿**。
-- **高难贫瘠生态（`DS` 干旱高地 / `FA` 寒冰荒原 / `VO` 剧毒荒原）**：这些生态本来就是靠稀缺草地或木材压迫开局节奏，切忌强塞绿洲破坏原生态风味；改为按**综合食物潜力（可耕草地 + 猎屋林缘 + 渔屋水岸）**评估下限，并设置**“团队内部极差护栏”**（防止同局内出现 P1 富得流油、P2 寸草不生且无树可猎的离谱贫富分裂）。
+**依靠「共用电网 + 飞地借矿」消除人工假矿印章**：
+- **核心机制联动**：因为第 2 章已定稿“全队共用同一张供电疆域矩阵，且连通性校验认所有存活 `CommandCenter`”，即使在分离模式下两家尚未会师，只要队友家里电网覆盖了矿脉或林地草地，缺资源玩家即可**直接切屏在队友电网里拍下归属自己的采石场/锯木厂/农田（飞地借矿，产出直接进入本人独立账本）**。
+- **地形与资源底线策略**：**不做破坏原版柏林噪声风貌的人工方格补矿印章**；仅在生成选址阶段保障 **“全图多基地合计不出现 0 石矿死档”**，让 `~80%~85%` 开局各家自然舒适，刻意保留 `~15%~20%` 单家局部偏穷（需去队友电网借地采矿或靠市场输血）的联机博弈乐趣。
+
+### 3.3 僵尸城镇（Doom Village）仅扩数量、维持原版单镇尺寸与边缘安全隔离
+在 `2.0× ~ 2.64×` 大地图与 $2\sim3$ 套独立经济/满编初始部队下，若仅扩单镇半径而不加数量，分离模式下会出现“恶魔村全刷在一人半区、其余玩家方向空旷无赏金可吃”的失衡；而如果在高密度图（如 `VO` 酸蚀之地）同时叠加单镇半径膨胀，会导致百栋巨型城镇切入分离基地周边：
+- **数量扩充**：**2P 按原版随机数量 $\times \mathbf{1.5}$（向上取整且保底 $\ge 2$ 座）**；**3P 按原版随机数量 $\times \mathbf{2.0}$（且保底 $\ge 3$ 座）**，按玩家扇区均摊；分离模式下允许小概率（`35%`）在地图正中心会师腹地刷出 **1 座“中央恶魔村”**（满足距所有基地 $\ge 40$ 格）。
+- **单镇半径与安全边界**：**维持原版 `1.0×` 单镇规模（`DoomVillagesSize` 不再额外放大）**，在提升城镇分布均衡度的同时避免出现巨型连片城镇；分离模式下选址额外避让原生城镇，并在后处理阶段强制执行**单栋建筑级边缘裁剪（每栋 `CInfectionNest` 距任意基地 $\ge 32$ 格）**。
+
+### 3.4 外围游荡僵尸「生成期三环折算」、镇守巨人与「种子随机精英倾向」
+为防止 `360 / 416` 格大图外围刷出海量低级杂兵拖垮 30Hz 单核物理帧，同时保留开局游侠练级手感，**在地图生成阶段**按多中心最近距离场 $d_{\min}(x,y) = \min_{k \in \{1..N\}} \text{dist}((x,y), \text{CC}_k)$（分离模式下对每个玩家外侧扇区附加小幅随机边界偏置，保留 `5%~10%` 局部高压压迫感）执行**三环阶梯浓缩**：
+
+| 环带分区 | 距最近基地 $d_{\min}$ | 对应游戏阶段 | 浓缩规则与换算比例 | 实效与设计约束 |
+| :--- | :---: | :--- | :--- | :--- |
+| **0. 无怪安全圈** | `< 28` 格 | 开局落位安全带 | **100% 清空** | 彻底根除 M1 原型中的贴脸僵尸（`Z = 0~8`）。 |
+| **1. 内环（游侠发育圈）** | **`28 ~ 48` 格** | 前期 (`Day 1~18`) | **`0%` 折算（100% 原版慢速小怪）** | 保证游侠能稳定风筝清地、攒老兵经验。 |
+| **2. 中环（兵团推进圈）** | **`48 ~ 75` 格** | 中期 (`Day 18~45`) | **抽取 `50%` T1 低级怪 $\xrightarrow{4 : 1}$ T2 中级怪** | 换算为西装高管（`ZombieDressedA`）/ 奔跑者（`Runner`），该层实体数减少 `37.5%`。 |
+| **3. 外环（重武决战圈）** | **`≥ 75` 格至边界** | 后期 (`Day 45+`) | **抽取 `70%` T1（`9 : 1`）+ `40%` T2（`3 : 1`）$\to$ T3 高级精英**；且在 **`d_min >= 85` 格每抽 `30` 只 T3 精英凝聚 `1` 只镇守巨人（Giant）** | 留 `30%` 原生小怪衬底；2P 额外凝聚 `+2~3` 只巨人、3P 额外 `+3~5` 只按外扇区均分；**野区游荡变异体（Mutant）严禁批量折算**（仅固定 `+1 / +1~2` 只且强制推至 $d_{\min} \ge 90$ 格，防前期噪音链式灭门）。 |
+
+**基于地图种子的确定性「外围精英倾向（Seed-Driven Mutation Tendency）」**：
+在房主生成地图瞬间，由 `MapSeed` 确定性派生本局外环（$d_{\min} \ge 75$ 格）与后期进攻尸潮的精英池权重（随初始 `.zxsav` 快照一次性同步，**零对齐隐患**；不开局明文剧透，鼓励玩家游侠探路或建成观察者奇观侦察）：
+
+| 种子随机倾向 *(抽选权重)* | 外环 & 后期尸潮精英配比 *(胖子 : 喷毒 : 哈比)* | 额外 Boss 调整 | 针对性战术博弈引导 |
+| :--- | :---: | :--- | :--- |
+| **均衡标准型 (`35%`)** | **`45% : 35% : 20%`** | 标准数量外圈巨人 | 常规均衡配兵（石墙/震荡塔 + 狙击/泰坦）。 |
+| **重甲肉潮型 (`25%`)** | **`70% : 15% : 15%`** | 外圈巨人数量额外 **`+30%`** | 克制纯粹震荡塔/火焰兵 AOE，逼迫转高单点爆发（老兵狙击/死神/机枪塔）。 |
+| **腐蚀毒海型 (`20%`)** | **`20% : 65% : 15%`** | 标准巨人 | 克制扎堆步兵站桩，逼迫双层厚墙与远程泰坦/巨炮轰炸。 |
+| **疾风猎杀型 (`20%`)** | **`20% : 20% : 60%`** | 后期进攻尸潮变异体折算率 **`+50%`** | 克制单层矮墙与脱节脆皮，逼迫双层石墙 + 荆棘陷阱 + 贴脸防翻墙火力。 |
+
+### 3.5 $N$ 股独立尸潮分阶段缩放、受控合流/借道与后期防卡顿机制
+鉴于开局游侠推进范围有限且各家需承担重复科技基建税（Day 1~25 单家实际兵力普遍弱于单人同期），**每次周期尸潮与最终尸潮改为同时刷新 $N$ 股独立分流**（分别锁定各存活基地）：
+
+1. **三阶段单股规模缩放曲线**（以原版同波单股规模为 `100%` 基准）：
+   - **第一阶段·前期（第 1~2 波，约 `Day 1~28`）**：**2P 每股 `65%~70%`**（全图总计 `1.3×~1.4×`）/ **3P 每股 `55%~60%`**（总计 `1.65×~1.8×`）—— 单路减压护航前期偏穷发育，但全队多线同时接战无人可划水；
+   - **第二阶段·中期（第 3~5 波，约 `Day 29~55`）**：**2P 每股 `90%~95%`**（总计 `1.8×~1.9×`）/ **3P 每股 `80%~85%`**（总计 `2.4×~2.55×`）—— 破圈吃恶魔村与市场成型后逼近单人满额；
+   - **第三阶段·后期与终局（第 6+ 波 & Final Swarm，`Day 56+`）**：**2P 每股 `105%~110%`**（总计 `2.1×~2.2×`）/ **3P 每股 `95%~100%`**（总计 `2.85×~3.0×`）。
+2. **受控刷怪方向与「小概率合流 / 借道」高光联动**：
+   - **前 1~2 波**：**`100%` 强制不同方向分进**（分离模式严格从各自基地朝外侧边缘刷出、聚集模式从互不重叠方向刷出，0% 合流/借道）；
+   - **第 3 波起**：每波按 **`75% 多路分进` : `20% 双股同向合流或借道穿行` : `5% 三股合流（仅 3P）`** 确定性抽签。当两股同向或打 P2 的尸潮从 P1 外侧刷出借道硬穿时，安全侧队友可立即切屏利用**共用电网**直接在受袭队友防线上自费抢建弩车/震荡塔/双层墙或通过市场紧急转钱救场，把物理隔绝转化为极强的联机高光配合。
+3. **后期尸潮防卡顿三项控制策略**（将同屏冲锋刚体峰值压在 **`< 5,500`** 安全水线以内）：
+   - **只数封顶 + 精英提纯**：第 6 波起与最终尸潮为单股设置物理只数软上限（使全图同期总刷怪只数不超过原版 `1.35×~1.45×`），超额强度按种子随机倾向 `6:1 ~ 8:1` 浓缩为胖子/喷毒/哈比；
+   - **攻城变异体（Mutant）折算**：后期周期尸潮与最终尸潮将约 `180~200` 只杂兵的溢出预算直接折算为 **`1~3` 只冲锋变异体**（最终尸潮每路额外附带 `1` 只随军巨人），以极少刚体提供真实破墙威胁；
+   - **拉长吐怪持续时间**：当处于后期大波次或发生多股同向合流时，动态下调生成器的单步吐怪速率（拉长刷怪持续时间 `1.3× ~ 1.5×`），削减城墙下僵尸叠罗汉挤压峰值 `35%+`。
 
 ---
 
@@ -251,46 +285,95 @@ Phase 4 的 V1 版本明确限定为 **2~3 人多阵营合作抗尸潮（Co-op M
 
 ---
 
-## 第 7 章：多主基地地图生成器技术设计（`MultiBaseMapGenerator`）`[暂搁置 · 待后续专题讨论]`
+## 第 7 章：多基地地图生成与多路尸潮技术预规划（M4 逆向实锤与落地架构）
 
 > [!NOTE]
-> **当前状态说明**：地图生成逻辑调整方案暂搁置，待游戏性专题继续讨论后再最终定稿；M1 原型期可先用最小对称多 CC 测试落位或专用测试图验证归属与同步闭环。以下保留已逆向出的原版限制与初步管线调研作为后续参考。
+> **逆向基线说明**：本章方案基于对 `TheyAreBillions.exe`（v1.0.14.29）核心类型 `#=zyl_NPjjlA7DRfVtsRJCX1kN4BxSr`（`MapGenerator`）、`ZX.GameSystems.ZXMapDrawer`、`ZX.ZXMapLayerZombies`、`ZX.GameSystems.ZXLevelEvent` 与 `ZX.Components.CUnitGenerator` 的完整反编译实锤制定。**M4 采用“原版生成底盘 + `Postfix` 网格级后处理 + 事件流控 Hook”架构**，彻底免除对 999 行原生生成器做脆弱的 IL Transpiler 改造或全量从零重写地形噪声。
 
-### 7.1 为什么不能复用并魔改原版 `MapGenerator.#=zEzgd90E=`？
-实测反编译 [`MapGenerator`](../src/TABCoopMod/Patches/SurvivalBalancePatch.cs)（`#=zyl_NPjjlA7DRfVtsRJCX1kN4BxSr.#=zEzgd90E=`，共 999 行）确认了两大致命局限：
-1. **联合天谴概率指数放大**：原版只对唯一 `CC1` 校验树林（`Enlarge(11)` 内 `>=18` 格）、100 次重试石矿（`FromCenter(20)` 内 `>=4` 格）、100 次重试铁矿（`FromCenter(50)` 内 `>=10` 格），且不校验草地与油井。若单家出烂图概率为 `20%`，3 家同时不天谴的概率只剩 `(0.8)^3 = 51.2%`（近半数开局至少有一家天谴）；且因石矿重试仅看 `CC1`，副基地门口**完全无石矿的死档率将高达 30%~50%+**。
-2. **IL Transpiler 维护灾难**：原版 `999` 行生成器含大量局部闭包与噪声层局部变量，用 Harmony Transpiler 硬插多基地循环极其脆弱。
+### 7.1 为什么 M1 原型全景会出现 `Z = 0 ~ 8` 贴脸僵尸？（`ZXMapDrawer` 延迟实例化机制实锤）
+反编译 `MapGenerator.#=zEzgd90E=(ZXRandomLevelParams)` 与 `ZXMapDrawer.#=zl2XxwLg=(DXLevel)` / `#=z0Pkwp_k=(DXLevel)` 确认：
+1. **生成器返回时，树、矿与 1.5 万只游荡僵尸尚未成为 `DXEntity`**：
+   - `#=zEzgd90E=` 执行完毕返回 `DXLevel` 时，地形、障碍物与普通游荡僵尸全数保存在 **`512×512` 的枚举二维网格**中（即 `ZXMapDrawer.LayerTerrain`、`LayerObjects`、`LayerZombies`）；此时 `ExtraEntities` 内仅包含 `CC1`、初始 `4R+1S`、`CInfectionNest`（恶魔村建筑）、`OilSource`、宝箱废墟、`OldTowers`、`Ravens`、野区 `Giants`/`Mutants` 以及 `4` 个边缘 `CUnitGenerator`（`"N"` / `"S"` / `"E"` / `"W"`）。
+   - 真正的实体实例化要等到 `ZXSystemGameLevel.#=zmTU4kueQctVr`（`InitLevel`）调用 `ZXMapDrawer.#=zl2XxwLg=` $\to$ `#=z0Pkwp_k=` 时才会遍历 `LayerZombies[i, j]` 批量通过 `DXEntityPool.New` 生成单位。
+2. **M1 原型漏删的根因**：M1 [`PlaceMultiFactionStarterBases`](../src/TABCoopMod/Sync/CoopBalanceManager.cs) 在 `OnGeneratePostfix` 里仅清理了 `extraEntities` 里的僵尸（仅误打误撞删了野区 Boss），完全没有擦除 `LayerZombies[x, y]` 网格，导致进入关卡后副基地原地刷出大批贴脸僵尸。
+3. **M4 核心架构选型（`Postfix` 网格后处理）**：
+   - 在 `SurvivalBalancePatch.Prefix` 仍沿用原版 `MapGenerator.#=zEzgd90E=` 生成天然基底地貌、矿脉与连通图（预设 `NCells = 360 / 416`，**维持 `1.0×` 原版 `DoomVillagesSize`** 并仅按 `1.5× / 2.0×` 上调 `NumDoomVillages` 补足恶魔村），随后在 **`SurvivalBalancePatch.Postfix`**（`ZXMapDrawer.#=zl2XxwLg=` 实例化之前）由 **`MultiBaseMapGenerator.PostProcessGeneratedLevel(...)`** 直接改写 `LayerTerrain`、`LayerObjects`、`LayerZombies`、`ExtraEntities` 与 `LevelEvents`。
+   - **收益**：在 `< 5 ms` 内完成全部 26 万格重映射与多基地重排，零实体创建/销毁抖动，且由 Host 执行一次后经既有 `.zxsav` 快照同步至全体客机（**零网络同步负担**）。
 
-**架构选型**：在 `SurvivalBalancePatch` 的 `Prefix` 拦截多阵营新生存局，直接跳过原版 999 行方法，交由独立的 **`MultiBaseMapGenerator.Generate(ZXRandomLevelParams)`** 接管执行——完全复用游戏原生的 `DXNoyseLayer`、`ZXMapDrawer`、`ZXMapTheme`、`ZXLevelEvent` 与 `DXLevel` API，仅在 Host 生成一次后经现有快照传给客机（**零网络同步负担**）。
+### 7.2 `ZX.ZXMapLayerZombies` 25 项原生枚举直写与三环折算算法
+反编译 `ZX.ZXMapLayerZombies`（25 个成员，含 `None`）及 `ZXMapDrawer.#=z0Pkwp_k=`（第 1364~1449 行）已实锤每个网格枚举值对应的精确单位实例化行为：
 
-### 7.2 五步确定性生成与保底管线
+| `ZXMapLayerZombies` 枚举项 | 对应实例模板与每格刷怪数 | 所属浓缩阶梯 | M4 直写利用方式 |
+| :--- | :--- | :---: | :--- |
+| `Weak1` / `Weak2` / `Weak3` | `ZombieWeakA/B/C`（随机 `1~3` 只/格） | **T1 低级** | 内环（`28~48` 格）100% 保留 |
+| `Runners1..3`、`Medium1..3` | `ZombieMediumA/B`、`ZombieWorkerA/B`（`Medium` 含 `DressedA`）`1~3` 只/格 | **T2 中级** | 中环（`48~75` 格）由 T1 按 `4:1` 升格写回 |
+| `Strong1..3` | **单兵种直出 `ZombieDressedA`（西装高管）** `1~3` 只/格 | **T2 中级高阶** | 中环浓缩承接项 |
+| `Chubbies1..3` | **单兵种直出 `ZombieStrongA`（胖子 800HP）** `1~3` 只/格 | **T3 精英（胖子）** | **外环按种子倾向比例直写** |
+| `Venoms1..3` | **单兵种直出 `ZombieVenom`（喷毒者）** `1~3` 只/格 | **T3 精英（口水）** | **外环按种子倾向比例直写** |
+| `Harpies1..3` | **单兵种直出 `ZombieHarpy`（哈比）** `1~3` 只/格 | **T3 精英（哈比）** | **外环按种子倾向比例直写** |
+| `Powerful1..2` / `Ultra1` | `Chubby/Venom/Harpy` 混合 / `ZombieGiant` | T3 / Boss | 原版混合枚举，可用上面三组直出枚举精确控制比例 |
 
-1. **网格升格与可玩区裁剪**：沿用已在 [`CoopBalanceManager.cs`](../src/TABCoopMod/Sync/CoopBalanceManager.cs) 验证通过的机制，将非 2 的幂次边长（`352~368` / `400~432`）自动升格至 `512` 底层网格，经 `DXWorldGrid.GetSceneSquareArea(nCells, factor)` 与不可通行边框 `dXNoyseLayer` 裁剪有效游玩区与四周刷怪条带。
-2. **扇区自然择优（Top-K 加权抽选，不造塑料平地）**：
-   - 先运行原生水/山/草地/森林 Perlin 噪声生成基底地貌；
-   - 在各玩家对应的环形扇区带（距中心 `35~52` 格或按预设间距，距边缘 `>= 85` 格）采样 `20~30` 个可建候选点；
-   - 按 **周边树量 + 综合食物潜力（草地农场 + 可放猎屋林缘 + 可放渔屋水岸）+ 建房开阔度** 评分；
-   - **剔除死地后在合格池按权重 Top-K 随机抽选**——不死磕第 1 名，自然压低极差开局同时保留每局地形风貌与 `5%~10%` 偏苦变化。
-3. **多基地全连通校验 & 最小代价 A* 开凿**：
-   - 以全部 `CC_1..CC_N` 为起点执行一次连通分量 BFS；若某两座基地被山脉或湖泊隔断，使用带权 A* 寻找穿过山/水代价最小的路径，自动开凿宽 `4~6` 格的陆地走廊。
-4. **Voronoi 分区独立矿脉噪声重掷 + 极端兜底**：
-   - 按“距哪座 `CC_k` 最近”将地图划分为 $N$ 个 Voronoi 扇区；
-   - **石矿与铁矿**：每个扇区各自独立执行原版 `while (tries < 60)` Perlin 噪声重试，仅校验己方基地内圈（石矿 `r <= 24` 格 `>= 4` 格，保留少量偏远矿点变化；铁矿 `r <= 48` 格 `>= 8~10` 格），再按 Voronoi 掩码合成到 `LayerObjects`。每一簇矿脉 **100% 保持原版 Perlin 噪声自然形态**，单扇区成功率 `> 99%`；
-   - **油井 & 金矿审计**：按 Voronoi 归属校验每家扇区至少各有 `1~2` 个可达油井和金矿簇，缺口就在同扇区可通行空地补充搜索落点；
-   - **贫富极差护栏**：在开局附近（`r <= 7`）清理障碍保证首圈建房；仅当某玩家内圈木/食低于全队均值 `40%` 或无任何可用食物源时，才在合理外环小簇微补少量树林或草地（对 `DS`/`FA`/`VO` 严格尊重生态，不毁特征）。
-5. **多中心最小距离场统一驱动威胁梯度**：
-   定义地图任意格 `(x, y)` 到所有基地的最近距离场：
+**`MultiBaseMapGenerator.RewriteZombieRings` 单遍网格重映射管线**：
+1. **确定性倾向派生**：使用 `SplitMix64((ulong)seed ^ 0x4D3454454E44)` 抽取本局 `MutationTendency`（`Balanced 35%` / `HeavyArmor 25%` / `Caustic 20%` / `SwarmHunter 20%`），确定 `(wChubby, wVenom, wHarpy)` 权重；并在分离模式下为每家外侧扇区生成小幅边界距离微扰 `bias(angle) ∈ [-10, +4]` 格。
+2. **单遍扫描 `LayerZombies[0..nCells, 0..nCells]`**：
+   - 计算 $d_{\min}(x, y) = \min_{k} \text{dist}((x, y), \text{CC}_k) + \text{bias}$；
+   - 若 $d_{\min} < 28$：**直接置 `ZXMapLayerZombies.None`**，彻底消除贴脸僵尸；
+   - 若 $28 \le d_{\min} < 48$（内环）：保持原枚举（若原版在分离模式外侧误写为 `Medium`/`Strong`/`Powerful`，降格还原为 `Weak1..3`，确保游侠圈手感）；
+   - 若 $48 \le d_{\min} < 75$（中环）：遇到 `Weak{k}` 时确定性以 `50%` 概率执行 `4:1` 累积配额折算（配额满 `4` 即写回 `Runners1` / `Medium1` / `Strong1`，否则清为 `None`）；
+   - 若 $d_{\min} \ge 75$（外环）：对 `Weak{k}` 按 `70%` 抽取 `9:1` 记入 T3 精英配额、对 `Runners/Medium/Strong` 按 `40%` 抽取 `3:1` 记入 T3 精英配额；每累计满 `1` 单位 T3 精英配额：
+     - 若 $d_{\min} \ge 85$，每第 `30` 份精英配额记入 `pendingCondensedGiants++`（不写入网格，上限 2P `+3` / 3P `+5`，重甲倾向额外 `+30%`）；
+     - 其余配额按 `(wChubby, wVenom, wHarpy)` 权重写入 `Chubbies1` / `Venoms1` / `Harpies1`。
+3. **Boss 实体实例化与防贴脸重定位**：
+   - 将 `pendingCondensedGiants` 对应的 `ZombieGiant`（`#=zYLpZK4K9zSHp.#=zwwyTj9$ODjUy.#=zq6F4jtPoQUZV263PTQ==()`）均匀落位于各玩家外侧扇区且满足 $d_{\min} \ge 85$ 的 `LayerZombies`/可通行格，置 `CellsAwayCommandCenterWhenRoaming = 54` 并附加 `CMiniMapInfo.Auto`；
+   - 遍历原生 `ExtraEntities` 中已有的 `ZombieGiant` 与 `ZombieMutant`（`#=zETCVfaScp7p0jCA9Ag==()`）：凡落在分离模式新基地安全半径内（巨人 $d_{\min} < 75$、变异体 $d_{\min} < 90$）者，重迁至对应外侧角区可通行点（不在野区批量新增变异体）。
 
-   $$d_{\min}(x, y) = \min_{k \in \{1..N\}} \text{dist}\bigl((x, y),\ \text{CC}_k\bigr)$$
+### 7.3 双出生模式（`MultiFactionSpawnMode`）基地重定位、主连通选址与恶魔村补齐
+1. **大厅协议同步**：
+   - 在 `CoopSessionManager` 新增枚举 `public enum MultiFactionSpawnMode : byte { Clustered = 0, Separated = 1 }`，在 `CoopLobbyWindow`（仅当选择独立基地模式且开新生存局时）暴露切换按钮并通过 `PacketType.LobbyRosterSync`（`BroadcastLobbyRoster()`）同步客机。
+2. **四步后处理管线**：
+   - **Step A · 主连通陆地掩码提取**：在 `LayerTerrain` / `LayerObjects` 上从地图中心可建点执行一次 `bool[512, 512] mainWalkable` BFS，并复用原版 `dXNoyseLayer` 可玩矩形内边距裁剪（`margin >= 16` 格）。
+   - **Step B · 双模式 `CC_1..CC_N` 落位与 `CC1` 迁出**：
+     - **`Clustered`（聚集模式）**：保留中心盆地核心，`CC_1..CC_N` 落在半径 $R_{\text{ring}} = 10 \sim 13$ 格的紧凑环上（CC 互距 **`18 ~ 24` 格**），清理各自 `7×7` 垫基并校验两两间 `Earth/Grass` 连通；
+     - **`Separated`（分离模式）**：**将原版生成的 `CC_1` 连同其初始 `4R+1S` 一并迁离正中心 `(256, 256)`**；在半径 $R_{\text{ring}} = 44 \sim 54$ 格（含由 `MapSeed` 决定的随机起始旋转角 $\theta_0$）的 $N$ 等分扇区（2P `180°`、3P `120°`）内，各采样 `24` 个 `mainWalkable` 候选点，按`周围可建面积 + 树木 + 矿/草`综合评分从 Top-4 加权抽选（使 80%~85% 舒适、15%~20% 偏苦但全队合计保底至少 1 家 `stone24 >= 4`）；为 `CC_2..CC_N` 创建指挥中心与各自 `4R+1S` 并调用 `FactionOwnershipTracker.RegisterPendingCcOwners(placedCcs)`。
+   - **Step C · 轻量级 A* 会师走廊打通**：
+     - 对相邻两座基地检查在 `mainWalkable` 上的连通状态与绕行比（若不可达或绕行长度 `> 2.5 ×` 直线距离），仅在必需时使用带权 A* 穿过山体/水体最小代价格，将路径宽 `4~5` 格强制刷为 `ZXMapLayerTerrainType.Earth` 且清除 `Mountain/Tree`，确保共用电网与中期会师通路畅通。
+   - **Step D · 恶魔村仅扩数量补齐与单栋边缘安全裁剪**：
+     - **安全区重迁与边缘裁剪**：分离模式选址阶段即对贴近原生 `CInfectionNest`（`< 38` 格）的候选点高额罚分并预留 `pad = 6` 格；聚类时限制跨栋链接距离（相邻 `<= 12` 且距种子 `<= 28` 格，避免巨型城镇连片黏连）；凡某恶魔村质心落入 `d_min < 28 + radius` 或任意单栋建筑距基地 `< 34` 格（或被聚集基地压占）者，整簇平移至合法环带；迁出与补齐结束后再执行一遍**逐栋扫描裁剪，确保地图上任意 `CInfectionNest` 建筑距所有基地均为 `>= 32` 格**；
+     - **数量补齐**：`CoopBalanceManager.OnGeneratePrefix` **保持 `DoomVillagesSize` 为 `1.0×` 原版尺寸**，仅将 `NumDoomVillages` 按 `1.5×`（2P 保底 `2` 座）/ `2.0×`（3P 保底 `3` 座）临时上调并在 `Finalizer` 还原；若因原版随机范围或重迁空间不足导致少于目标数，则在各玩家外侧扇区可通行空地补充生成 `CInfectionNest` 建筑簇，并在生成瞬间抹平其占地脚底障碍。
 
-   原版生成器所有基于单基地距离的逻辑全部替换为 `d_min`：
-   - **安全无怪圈**：对所有 `CC_k` 均抠除 `MinDistanceForWeakInfected` 安全区；
-   - **僵尸强弱同心环**：游荡僵尸等级（Weak / Medium / Strong / Powerful）按 `d_min` 计算——每座基地外围呈现自然由弱到强的同心环，**两座基地之间的走廊天然处于弱~中怪区**便于中期打通会师（可顺势在中点放置宝箱/废墟防御塔），**地图四角外缘自动聚集高阶怪与 Boss**；
-   - **巨人 & 变异体禁区**：`d_min >= 70`，防止一家的外围 Boss 贴脸刷在另一家门口；
-   - **感染者村庄（Doom Village）**：要求 `d_min >= 16 + radius * 1.4`、避开基地间直连中轴走廊并按扇区大致均摊，保留单镇扩径（`DoomVillagesSize` 缩放）与跨界上限修正机制。
+### 7.4 $N$ 股独立尸潮、受控合流/借道与攻城变异体折算 Hook 架构
+反编译 `ZXLevelEvent` 与 `CUnitGenerator` 实锤了发动机原生的“多生成器批量出怪”结构，**无需重写整套事件引擎，只需 3 个轻量级 Hook 即可完美支持 $N$ 股独立尸潮**：
 
-### 7.3 离线量化校验方案
-在正式启动多基地地图生成器实现后，可复用 [`scripts/generate_panorama_comparisons.ps1`](../scripts/generate_panorama_comparisons.ps1) 的无界面批量导出能力，构建 **200 随机种子 × 6 种生态（`BR`/`AL`/`TM`/`DS`/`FA`/`VO`）** 离线审计脚本，量化输出各基地 `r=16 / 25 / 45` 圈内木材、食物潜力、石/铁/金/油井数量分布，验证死档率 `< 1%`、舒适开局率 `>= 85%~90%` 与轻度天谴率 `5%~10%` 的既定目标。
+- **原版底层机制实锤**：
+  1. `MapGenerator.#=zuJRpnkt4f2Fr(DXLevel)` 在 `PlayableArea` 四周创建 4 个 `CUnitGenerator` 实体（`Configuration.Name` 为 `"N"`、`"S"`、`"E"`、`"W"`）；
+  2. `ZXLevelEvent.#=zUMCW0sQ=()` 返回 `List<CUnitGenerator>`（即 `CurrentUnitGenerators`）；
+  3. `ZXLevelEvent.#=zrITPs$A=()` 在事件触发时，**直接循环遍历 `foreach (CUnitGenerator gen in CurrentUnitGenerators)`**，为列表中的每一个 `gen` 独立生成唯一 `ulong num2 = DXGuid.New()`、创建一个独立的 `ZXMiniMapIndicatorInfectedSwarn`（小地图骷髅头与波次指示），并向该 `gen` 投递 `CUnitGenerator.GenerationRequest`（携带 `IDEvent = num2` 与 `GenerationSpeed`）；
+  4. 当允许列表内存在重复的 `CUnitGenerator` 引用（例如 2 股同向合并时列表 `[N, N]`）时，**循环天然会投递两笔具有不同 `IDEvent` 的出怪请求并同时在 `CUnitGenerator` 执行**！
+
+据此设计新增补丁类 **`MultiWaveSwarmPatches.cs`** 的 3 项精准 Hook：
+1. **分流/合流方向调度 Hook（`Prefix/Postfix` on `ZXLevelEvent.#=zUMCW0sQ=()`）**：
+   - 仅在 `CoopSessionManager.IsMultiFactionActive && ev.AttackCommandCenter && !ev.FinalSwarm && ev.MaxRepetitions <= 5`（即有倒计时的周期尸潮；零散无倒计时骚扰波同理按单股轮询各家）生效：
+   - 对存活基地 `pid ∈ AlivePlayers` 按确定性种子 `SplitMix64(mapSeed ^ ev.ID ^ ev.NTimesTriggered)` 分配出怪方位：
+     - **Wave 1~2**（`ev.NTimesTriggered < 2` 且处于早期）：`100%` 为每个存活 `CC_k` 匹配其所在象限朝外的 `N/S/E/W` 生成器（聚集模式强制选取互不相同的方向）；
+     - **Wave 3+**：按 **`75%` 各取外侧不同生成器 / `20%` 随机抽取 1 股改用队友的外侧生成器（产生双股合流或借道穿行） / `5%`（仅 3P）全员统一至同一生成器** 构造 `List<CUnitGenerator>`（按序对应 `pid_1..pid_k`），并将对应目标列表记录至 `PendingSubSwarmTargets`（同步保证 `ZXLevelEvent.#=z9kNBieQ=()` / `#=zBAspRIo=()` 倒计时通知时能正确拼接多方向或合流告警提示）。
+2. **每股独立缩容与后期变异体折算 Hook（`Postfix` on `ZXLevelEvent.#=zHI6D76EGh68R()` & `CoopBalanceManager.ScaleLevelEvents`）**：
+   - 先由 `ScaleLevelEvents` 在 `OnGeneratePostfix` 依据阶段时间（第 1~2 波 vs 中期 vs 第 6+ 波/最终波）将**基础模板单股规模**缩放到目标百分比（前期 `68%/58%`、中期 `92%/82%`、后期 `108%/98%`）；
+   - 在 `ZXLevelEvent.#=zHI6D76EGh68R()` 返回 `Dictionary<DXEntityTemplate, int>`（当次单股各兵种最终数量，已自动乘上 `(1 + factor)` 重复倍率，**若用于 `FinalSwarm` 4 个边缘生成器则先均摊除以 4 再按股压缩**）后：
+     - 统计单股总只数 `totalUnits`；若处于后期（`ColonyHours >= 55 * 24` 或 `FinalSwarm`）且 `totalUnits` 超出物理软上限（周期波单股 `> 850`、最终波单股 `> 1,400`），将超额普通怪（优先扣除 `ZombieWeak*`/`ZombieMediumA/B`/`ZombieWorkerA/B`）：
+       - **`75%`** 按 `7 : 1` 换算并按本局 `MutationTendency` 权重写入 `ZombieStrongA`、`ZombieVenom`、`ZombieHarpy`；
+       - **`25%`** 按 `180 : 1` 折算注入 **`1 ~ 3` 只 `ZombieMutant`**（哈比猎杀倾向 `+50%`；`FinalSwarm` 额外每路固定附带 `1` 只 `ZombieGiant`）。
+3. **每股靶心绑定与合流/后期刷怪降速削峰（`Postfix` on `ZXLevelEvent.#=zrITPs$A=()` + `Prefix/Postfix` on `CUnitGenerator.#=zzHXxhbjNa0Zf()`）**：
+   - 在 `#=zrITPs$A=()` 为每个子波生成 `IDEvent = num2` 时，将 `num2 -> TargetPlayerId` 写入确定性映射表 `SubSwarmTargetByEventId`（随 `.zxsav` 或确定性事件序列持久化）；若某生成器在同一波被合流分配了 `M >= 2` 股或处于后期压缩大波，直接下调 `GenerationRequest.GenerationSpeed`（默认 `6` $\to$ `3~4`，多股共享时按 `Math.Max(2, 6 / M)` 分流限速）以拉长出怪持续时长 `1.3× ~ 1.5×`；
+   - 在 `CUnitGenerator.#=zzHXxhbjNa0Zf()` 为 `generationRequest2` 调用 `CreateInstance()` 生成每只 `Zombie` 并置 `AttackCommandCenter = true` 时，将其锁定靶心绑定为 `SubSwarmTargetByEventId[generationRequest2.IDEvent]`（由 `FactionOwnershipTracker.PickTargetCommandCenterForZombie` 优先读取该固定靶心 CC，若该 CC 已在流亡模式下被摧毁则自动就近切换至存活 CC）。
+
+### 7.5 离线全生态量化审计与压力验收方案
+M4 编码完成后，依托 [`scripts/generate_panorama_comparisons.ps1`](../scripts/generate_panorama_comparisons.ps1) 的无界面批量导出管线构建自动化审计脚本 **`scripts/audit_multibase_maps.ps1`**：
+- **样本规模**：**200 随机种子 × 6 生态（`BR`/`AL`/`TM`/`DS`/`FA`/`VO`）× 2 出生模式（`Clustered`/`Separated`）**；
+- **量化验收指标**：
+  1. `nearestZombieDist >= 28` 格达标率 **`100%`**（零贴脸开局）；
+  2. 全队合计 `sum(stone24) >= 4` 达标率 **`>= 99.5%`**；单家舒适率 `~80%~85%`、单家偏穷借地率 `~15%~20%`；
+  3. 3P `416` 格全图初始僵尸总数稳定在 **`13,000 ~ 19,000`** 只（且呈现明显的“内圈 T1 / 中圈 T2 / 外圈种子倾向精英 + 镇守巨人”分层）；
+  4. 实机运行周期尸潮（含前期分进、第 3+ 波 20% 合流/借道与第 6 波后期变异体压缩）与 `FinalSwarm`，双端 `StateChecksum` 全程 `MATCH`、逻辑单核帧耗时 `< 33 ms`。
 
 ---
 
@@ -302,16 +385,16 @@ Phase 4 的 V1 版本明确限定为 **2~3 人多阵营合作抗尸潮（Co-op M
 
 | 里程碑 | 预计周期 | 核心交付物 | 主要代码落点（规划） | 验收门禁标准 |
 | :--- | :---: | :--- | :--- | :--- |
-| **M1**<br>**多基地 + 归属原型** | ~1 周 | ① 最小化多 CC 开局放置/测试自定义地图落位与开局各端相机定位至己方 CC（完整地图生成器暂搁置）；<br>② **共用电力网**多 CC 起点 BFS 修补；<br>③ `EntityOwnerMap` 全周期传播 + 操控隔离（先保留共享经济，专注跑通多基地、多路尸潮分流、**双胜负模式**不崩溃）；<br>④ 随快照同步 `EntityOwnerMap` 与规则标志。 | • `Sync/FactionOwnershipTracker.cs`<br>• `Patches/SurvivalBalancePatch.cs`<br>• `Patches/EnergyGridMultiBasePatch.cs`<br>• `Patches/CommandInterceptorPatch.cs`<br>• `Patches/LevelEndSyncPatch.cs`<br>• `Determinism/StateHasher.cs` | • `GameBridge 0 missing`、`Harmony failed-tolerant=0`；<br>• 2P 双开测试：两家各自操控己方单位/建造互不串控、共享铺电边界、多路尸潮分流攻击两座 CC、流亡交接与一损俱损均正常触发、`Auto-resync` 后归属不丢失、`0 ERROR`。 |
-| **M2**<br>**独立经济账本、科技与 3+3 奇观分流** | ~1.5~2 周 | ① `FactionState[1..N]` 与 `ZXLevelState` 上下文切换（`Push/Pop`）框架；<br>② 覆盖回放、队列推进、拆毁退费、宝箱拾取、8h 结算、超仓卖货、破产裁兵与 `CommandCenterExtra*` 按 CC 隔离；<br>③ 保留跨阵营光环共享与 `TheVictorious` 原生叠加，隔离 `MaxInstances > 0` 建筑及 3 座产出类奇观按个人计数，实现 `TheSpire` 按人数加成（`+1200/+1600`）及**存活并网 / 被毁退回**能源池机制；<br>④ 市长方案 A（全局词条共享 + 个人奖励槽）与 `StateHasher` 纳入全 `FactionState[1..N]` 哈希。 | • `Sync/FactionState.cs`<br>• `Sync/FactionContextManager.cs`<br>• `Patches/FactionEconomyPatches.cs`<br>• `Commands/NetCommand.cs`<br>• `Determinism/StateHasher.cs` | • 双开并发压测：同帧建造/取消队列/拾取宝箱/跨 8h 结算/单方破产裁兵，双方账本彻底隔离；验证限数建筑双方互不挤占个人上限、光环与多座 `TheVictorious` 叠加生效、以及 `TheSpire` 建成并网/被毁退回独立供电无缝切换；<br>• `ChaosTransport` 30s 回归全程 `StateChecksum MATCH`。 |
-| **M3**<br>**延迟优化、双阶段众筹与市场贸易 UX** | ~1.5 周 | ① 升级 **对称 P2P Turn 调度（0.5 RTT）**，叠加单写者 0ms 本地队列/幽灵预演；<br>② 实装 **任意一人建市场解锁全队转账**（整数 `20%` 手续费）、注入自定义 **“0 手续费市长”** 与 `ZeroTransferFeeActive` 同步；<br>③ 实装 **`WonderCrowdfundManager` 与轻量化众筹面板**（3 座功能奇观**研发 & 建造双阶段**均按 `1.5×/2.0×` 缩放并开放免手续费捐资/撤回/凭证落位）；<br>④ 单位脚底阵营色环渲染、小地图按阵营着色、大厅模式切换（执政官 / 独立基地 + 双胜负开关）。 | • `Sync/WonderCrowdfundManager.cs`<br>• `UI/WonderCrowdfundPanel.cs`<br>• `Sync/CoopSessionManager.cs`<br>• `Patches/MayorSyncPatch.cs`<br>• `UI/AllyOverlayRenderer.cs`<br>• `UI/CoopLobbyWindow.cs`<br>• `Commands/NetCommand.cs` | • `latency=80~120ms` 模拟下客机命令延时降至接近 `0.5 RTT + 1t`；<br>• 双开验证市场解锁转账（`100 -> 80` / 0 手续费市长 `100 -> 100`）；<br>• 2P/3P 验证在单人仅 2~3 座仓库不突破个人仓储上限下，通过双阶段众筹完成功能奇观研发与建造，`StateChecksum MATCH`。 |
-| **M4**<br>**正式多基地地图生成器 & 全生态回归** | 待定 | ① 恢复讨论并定稿 `MultiBaseMapGenerator`（多基地选址、天谴率控制、资源配平与预设距离）；<br>② 200 种子 × 6 生态全景与开局资源统计扫描，验证死档率、舒适率与轻度天谴率目标。 | • `Sync/MultiBaseMapGenerator.cs`<br>• `Patches/SurvivalBalancePatch.cs`<br>• `scripts/audit_multibase_maps.ps1` | • 200×6 批量测试达到既定开局资源与“天谴图”控频目标；<br>• 3P 联机完整长局闭环通过。 |
+| **M1**<br>**多基地 + 归属原型**<br>**`✅ 已完成 (2026-11-20)`** | ~1 周 | ① 最小化多 CC 开局放置/测试自定义地图落位与开局各端相机定位至己方 CC（完整地图生成器暂搁置）；<br>② **共用电力网**多 CC 起点 BFS 修补；<br>③ `EntityOwnerMap` 全周期传播 + 操控隔离（先保留共享经济，专注跑通多基地、多路尸潮分流、**双胜负模式**不崩溃）；<br>④ 随快照同步 `EntityOwnerMap` 与规则标志。 | • `Sync/FactionOwnershipTracker.cs`<br>• `Patches/FactionOwnershipPatches.cs`<br>• `Patches/EnergyGridMultiBasePatch.cs`<br>• `Patches/CommandInterceptorPatch.cs`<br>• `Patches/LevelEndSyncPatch.cs`<br>• `Determinism/StateHasher.cs` | • `GameBridge 0 missing (verified=166)`、`Classes OK=78, failed-tolerant=0`；<br>• 实测通过 [`verify_multifaction_m1.ps1`](../scripts/verify_multifaction_m1.ps1)（`AllBasesLost` 流亡交接 + 共用供电 + 操控隔离）、[`verify_multifaction_survival.ps1`](../scripts/verify_multifaction_survival.ps1)（新生存多基地 + `AnyBaseLost`）与执政官 [`run_replay_verify.ps1`](../scripts/run_replay_verify.ps1)（120t `identical`）。 |
+| **M2**<br>**独立经济账本、科技与 3+3 奇观分流**<br>**`✅ 已完成 (2026-11-20)`** | ~1.5~2 周 | ① `FactionContextManager` 与 `ZXLevelState` 上下文 `PushContext/PopContext` 切换框架；<br>② 覆盖回放、队列推进、拆毁退费、宝箱拾取、8h 结算、超仓卖货、击杀分钱与 `CommandCenterExtra*` 按 CC 隔离；<br>③ 保留跨阵营光环共享与 `TheVictorious` 原生叠加，隔离 `MaxInstances > 0` 建筑及 3 座产出类奇观按个人计数，实现 `TheSpire` 按人数加成（`+1200/+1600`）及**存活并网 / 被毁退回**能源池机制；<br>④ 市长方案 A（全局词条共享 + 个人奖励槽）与 `StateHasher` 纳入全 `FactionLedger[1..N]` 哈希。 | • `Sync/FactionContextManager.cs`<br>• `Patches/FactionEconomyAndWonderPatches.cs`<br>• `Commands/NetCommand.cs`<br>• `Determinism/StateHasher.cs`<br>• `Sync/FactionOwnershipTracker.cs` | • `GameBridge 0 missing (verified=197)`、`Classes OK=97, failed-tolerant=0`；<br>• 实测通过 [`verify_multifaction_m2_m3.ps1`](../scripts/verify_multifaction_m2_m3.ps1)：双端 `economyHash` 严格一致、`TheSpire` `12000G/225S/300I/150O` 完工并网后 `SharedPool=133/1990`（`P2 own=1850 >= 1200`, `P1=P2=1990`）、`0 DESYNC`、`0 ERROR`。 |
+| **M3**<br>**延迟优化、双阶段众筹与市场贸易 UX**<br>**`✅ 已完成 (2026-11-20)`** | ~1.5 周 | ① 实装 **对称 P2P Turn 调度（`PacketType.SymmetricTurnInput = 0x24`，`0.5 RTT`）** 与主机统一 `(TargetSimTick, PlayerId, TraceId)` 确定性归并排序；<br>② 实装 **市场解锁全队转账**（整数 `20%` 手续费）、注入自定义 **`CoopMayor_ZeroTransferFee` 0 税市长**与 `ZeroTransferFeeActive` 同步；<br>③ 实装 **`WonderCrowdfundManager` 与 `F7 MultiFactionPanel` 双标签面板**（3 座功能奇观**研发 & 建造双阶段**均按 `1.5×/2.0×` 缩放，支持捐资/撤回/凭证落位与非阻塞完工横幅）；<br>④ 实装单位脚底等距阵营色环渲染（`AllyOverlayRenderer`）与 `ZXEntity.MinimapColor` 按阵营小地图着色。 | • `Sync/WonderCrowdfundManager.cs`<br>• `UI/MultiFactionPanel.cs`<br>• `Sync/CoopSessionManager.cs`<br>• `Patches/FactionEconomyAndWonderPatches.cs`<br>• `UI/AllyOverlayRenderer.cs`<br>• `Networking/INetworkTransport.cs`<br>• `Commands/NetCommand.cs` | • 实测通过 [`verify_multifaction_m2_m3.ps1`](../scripts/verify_multifaction_m2_m3.ps1)：`100 Gold -> +80 Gold`（20% 税）、`CoopMayor_ZeroTransferFee` 后 `50 Wood -> +50 Wood`（0% 税）、Spire 双阶段众筹+撤回+零成本凭证建造全程 `StateChecksum MATCH`、`0 ERROR`；<br>• 4 张 HUD/色环/小地图截图经目视校验清晰可用；回归 [`verify_multifaction_m1.ps1`](../scripts/verify_multifaction_m1.ps1) 8/8、[`verify_multifaction_survival.ps1`](../scripts/verify_multifaction_survival.ps1) 5/5 与执政官 `run_replay_verify.ps1` 120t `identical` 全部通过。 |
+| **M4**<br>**正式多基地地图生成器、双出生模式与多路尸潮**<br>**`✅ 已完成 (2026-11-20)`** | ~1~1.5 周 | ① 扩图至 `360`（2P）/ `416`（3P），大厅实装 `MultiFactionSpawnMode` 切换（聚集 `18~24` 格 Day 1 并网 vs 分离 `80~105` 格去中心对称分布，依赖共用电网飞地借矿不做人工假矿）；<br>② 实装 `MultiBaseMapGenerator` 网格级 `Postfix` 后处理管线：主连通选点（含迁出 `CC1` + 选址避让城镇）、轻量级 A* 会师走廊、恶魔村**仅扩数量 `1.5×/2.0×` 维持 `1.0×` 单镇半径**、重迁与 **`>= 32` 格逐栋边缘裁剪**、三环僵尸直写浓缩（内环不动 / 中环 `4:1` / 外环 `9:1` + 镇守巨人凝聚 + 种子随机精英倾向）；<br>③ 实装 `MultiWaveSwarmPatches`：$N$ 股独立尸潮 3 阶段缩容（`68%/58%` $\to$ `92%/82%` $\to$ `108%/98%` + FinalSwarm `2.10×/2.70×`）、Wave 1~2 `100%` 独立外侧出兵点、Wave 3+ `75%/20%/5%` 分流/合流借道、后期变异体折算与降速削峰。 | • `Sync/MultiBaseMapGenerator.cs`<br>• `Sync/CoopBalanceManager.cs`<br>• `Sync/FactionOwnershipTracker.cs`<br>• `Patches/SurvivalBalancePatch.cs`<br>• `Patches/MultiWaveSwarmPatches.cs`<br>• `UI/CoopLobbyWindow.cs`<br>• `scripts/verify_multifaction_m4.ps1`<br>• `scripts/generate_m4_showcase_panoramas.ps1` | • Release `0 警告 0 错误`；<br>• [`verify_multifaction_m4.ps1`](../scripts/verify_multifaction_m4.ps1) 全通：Clustered 2P 双端房间同步 (`sep=21.5`, Tick 1 `StateChecksum MATCH`)，`BR/AL/VO/DS` 实时多向尸潮分发与 FinalSwarm 变异体/巨人压缩审计通过；<br>• 6 生态 × 4 模式共 **24 张 2048px 全景审计**（[`multifaction_m4_panorama_report.html`](../reports/multifaction_m4_panorama_report.html)）：`allCcsConnected=24/24`、`nearestZombieDist>=28` 24/24 (`0` 例贴脸)、`nearestDoomDist>=32` 24/24 (`minD=34.8`，`VO 2P/3P` 恶魔村实测 `157/237` 且 `minD=47.6/56.4`)、`Separated` 全队 `stone24` 最低 `37`。 |
 
 ---
 
-### 附：规则状态汇总与待继续讨论清单
+### 附：规则状态汇总（M1~M4 全部规则与代码交付已完成）
 
-#### 已拍板定稿（可直接作为 M1~M3 设计与开发依据）
+#### 已拍板定稿并实装（M1~M4 全部落地）
 1. **电力网**：共用供电疆域边界，平时各家发电/耗电独立结算；建成存活 `TheSpire` 后激活全队能源池共享。
 2. **市长系统**：方案 A（属性词条联盟共享，赠送单位/建筑/科技/资源包归个人）+ 新增联机专属“0 手续费市长”。
 3. **3+3 奇观划分、定价与双阶段众筹**：
@@ -320,6 +403,9 @@ Phase 4 的 V1 版本明确限定为 **2~3 人多阵营合作抗尸潮（Co-op M
 4. **胜负规则**：支持“流亡交接（全灭才败）”与“硬核一损俱损”两种模式，开局前在大厅切换。
 5. **光环与限建建筑**：允许跨阵营蹭光环；有数量限制（`MaxInstances > 0`）的建筑单人可用上限维持原版不变。
 6. **资源转账**：任意一人拥有市场后全队激活，默认扣除 20% 手续费，选中“0 手续费市长”后降为 0%。
-
-#### 待后续专题继续讨论（未最终定稿）
-1. **多基地地图生成改造（暂搁置）**：确定正式启动多基地地图生成时的尺寸、底座间距、资源补齐尺度与“天谴图”阈值。
+7. **多基地地图生成、双出生模式、三环折算与多股尸潮（M4 定稿）**：
+   - **尺寸定档**：**2P `360` 格**（`0.85×` 游荡密度）/ **3P `416` 格**（`0.80×` 游荡密度）；
+   - **双出生模式**：大厅可切换 **聚集出生（`18~24` 格，Day 1 并网快扩）** 与 **分离出生（`80~105` 格，全员去中心化对称展开，正中心做会师腹地）**；依赖**共用电网飞地借矿**应对单家偏穷开局，不做人工假矿印章；
+   - **恶魔村扩充**：维持原版 **`1.0×`** 单镇半径，仅按 `1.5×`（2P 保底 `2` 座）/ `2.0×`（3P 保底 `3` 座）扩充数量，并强制任意 `CInfectionNest` 建筑距所有基地 **`>= 32` 格**；
+   - **生成期三环浓缩与种子倾向**：`d_min < 28` 清空、`28~48` 留 T1、`48~75` `4:1` 换 T2、`>= 75` `9:1`/`3:1` 升 T3 精英并按 `30:1` 凝聚外围镇守巨人（严控野区变异体）；外环精英配比与后期偏向由 `MapSeed` 确定性派生 4 类主题倾向；
+   - **$N$ 股尸潮与控帧**：每次刷新 $N$ 股独立分流（前/中/后期单股规模 `65%~70%` $\to$ `90%~95%` $\to$ `105%~110%`），前 2 波 100% 分进，第 3 波起按 `75% 分进 / 20% 双股合流或借道 / 5% 三股全合流` 触发协防高光；后期通过只数封顶 + 精英提纯 + `180:1` 攻城变异体折算 + 降速拉长刷出时间锁死卡顿。

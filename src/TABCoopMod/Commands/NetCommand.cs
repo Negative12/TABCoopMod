@@ -20,7 +20,10 @@ namespace TABCoopMod.Commands
         CancelQueuedOrder = 5,   // Cancel production queue slot (CCommandable.#=z8g7GC7xLrr8j)
         SetPaused = 6,           // Pause / Resume toggle
         SetGameSpeed = 7,        // GameSpeed multiplier change
-        MayorVoteOrSelect = 8    // Mayor selection (0 = left male, 1 = right female)
+        MayorVoteOrSelect = 8,   // Mayor selection (0 = left male, 1 = right female)
+        TransferResource = 9,    // Market-unlocked ally resource transfer (20% fee, 0% with CoopMayor_ZeroTransferFee)
+        WonderContribute = 10,   // Functional Wonder 2-phase crowdfunding contribution
+        WonderWithdraw = 11      // Functional Wonder 2-phase crowdfunding withdrawal (while funding phase open)
     }
 
     /// <summary>
@@ -159,6 +162,9 @@ namespace TABCoopMod.Commands
         [ThreadStatic]
         public static bool IsReplayingLocalBuild;
 
+        [ThreadStatic]
+        public static byte ActiveCommandPlayerId;
+
         private const double RejectLogCooldownMs = 3000.0;
         private static string _lastRejectKey;
         private static double _lastRejectLogMs = -10000.0;
@@ -196,8 +202,12 @@ namespace TABCoopMod.Commands
             bool prevReplaying = IsReplayingCommand;
             bool prevLocalBuild = IsReplayingLocalBuild;
             bool prevDet = LockstepClock.InDeterministicContext;
+            byte prevPlayerId = ActiveCommandPlayerId;
+            bool swappedLevelSysCc = false;
+            DXEntity prevLevelSysCc = null;
             object suspendedBuildCursor = GameBridge.SuspendLocalBuildCursorEnergyPreview();
             IsReplayingCommand = true;
+            ActiveCommandPlayerId = netCmd.PlayerId;
             IsReplayingLocalBuild = TABCoopMod.Sync.CoopSessionManager.IsSessionActive
                 && netCmd.PlayerId == TABCoopMod.Patches.CommandInterceptor.LocalPlayerId
                 && (netCmd.Type == NetCommandType.PlaceBuilding
@@ -205,6 +215,17 @@ namespace TABCoopMod.Commands
                     || netCmd.Type == NetCommandType.CancelCurrentOrder
                     || netCmd.Type == NetCommandType.CancelQueuedOrder);
             LockstepClock.InDeterministicContext = true;
+
+            if (TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive && netCmd.PlayerId > 0)
+            {
+                var ownerCc = TABCoopMod.Sync.FactionOwnershipTracker.GetPrimaryCommandCenterForPlayer(netCmd.PlayerId);
+                if (ownerCc != null)
+                {
+                    prevLevelSysCc = GameBridge.GetLevelSysCurrentCommandCenter();
+                    GameBridge.SetLevelSysCurrentCommandCenter(ownerCc);
+                    swappedLevelSysCc = true;
+                }
+            }
 
             // Save local Shift key state so we can simulate the sender's Shift modifier accurately
             bool hadShiftKey = false;
@@ -216,6 +237,15 @@ namespace TABCoopMod.Commands
                     inputKeys.Add(DXKeys.Shift);
                 else if (!netCmd.IsShiftQueued && hadShiftKey)
                     inputKeys.Remove(DXKeys.Shift);
+            }
+
+            bool swappedContext = false;
+            if (TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive
+                && TABCoopMod.Sync.FactionContextManager.IsInitialized
+                && netCmd.PlayerId >= 1 && netCmd.PlayerId <= 3)
+            {
+                TABCoopMod.Sync.FactionContextManager.PushContext(netCmd.PlayerId);
+                swappedContext = true;
             }
 
             try
@@ -270,12 +300,58 @@ namespace TABCoopMod.Commands
                     case NetCommandType.MayorVoteOrSelect:
                         if (!string.IsNullOrEmpty(netCmd.MayorId) && GameBridge.ApplyMayor(netCmd.MayorId))
                         {
+                            if (netCmd.MayorId == TABCoopMod.Sync.FactionContextManager.CoopMayorZeroFeeId && TABCoopMod.Sync.FactionContextManager.IsInitialized)
+                                TABCoopMod.Sync.FactionContextManager.ZeroTransferFeeActive = true;
+
                             string mayorName = GameBridge.GetMayorNameById(netCmd.MayorId);
                             ShowBannerOutsideDet(
                                 string.IsNullOrEmpty(mayorName)
                                     ? $"Player {netCmd.PlayerId} selected a mayor"
                                     : $"Player {netCmd.PlayerId} selected mayor: {mayorName}",
                                 Color.Gold, 2500);
+                        }
+                        break;
+
+                    case NetCommandType.TransferResource:
+                        if (TABCoopMod.Sync.FactionContextManager.IsInitialized)
+                        {
+                            var resKind = (TABCoopMod.Sync.ResourceTransferKind)netCmd.QueueSlotIndex;
+                            if (TABCoopMod.Sync.FactionContextManager.ExecuteTransferResource(
+                                netCmd.PlayerId, netCmd.MayorOptionIndex, resKind, netCmd.CommandId, out int received))
+                            {
+                                int feePct = TABCoopMod.Sync.FactionContextManager.ZeroTransferFeeActive ? 0 : 20;
+                                ShowBannerOutsideDet(
+                                    $"P{netCmd.PlayerId} sent {netCmd.CommandId} {resKind} -> P{netCmd.MayorOptionIndex} (+{received}, fee {feePct}%)",
+                                    Color.LightSkyBlue, 2200);
+                            }
+                        }
+                        break;
+
+                    case NetCommandType.WonderContribute:
+                        if (TABCoopMod.Sync.WonderCrowdfundManager.IsInitialized)
+                        {
+                            var wKind = (TABCoopMod.Sync.FunctionalWonderType)netCmd.MayorOptionIndex;
+                            var resKind = (TABCoopMod.Sync.ResourceTransferKind)netCmd.QueueSlotIndex;
+                            var prevPhase = TABCoopMod.Sync.WonderCrowdfundManager.GetState(wKind)?.Phase;
+                            int actual = TABCoopMod.Sync.WonderCrowdfundManager.TryContribute(netCmd.PlayerId, wKind, resKind, netCmd.CommandId);
+                            var newPhase = TABCoopMod.Sync.WonderCrowdfundManager.GetState(wKind)?.Phase;
+                            if (actual > 0 && prevPhase != newPhase)
+                            {
+                                string wName = TABCoopMod.Sync.WonderCrowdfundManager.GetDisplayName(wKind);
+                                string msg = newPhase == TABCoopMod.Sync.WonderPhase.BuildFunding
+                                    ? $"{wName}: Shared Research Complete! Build crowdfunding open."
+                                    : $"{wName}: Build Crowdfunding Complete! Ready to place (0 cost).";
+                                ShowBannerOutsideDet(msg, Color.Gold, 3500);
+                            }
+                        }
+                        break;
+
+                    case NetCommandType.WonderWithdraw:
+                        if (TABCoopMod.Sync.WonderCrowdfundManager.IsInitialized)
+                        {
+                            var wKind = (TABCoopMod.Sync.FunctionalWonderType)netCmd.MayorOptionIndex;
+                            var resKind = (TABCoopMod.Sync.ResourceTransferKind)netCmd.QueueSlotIndex;
+                            TABCoopMod.Sync.WonderCrowdfundManager.TryWithdraw(netCmd.PlayerId, wKind, resKind, netCmd.CommandId);
                         }
                         break;
                 }
@@ -286,6 +362,9 @@ namespace TABCoopMod.Commands
             }
             finally
             {
+                if (swappedContext)
+                    TABCoopMod.Sync.FactionContextManager.PopContext();
+
                 // Restore local Shift key state
                 if (inputKeys != null)
                 {
@@ -295,6 +374,10 @@ namespace TABCoopMod.Commands
                         inputKeys.Remove(DXKeys.Shift);
                 }
 
+                if (swappedLevelSysCc)
+                    GameBridge.SetLevelSysCurrentCommandCenter(prevLevelSysCc);
+
+                ActiveCommandPlayerId = prevPlayerId;
                 LockstepClock.InDeterministicContext = prevDet;
                 IsReplayingLocalBuild = prevLocalBuild;
                 IsReplayingCommand = prevReplaying;
@@ -317,7 +400,7 @@ namespace TABCoopMod.Commands
             foreach (ulong entityId in netCmd.ExecutorEntityIds)
             {
                 object executor = DXGame.Current?.GetEntityByID(entityId);
-                if (!IsLiveExecutableEntity(executor))
+                if (!IsLiveExecutableEntityForPlayer(executor, netCmd.PlayerId))
                     continue;
 
                 object cmd = slotSensitive
@@ -355,7 +438,7 @@ namespace TABCoopMod.Commands
             foreach (ulong id in netCmd.ExecutorEntityIds)
             {
                 var ent = DXGame.Current?.GetEntityByID(id);
-                if (ent == null || ent.Disposed) continue;
+                if (!IsLiveExecutableEntityForPlayer(ent, netCmd.PlayerId)) continue;
                 if (!GameBridge.HasComponent(ent, movable) || !GameBridge.HasComponent(ent, commandable)) continue;
                 entities.Add(ent);
             }
@@ -401,10 +484,14 @@ namespace TABCoopMod.Commands
 
             ulong builderId = netCmd.ExecutorEntityIds.Length > 0 ? netCmd.ExecutorEntityIds[0] : 0UL;
             object builder = builderId != 0UL ? DXGame.Current?.GetEntityByID(builderId) : null;
-            if (!IsLiveExecutableEntity(builder))
-                builder = GameBridge.GetCommandCenterEntity();
+            if (!IsLiveExecutableEntityForPlayer(builder, netCmd.PlayerId))
+            {
+                builder = TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive
+                    ? TABCoopMod.Sync.FactionOwnershipTracker.GetPrimaryCommandCenterForPlayer(netCmd.PlayerId)
+                    : GameBridge.GetCommandCenterEntity();
+            }
 
-            if (!IsLiveExecutableEntity(builder)) return;
+            if (!IsLiveExecutableEntityForPlayer(builder, netCmd.PlayerId)) return;
 
             // Mayor-reward buildings come from EntityBonusCreation, which internally calls
             // Build.PlaceBuilding(isBonus:true) AND consumes one entry from BonusEntityTemplates.
@@ -434,7 +521,9 @@ namespace TABCoopMod.Commands
             object buildCmd = GameBridge.GetBuildCommandForType(buildingType);
             if (buildCmd != null && !GameBridge.CanExecuteCommandOnEntity(buildCmd, builder))
             {
-                LogRejected($"buildExec:{netCmd.BuildingTypeName}", $"[CommandExecutor] Rejected PlaceBuilding {netCmd.BuildingTypeName}: CanExecute=false (insufficient resources or prerequisites).");
+                string errReason = null;
+                try { errReason = buildCmd.GetType().GetProperty("Error")?.GetValue(buildCmd) as string; } catch { }
+                LogRejected($"buildExec:{netCmd.BuildingTypeName}", $"[CommandExecutor] Rejected PlaceBuilding {netCmd.BuildingTypeName}: CanExecute=false ({errReason ?? "insufficient resources or prerequisites"}).");
                 return;
             }
 
@@ -463,7 +552,9 @@ namespace TABCoopMod.Commands
         {
             foreach (ulong id in netCmd.ExecutorEntityIds)
             {
-                object cmdComp = GameBridge.GetCommandableObject(DXGame.Current?.GetEntityByID(id));
+                var ent = DXGame.Current?.GetEntityByID(id);
+                if (!IsLiveExecutableEntityForPlayer(ent, netCmd.PlayerId)) continue;
+                object cmdComp = GameBridge.GetCommandableObject(ent);
                 if (cmdComp != null) GameBridge.CancelCurrentOrderObject(cmdComp);
             }
         }
@@ -472,7 +563,9 @@ namespace TABCoopMod.Commands
         {
             foreach (ulong id in netCmd.ExecutorEntityIds)
             {
-                object cmdComp = GameBridge.GetCommandableObject(DXGame.Current?.GetEntityByID(id));
+                var ent = DXGame.Current?.GetEntityByID(id);
+                if (!IsLiveExecutableEntityForPlayer(ent, netCmd.PlayerId)) continue;
+                object cmdComp = GameBridge.GetCommandableObject(ent);
                 if (cmdComp != null) GameBridge.CancelQueueSlotObject(cmdComp, netCmd.QueueSlotIndex);
             }
         }
@@ -499,6 +592,13 @@ namespace TABCoopMod.Commands
             if (ent == null || ent.Disposed) return false;
             Type zxEntity = GameBridge.TypeZXEntity;
             return zxEntity == null || zxEntity.IsInstanceOfType(ent);
+        }
+
+        private static bool IsLiveExecutableEntityForPlayer(object entity, byte playerId)
+        {
+            if (!IsLiveExecutableEntity(entity)) return false;
+            if (!TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive) return true;
+            return TABCoopMod.Sync.FactionOwnershipTracker.CanPlayerControl(playerId, entity as DXEntity);
         }
 
         public static object BuildCommandTarget(NetCommand netCmd)

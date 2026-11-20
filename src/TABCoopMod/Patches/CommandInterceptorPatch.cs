@@ -211,6 +211,9 @@ namespace TABCoopMod.Patches
             if (LockstepClock.IsSimulationThreadActive || GameBridge.IsWeaponSubCommand(__instance))
                 return true;
 
+            if (!TABCoopMod.Sync.FactionOwnershipTracker.CanPlayerControl(CommandInterceptor.LocalPlayerId, executor))
+                return false;
+
             // If this is the per-unit Travel/Patrol follow-up loop right after #=zQp2M56bpPd9jmiNkVA==, swallow it
             if (CommandInterceptor.SuppressIndividualMoveExecution && GameBridge.IsGroupRoutedCommand(__instance))
                 return false;
@@ -227,6 +230,14 @@ namespace TABCoopMod.Patches
                 Type buildingType = GameBridge.GetBuildingTypeFromCommand(__instance);
                 if (buildingType != null)
                 {
+                    if (TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive
+                        && TABCoopMod.Sync.WonderCrowdfundManager.TryClassifyEntityType(buildingType, out var fBuildKind)
+                        && !TABCoopMod.Sync.WonderCrowdfundManager.CanPlaceBuildVoucher(fBuildKind))
+                    {
+                        TABCoopMod.UI.MultiFactionPanel.OpenToWonderTab(fBuildKind);
+                        return false;
+                    }
+
                     if (!isBonus && !GameBridge.CanExecuteCommandOnEntity(__instance, executor))
                         return false;
 
@@ -331,6 +342,13 @@ namespace TABCoopMod.Patches
                     CommandInterceptor.OnLocalCommandCaptured?.Invoke(netBuild);
                     return false;
                 }
+            }
+
+            if (TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive
+                && TABCoopMod.Sync.WonderCrowdfundManager.TryClassifyTechCommand(__instance, out var fTechKind))
+            {
+                TABCoopMod.UI.MultiFactionPanel.OpenToWonderTab(fTechKind);
+                return false;
             }
 
             string extraTypeOrSlotTag = string.Empty;
@@ -535,6 +553,8 @@ namespace TABCoopMod.Patches
             var ent = __instance?.Entity;
             if (ent == null || !GameBridge.IsPlayerEntity(ent))
                 return true;
+            if (!TABCoopMod.Sync.FactionOwnershipTracker.CanPlayerControl(CommandInterceptor.LocalPlayerId, ent))
+                return false;
 
             var netCmd = new NetCommand
             {
@@ -567,6 +587,8 @@ namespace TABCoopMod.Patches
             var ent = __instance?.Entity;
             if (ent == null || !GameBridge.IsPlayerEntity(ent))
                 return true;
+            if (!TABCoopMod.Sync.FactionOwnershipTracker.CanPlayerControl(CommandInterceptor.LocalPlayerId, ent))
+                return false;
 
             var netCmd = new NetCommand
             {

@@ -52,6 +52,33 @@ namespace TABCoopMod.Sync
         // when rendering deterministic same-seed panorama comparisons.
         internal static int? TestOverridePlayerCount;
         internal static CoopBalancePreset? TestOverridePreset;
+        internal static bool? TestOverrideMultiFaction;
+        internal static MultiFactionSpawnMode? TestOverrideSpawnMode;
+
+        internal static bool IsMultiFactionGenerationActive =>
+            TestOverrideMultiFaction ?? CoopSessionManager.IsMultiFactionActive;
+
+        public static SurvivalBalanceProfile GetMultiFactionProfileForPlayerCount(int playerCount, CoopBalancePreset preset)
+        {
+            int n = Math.Max(2, Math.Min(3, playerCount));
+            bool balanced = preset == CoopBalancePreset.Balanced;
+            int targetNCells = n >= 3 ? 416 : 360;
+            return new SurvivalBalanceProfile
+            {
+                PlayerCount = n,
+                IsActive = true,
+                TargetNCells = targetNCells,
+                MapScale = targetNCells / 256f,
+                AreaScale = balanced ? (n >= 3 ? 2.64f : 1.98f) : 1.0f,
+                ExtraRangers = 0,
+                ExtraSoldiers = 0,
+                ExtraWorkers = 0,
+                ExtraFood = 0,
+                RoamingDensityScale = balanced ? (n >= 3 ? 0.80 : 0.85) : 1.0,
+                EarlySwarmScale = n >= 3 ? 0.58f : 0.68f,
+                LateSwarmScale = n >= 3 ? 0.98f : 1.08f
+            };
+        }
 
         public static SurvivalBalanceProfile GetProfileForPlayerCount(int playerCount, CoopBalancePreset preset)
         {
@@ -120,12 +147,18 @@ namespace TABCoopMod.Sync
         private static bool ShouldApplyToCurrentGeneration(out SurvivalBalanceProfile profile)
         {
             profile = null;
-            if (TestOverridePreset.HasValue)
+            if (TestOverridePreset.HasValue || TestOverrideMultiFaction == true)
             {
-                if (TestOverridePreset.Value != CoopBalancePreset.Balanced)
-                    return false;
                 int overrideCount = TestOverridePlayerCount ?? 2;
                 if (overrideCount < 2) return false;
+                CoopBalancePreset preset = TestOverridePreset ?? CoopBalancePreset.Balanced;
+                if (TestOverrideMultiFaction == true)
+                {
+                    profile = GetMultiFactionProfileForPlayerCount(overrideCount, preset);
+                    return profile.IsActive;
+                }
+                if (preset != CoopBalancePreset.Balanced)
+                    return false;
                 profile = GetProfileForPlayerCount(overrideCount, CoopBalancePreset.Balanced);
                 return profile.IsActive;
             }
@@ -135,6 +168,23 @@ namespace TABCoopMod.Sync
 
             if (TestHarnessConfig.Enabled)
                 return false;
+
+            if (CoopSessionManager.IsMultiFactionActive)
+            {
+                string mfGameMode = GameBridge.GetGameStateProperty("GameMode")?.ToString();
+                string mfChallenge = GameBridge.GetGameStateProperty("ChallengeType")?.ToString();
+                if (!string.Equals(mfGameMode, "Survival", StringComparison.Ordinal) ||
+                    !string.Equals(mfChallenge, "Default", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+                int mfPlayers = CoopSessionManager.GetEffectivePeers().Count;
+                if (mfPlayers < 2)
+                    return false;
+
+                profile = GetMultiFactionProfileForPlayerCount(mfPlayers, CoopSessionManager.BalancePreset);
+                return true;
+            }
 
             if (CoopSessionManager.BalancePreset != CoopBalancePreset.Balanced)
                 return false;
@@ -175,6 +225,7 @@ namespace TABCoopMod.Sync
                     return;
                 }
 
+                bool isMulti = IsMultiFactionGenerationActive;
                 _themeSnapshots = new List<GameBridge.MapThemeBalanceSnapshot>(themes.Count);
                 foreach (DictionaryEntry entry in themes)
                 {
@@ -182,15 +233,41 @@ namespace TABCoopMod.Sync
                     var snap = GameBridge.CaptureMapThemeSnapshot(entry.Value);
                     _themeSnapshots.Add(snap);
 
-                    GameBridge.ApplyMapThemeValues(
-                        entry.Value,
-                        ScaleRangeRound(snap.DoomVillagesSize, profile.MapScale),
-                        ScaleRangeRound(snap.NumTreasures, profile.AreaScale),
-                        ScaleRangeRound(snap.NumSuppyFood, profile.AreaScale),
-                        ScaleRangeRound(snap.NumSuppyEnergy, profile.AreaScale),
-                        ScaleIntRound(snap.NumInfectedGiants, profile.AreaScale),
-                        ScaleIntRound(snap.NumInfectedMutants, profile.AreaScale),
-                        Math.Min(0.95, snap.InfectedFactor * profile.RoamingDensityScale));
+                    if (isMulti)
+                    {
+                        float dvCountScale = profile.PlayerCount >= 3 ? 2.00f : 1.50f;
+                        int dvMin = profile.PlayerCount >= 3 ? 3 : 2;
+                        var scaledDvCount = ScaleRangeCeilWithFloor(snap.NumDoomVillages, dvCountScale, dvMin);
+                        GameBridge.SetMapThemeNumDoomVillages(entry.Value, scaledDvCount);
+
+                        float propScale = profile.PlayerCount >= 3 ? 2.40f : 1.80f;
+                        float giantScale = profile.PlayerCount >= 3 ? 1.45f : 1.20f;
+                        int mutantTarget = snap.NumInfectedMutants > 0
+                            ? (profile.PlayerCount >= 3 ? snap.NumInfectedMutants + 1 : snap.NumInfectedMutants)
+                            : 0;
+
+                        GameBridge.ApplyMapThemeValues(
+                            entry.Value,
+                            snap.DoomVillagesSize,
+                            ScaleRangeRound(snap.NumTreasures, propScale),
+                            ScaleRangeRound(snap.NumSuppyFood, propScale),
+                            ScaleRangeRound(snap.NumSuppyEnergy, propScale),
+                            ScaleIntRound(snap.NumInfectedGiants, giantScale),
+                            mutantTarget,
+                            Math.Min(0.95, snap.InfectedFactor * profile.RoamingDensityScale));
+                    }
+                    else
+                    {
+                        GameBridge.ApplyMapThemeValues(
+                            entry.Value,
+                            ScaleRangeRound(snap.DoomVillagesSize, profile.MapScale),
+                            ScaleRangeRound(snap.NumTreasures, profile.AreaScale),
+                            ScaleRangeRound(snap.NumSuppyFood, profile.AreaScale),
+                            ScaleRangeRound(snap.NumSuppyEnergy, profile.AreaScale),
+                            ScaleIntRound(snap.NumInfectedGiants, profile.AreaScale),
+                            ScaleIntRound(snap.NumInfectedMutants, profile.AreaScale),
+                            Math.Min(0.95, snap.InfectedFactor * profile.RoamingDensityScale));
+                    }
                 }
 
                 GameBridge.SetRandomParamsNCells(randomLevelParams, profile.TargetNCells);
@@ -228,17 +305,28 @@ namespace TABCoopMod.Sync
                 }
 
                 int scaledEvents = ScaleLevelEvents(levelEvents, randomLevelParams, profile);
-                int spawnedUnits = SpawnExtraStartingUnits(
-                    extraEntities,
-                    layerTerrain,
-                    layerObjects,
-                    gridNCells,
-                    profile.ExtraRangers,
-                    profile.ExtraSoldiers);
+                int spawnedUnits = 0;
+                int multiBaseCount = 0;
+                if (IsMultiFactionGenerationActive)
+                {
+                    var spawnMode = TestOverrideSpawnMode ?? CoopSessionManager.SpawnMode;
+                    MultiBaseMapGenerator.PostProcessGeneratedLevel(generatedLevel, randomLevelParams, profile, spawnMode);
+                    multiBaseCount = profile.PlayerCount;
+                }
+                else
+                {
+                    spawnedUnits = SpawnExtraStartingUnits(
+                        extraEntities,
+                        layerTerrain,
+                        layerObjects,
+                        gridNCells,
+                        profile.ExtraRangers,
+                        profile.ExtraSoldiers);
+                }
                 bool extrasSet = GameBridge.AddLevelStateCommandCenterExtras(profile.ExtraWorkers, profile.ExtraFood);
 
                 ModLogger.Info(
-                    $"[CoopBalance] Post-gen complete: players={profile.PlayerCount}, NCells={GameBridge.GetRandomParamsNCells(randomLevelParams)}, " +
+                    $"[CoopBalance] Post-gen complete: players={profile.PlayerCount}, multiBases={multiBaseCount}, NCells={GameBridge.GetRandomParamsNCells(randomLevelParams)}, " +
                     $"scaledEvents={scaledEvents}, extraUnits={spawnedUnits} (+{profile.ExtraRangers} Ranger, +{profile.ExtraSoldiers} Soldier), " +
                     $"ccExtras=(+{profile.ExtraWorkers} workers, +{profile.ExtraFood} food, applied={extrasSet}).");
             }
@@ -312,6 +400,9 @@ namespace TABCoopMod.Sync
             float durationFactor = GameBridge.GetRandomParamsFactorGameDuration(randomLevelParams);
             if (durationFactor <= 0f) durationFactor = 1f;
             int earlyCutoffH = (int)Math.Round(35f * 24f * durationFactor);
+            bool isMulti = IsMultiFactionGenerationActive;
+            int earlyMfCutoffH = (int)Math.Round(28f * 24f * durationFactor);
+            int midMfCutoffH = (int)Math.Round(55f * 24f * durationFactor);
 
             int count = 0;
             foreach (object ev in levelEvents)
@@ -319,7 +410,30 @@ namespace TABCoopMod.Sync
                 if (ev == null) continue;
                 GameBridge.GetLevelEventTiming(ev, out int startTimeH, out int gameTimeH, out bool isFinalSwarm);
                 int refTimeH = startTimeH > 0 ? startTimeH : gameTimeH;
-                float mult = (!isFinalSwarm && refTimeH <= earlyCutoffH) ? profile.EarlySwarmScale : profile.LateSwarmScale;
+                float mult;
+                if (isMulti)
+                {
+                    if (isFinalSwarm)
+                    {
+                        mult = profile.PlayerCount >= 3 ? 2.70f : 2.10f;
+                    }
+                    else if (refTimeH <= earlyMfCutoffH)
+                    {
+                        mult = profile.PlayerCount >= 3 ? 0.58f : 0.68f;
+                    }
+                    else if (refTimeH <= midMfCutoffH)
+                    {
+                        mult = profile.PlayerCount >= 3 ? 0.82f : 0.92f;
+                    }
+                    else
+                    {
+                        mult = profile.PlayerCount >= 3 ? 0.98f : 1.08f;
+                    }
+                }
+                else
+                {
+                    mult = (!isFinalSwarm && refTimeH <= earlyCutoffH) ? profile.EarlySwarmScale : profile.LateSwarmScale;
+                }
                 GameBridge.ScaleLevelEventPopulation(ev, mult, 100);
                 count++;
             }
@@ -477,6 +591,13 @@ namespace TABCoopMod.Sync
         {
             if (value <= 0) return value;
             return Math.Max(1, (int)Math.Round(value * factor));
+        }
+
+        private static DXRange<int> ScaleRangeCeilWithFloor(DXRange<int> range, float factor, int minFloor)
+        {
+            int scaledFirst = Math.Max(minFloor, (int)Math.Ceiling(range.First * factor));
+            int scaledLast = Math.Max(scaledFirst, (int)Math.Ceiling(range.Last * factor));
+            return new DXRange<int>(scaledFirst, scaledLast);
         }
     }
 }
