@@ -4721,6 +4721,12 @@ namespace TABCoopMod.Sync
             try
             {
                 CaptureLocalControlGroupsForMidGameReload();
+                if (_pendingResyncSelectionGroups == null)
+                {
+                    // Initial join or reconnect from main menu: clear all 9 control-group slots
+                    // so Host control groups baked into coop_host_snapshot.zxsav are never inherited.
+                    _pendingResyncSelectionGroups = new ulong[9][];
+                }
                 IsInSyncedLevel = false;
                 LockstepClock.SetSessionPause(true);
                 if (DXGame.Current != null) DXGame.Current.InputEnabled = false;

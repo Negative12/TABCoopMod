@@ -1,10 +1,10 @@
-# package_release.ps1
+﻿# package_release.ps1
 # Builds TABCoopMod (Release) and packages a drag-and-drop archive into dist/
 # containing ONLY runtime files + a plain-text user guide (no install scripts).
 
 param(
     [string]$WorkspaceDir = "",
-    [string]$Version = "v0.2.0"
+    [string]$Version = "v0.2.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,7 +38,7 @@ Copy-Item (Join-Path $binDir "0Harmony.dll") (Join-Path $stageDir "0Harmony.dll"
 
 [System.IO.File]::WriteAllText((Join-Path $stageDir "steam_appid.txt"), "644930")
 
-$asmVersion = "0.2.0.0"
+$asmVersion = "0.2.1.0"
 if ($Version -match '(\d+)\.(\d+)\.(\d+)') {
     $asmVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
 }

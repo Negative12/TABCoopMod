@@ -472,14 +472,19 @@ namespace TABCoopMod.Networking
             SendToSteamUserPayload(targetSteamId, channel, type, payload);
         }
 
-        private void SendToSteamUserPayload(CSteamID targetSteamId, SendChannel channel, PacketType type, byte[] payload)
+        private bool SendToSteamUserPayload(CSteamID targetSteamId, SendChannel channel, PacketType type, byte[] payload)
         {
             byte[] frame = BuildFrameFromPayload(type, payload);
             var sendType = channel != SendChannel.UnreliableSequenced
                 ? EP2PSend.k_EP2PSendReliable
                 : EP2PSend.k_EP2PSendUnreliableNoDelay;
 
-            SteamNetworking.SendP2PPacket(targetSteamId, frame, (uint)frame.Length, sendType, (int)channel);
+            bool ok = SteamNetworking.SendP2PPacket(targetSteamId, frame, (uint)frame.Length, sendType, (int)channel);
+            if (!ok)
+            {
+                ModLogger.Warn($"[SteamP2PTransport] SendP2PPacket failed: target={targetSteamId}, type={type}, ch={channel}, sendType={sendType}, bytes={frame.Length}");
+            }
+            return ok;
         }
 
         public void PollEvents()
@@ -909,18 +914,39 @@ namespace TABCoopMod.Networking
             if (!_cutoverHoldQueue.ContainsKey(peerId))
                 _cutoverHoldQueue[peerId] = new List<HeldCommand>();
 
-            SendToSteamUser(steamId, SendChannel.ReliableCommand, PacketType.DirectCutoverSync, w => w.Write((byte)0));
+            _direct.GetTxNextSeqs(peerId, out uint cmdNextSeq, out uint bulkNextSeq);
+            SendToSteamUser(steamId, SendChannel.ReliableCommand, PacketType.DirectCutoverSync, w =>
+            {
+                w.Write((byte)0);
+                w.Write(cmdNextSeq);
+                w.Write(bulkNextSeq);
+            });
         }
 
         private void HandleDirectCutoverSync(byte senderId, BinaryReader reader)
         {
             if (senderId == 0) return;
             byte phase = reader.ReadByte();
+            if (reader.BaseStream.Position + 8 <= reader.BaseStream.Length)
+            {
+                uint remoteCmdNextSeq = reader.ReadUInt32();
+                uint remoteBulkNextSeq = reader.ReadUInt32();
+                _direct?.SyncRxExpectedSeq(senderId, remoteCmdNextSeq, remoteBulkNextSeq);
+            }
+
             if (phase == 0)
             {
                 if (_playerToSteamId.TryGetValue(senderId, out var steamId) && steamId.IsValid())
                 {
-                    SendToSteamUser(steamId, SendChannel.ReliableCommand, PacketType.DirectCutoverSync, w => w.Write((byte)1));
+                    uint cmdNextSeq = 1;
+                    uint bulkNextSeq = 1;
+                    _direct?.GetTxNextSeqs(senderId, out cmdNextSeq, out bulkNextSeq);
+                    SendToSteamUser(steamId, SendChannel.ReliableCommand, PacketType.DirectCutoverSync, w =>
+                    {
+                        w.Write((byte)1);
+                        w.Write(cmdNextSeq);
+                        w.Write(bulkNextSeq);
+                    });
                 }
                 return;
             }
@@ -998,31 +1024,59 @@ namespace TABCoopMod.Networking
             }
 
             if (cmdMsgs.Count > 0)
-                SendFallbackSlice(steamId, SendChannel.ReliableCommand, cmdMsgs);
+                SendFallbackSlice(peerId, steamId, SendChannel.ReliableCommand, cmdMsgs);
             if (bulkMsgs.Count > 0)
-                SendFallbackSlice(steamId, SendChannel.ReliableOrdered, bulkMsgs);
+                SendFallbackSlice(peerId, steamId, SendChannel.ReliableOrdered, bulkMsgs);
         }
 
-        private void SendFallbackSlice(CSteamID steamId, SendChannel steamChannel, List<DirectFastPathManager.FallbackMessage> msgs)
+        private const int MaxSteamFallbackBatchPayloadBytes = 256 * 1024;
+
+        private void SendFallbackSlice(byte peerId, CSteamID steamId, SendChannel steamChannel, List<DirectFastPathManager.FallbackMessage> msgs)
         {
-            SendToSteamUser(steamId, steamChannel, PacketType.DirectFallbackBatch, w =>
+            uint cmdNextSeq = 1;
+            uint bulkNextSeq = 1;
+            _direct?.GetTxNextSeqs(peerId, out cmdNextSeq, out bulkNextSeq);
+
+            int idx = 0;
+            while (idx < msgs.Count)
             {
-                w.Write((ushort)msgs.Count);
-                for (int i = 0; i < msgs.Count; i++)
+                int batchStart = idx;
+                int batchBytes = 0;
+                while (idx < msgs.Count)
                 {
-                    var m = msgs[i];
-                    w.Write(m.MsgId);
-                    w.Write((byte)m.Channel);
-                    w.Write((byte)m.Type);
-                    byte[] payload = m.Payload ?? Array.Empty<byte>();
-                    w.Write(payload.Length);
-                    if (payload.Length > 0) w.Write(payload);
+                    int entryBytes = 10 + (msgs[idx].Payload?.Length ?? 0);
+                    if (idx > batchStart && batchBytes + entryBytes > MaxSteamFallbackBatchPayloadBytes)
+                        break;
+                    batchBytes += entryBytes;
+                    idx++;
                 }
-            });
+
+                int batchCount = idx - batchStart;
+                SendToSteamUser(steamId, steamChannel, PacketType.DirectFallbackBatch, w =>
+                {
+                    w.Write(cmdNextSeq);
+                    w.Write(bulkNextSeq);
+                    w.Write((ushort)batchCount);
+                    for (int i = batchStart; i < idx; i++)
+                    {
+                        var m = msgs[i];
+                        w.Write(m.MsgId);
+                        w.Write((byte)m.Channel);
+                        w.Write((byte)m.Type);
+                        byte[] payload = m.Payload ?? Array.Empty<byte>();
+                        w.Write(payload.Length);
+                        if (payload.Length > 0) w.Write(payload);
+                    }
+                });
+            }
         }
 
         private void HandleDirectFallbackBatch(byte senderId, BinaryReader reader)
         {
+            uint remoteCmdNextSeq = reader.ReadUInt32();
+            uint remoteBulkNextSeq = reader.ReadUInt32();
+            _direct?.SyncRxExpectedSeq(senderId, remoteCmdNextSeq, remoteBulkNextSeq);
+
             ushort count = reader.ReadUInt16();
             for (int i = 0; i < count; i++)
             {

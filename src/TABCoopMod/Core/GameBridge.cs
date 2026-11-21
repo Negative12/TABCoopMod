@@ -1293,6 +1293,7 @@ namespace TABCoopMod.Core
                 var groups = _methodLevelStateGetSelectionGroups.Invoke(ls, null) as IList;
                 if (groups == null) return;
 
+                var filter = LocalEntityControlFilter;
                 int slotCount = Math.Min(savedGroups.Length, groups.Count);
                 int restoredTotal = 0;
                 for (int i = 0; i < slotCount; i++)
@@ -1307,9 +1308,15 @@ namespace TABCoopMod.Core
                     for (int j = 0; j < ids.Length; j++)
                     {
                         DXEntity ent = game.GetEntityByID(ids[j]);
-                        if (ent is ZXEntity zxEnt && !zxEnt.Disposed && !list.Contains(zxEnt))
+                        // Never reference internal ZXEntity directly at runtime (CLR 4.6 TypeAccessException);
+                        // check via TypeZXEntity reflection and enforce local ownership filter.
+                        if (ent != null && !ent.Disposed
+                            && (TypeZXEntity == null || TypeZXEntity.IsInstanceOfType(ent))
+                            && IsPlayerEntity(ent)
+                            && (filter == null || filter(ent))
+                            && !list.Contains(ent))
                         {
-                            list.Add(zxEnt);
+                            list.Add(ent);
                             restoredTotal++;
                         }
                     }
@@ -2737,6 +2744,9 @@ namespace TABCoopMod.Core
                     GameAssembly.GetType("ZX.Commands.Travel"),
                     GameAssembly.GetType("ZX.Commands.Patrol"),
                     GameAssembly.GetType("ZX.Commands.Chase"),
+                    GameAssembly.GetType("ZX.Commands.Attack"),
+                    GameAssembly.GetType("ZX.Commands.Stop"),
+                    GameAssembly.GetType("ZX.Commands.Hold"),
                     GameAssembly.GetType("ZX.Commands.UseItem_Grenade")
                 };
             }

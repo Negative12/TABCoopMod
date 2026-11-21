@@ -214,8 +214,10 @@ namespace TABCoopMod.Patches
             if (!TABCoopMod.Sync.FactionOwnershipTracker.CanPlayerControl(CommandInterceptor.LocalPlayerId, executor))
                 return false;
 
-            // If this is the per-unit Travel/Patrol follow-up loop right after #=zQp2M56bpPd9jmiNkVA==, swallow it
-            if (CommandInterceptor.SuppressIndividualMoveExecution && GameBridge.IsGroupRoutedCommand(__instance))
+            // Swallow all per-unit CurrentCommand follow-up executions right after GroupMoveSelected
+            // (#=zQp2M56bpPd9jmiNkVA==), regardless of whether the unit's prior command was Travel,
+            // Stop, Hold, or Attack (otherwise Attack-Move from idle re-emits Stop in the same tick).
+            if (CommandInterceptor.SuppressIndividualMoveExecution)
                 return false;
 
             bool isShift = DXInputState.Current?.IsKeyPressed(DXKeys.Shift, false) ?? false;
