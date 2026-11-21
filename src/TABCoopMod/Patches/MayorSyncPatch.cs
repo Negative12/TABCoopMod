@@ -152,6 +152,9 @@ namespace TABCoopMod.Patches
             }
             if (__state && LockstepClock.IsDeterministicModeActive)
             {
+                GameBridge.SetZeroFeeMayorActive(
+                    TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive
+                    && (!TABCoopMod.Sync.FactionContextManager.IsInitialized || !TABCoopMod.Sync.FactionContextManager.ZeroTransferFeeActive));
                 int mayorLevel = Math.Min(4, Math.Max(1, GameBridge.GetLevelCollectionCount("MayorStates") + 1));
                 LockstepClock.ReseedLevelRandomForMayorSelection(mayorLevel);
             }

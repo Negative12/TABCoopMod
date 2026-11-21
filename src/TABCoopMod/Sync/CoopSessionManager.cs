@@ -59,6 +59,10 @@ namespace TABCoopMod.Sync
         public static int CurrentSessionSeed { get; private set; } = SyncSeed;
         public static LobbyRoomPhase RoomPhase { get; private set; } = LobbyRoomPhase.Idle;
         public static CoopBalancePreset BalancePreset { get; private set; } = CoopBalancePreset.Balanced;
+        public static CoopGameMode GameMode { get; private set; } = CoopGameMode.Archon;
+        public static MultiFactionDefeatRule DefeatRule { get; private set; } = MultiFactionDefeatRule.AllBasesLost;
+        public static MultiFactionSpawnMode SpawnMode { get; private set; } = MultiFactionSpawnMode.Separated;
+        public static bool IsMultiFactionActive => IsSessionActive && GameMode == CoopGameMode.MultiFaction;
         public static string HostActionHint { get; private set; } = string.Empty;
         public static bool ShouldOpenLobbyOnMainMenu { get; set; }
 
@@ -165,6 +169,8 @@ namespace TABCoopMod.Sync
 
         private static readonly List<NetCommand> _localOutgoingQueue = new List<NetCommand>();
         private static readonly List<NetCommand> _hostTurnBuffer = new List<NetCommand>();
+        private static readonly SortedDictionary<int, List<NetCommand>> _hostSymmetricQueue =
+            new SortedDictionary<int, List<NetCommand>>();
 
         // True network lockstep: Host stamps every command with TargetSimTick = simTick + InputDelayTicks
         // and broadcasts a heartbeat for EVERY tick (even empty), so all peers execute the same
@@ -474,6 +480,7 @@ namespace TABCoopMod.Sync
             _peerLastSimTick.Clear();
             _peerLastSimTickWallMs.Clear();
             CommandInterceptor.ClearPendingLocalBuilds();
+            PauseSyncController.CancelCountdown();
             Patches.MayorSyncPatch.ResetTracking();
         }
 
@@ -594,6 +601,69 @@ namespace TABCoopMod.Sync
                 : CoopBalancePreset.Balanced);
         }
 
+        public static void SetGameMode(CoopGameMode mode)
+        {
+            if (!IsSessionActive || !Transport.IsHost) return;
+            if (GameMode == mode) return;
+            GameMode = mode;
+            ModLogger.Info($"[CoopSessionManager] GameMode changed to {mode}.");
+            BroadcastLobbyRoster();
+            LobbyStateChanged?.Invoke();
+        }
+
+        public static void ToggleGameMode()
+        {
+            if (!IsSessionActive || !Transport.IsHost) return;
+            SetGameMode(GameMode == CoopGameMode.Archon ? CoopGameMode.MultiFaction : CoopGameMode.Archon);
+        }
+
+        public static void SetDefeatRule(MultiFactionDefeatRule rule)
+        {
+            if (!IsSessionActive || !Transport.IsHost) return;
+            if (DefeatRule == rule) return;
+            DefeatRule = rule;
+            ModLogger.Info($"[CoopSessionManager] DefeatRule changed to {rule}.");
+            BroadcastLobbyRoster();
+            LobbyStateChanged?.Invoke();
+        }
+
+        public static void ToggleDefeatRule()
+        {
+            if (!IsSessionActive || !Transport.IsHost) return;
+            SetDefeatRule(DefeatRule == MultiFactionDefeatRule.AllBasesLost
+                ? MultiFactionDefeatRule.AnyBaseLost
+                : MultiFactionDefeatRule.AllBasesLost);
+        }
+
+        internal static void ApplySyncedMultiFactionSettings(CoopGameMode mode, MultiFactionDefeatRule defeatRule)
+        {
+            GameMode = mode;
+            DefeatRule = defeatRule;
+        }
+
+        public static void SetSpawnMode(MultiFactionSpawnMode mode)
+        {
+            if (!IsSessionActive || !Transport.IsHost) return;
+            if (SpawnMode == mode) return;
+            SpawnMode = mode;
+            ModLogger.Info($"[CoopSessionManager] SpawnMode changed to {mode}.");
+            BroadcastLobbyRoster();
+            LobbyStateChanged?.Invoke();
+        }
+
+        public static void ToggleSpawnMode()
+        {
+            if (!IsSessionActive || !Transport.IsHost) return;
+            SetSpawnMode(SpawnMode == MultiFactionSpawnMode.Separated
+                ? MultiFactionSpawnMode.Clustered
+                : MultiFactionSpawnMode.Separated);
+        }
+
+        internal static void ApplySyncedSpawnMode(MultiFactionSpawnMode mode)
+        {
+            SpawnMode = mode;
+        }
+
         private static ChaosConfig BuildLocalChaosConfig()
         {
             return new ChaosConfig
@@ -665,13 +735,18 @@ namespace TABCoopMod.Sync
                     w.Write(p.IsReady);
                 }
                 w.Write((byte)BalancePreset);
-                if (IsLocalLoopbackSession && !TestHarnessConfig.HasChaos)
+                bool hasChaos = IsLocalLoopbackSession && !TestHarnessConfig.HasChaos;
+                w.Write(hasChaos);
+                if (hasChaos)
                 {
                     w.Write(LocalChaosEnabled);
                     w.Write(LocalChaosLatencyMs);
                     w.Write(LocalChaosJitterMs);
                     w.Write((float)LocalChaosLossRate);
                 }
+                w.Write((byte)GameMode);
+                w.Write((byte)DefeatRule);
+                w.Write((byte)SpawnMode);
             });
         }
 
@@ -704,6 +779,10 @@ namespace TABCoopMod.Sync
             }
             RoomPhase = LobbyRoomPhase.InLobby;
             BalancePreset = CoopBalancePreset.Balanced;
+            GameMode = CoopGameMode.Archon;
+            DefeatRule = MultiFactionDefeatRule.AllBasesLost;
+            SpawnMode = MultiFactionSpawnMode.Separated;
+            FactionOwnershipTracker.Reset();
             HostActionHint = string.Empty;
 
             CommandInterceptor.LocalPlayerId = 1;
@@ -726,6 +805,10 @@ namespace TABCoopMod.Sync
 
             RoomPhase = LobbyRoomPhase.InLobby;
             BalancePreset = CoopBalancePreset.Balanced;
+            GameMode = CoopGameMode.Archon;
+            DefeatRule = MultiFactionDefeatRule.AllBasesLost;
+            SpawnMode = MultiFactionSpawnMode.Separated;
+            FactionOwnershipTracker.Reset();
             HostActionHint = string.Empty;
             CommandInterceptor.OnLocalCommandCaptured = OnLocalCommandCaptured;
             ModLogger.Info($"[CoopSessionManager] Joining Session at '{targetAddressOrSteamId}' (Mode={(useLoopback ? "LocalLoopback" : "SteamP2P")}).");
@@ -742,6 +825,10 @@ namespace TABCoopMod.Sync
             IsInSyncedLevel = false;
             RoomPhase = LobbyRoomPhase.Idle;
             BalancePreset = CoopBalancePreset.Balanced;
+            GameMode = CoopGameMode.Archon;
+            DefeatRule = MultiFactionDefeatRule.AllBasesLost;
+            SpawnMode = MultiFactionSpawnMode.Separated;
+            FactionOwnershipTracker.Reset();
             HostActionHint = string.Empty;
             HasVersionMismatch = false;
             VersionMismatchSummary = string.Empty;
@@ -757,7 +844,10 @@ namespace TABCoopMod.Sync
             AllyStates.Clear();
             _localOutgoingQueue.Clear();
             _hostTurnBuffer.Clear();
+            _hostSymmetricQueue.Clear();
             _pendingTurnCommands.Clear();
+            UI.MultiFactionPanel.Reset();
+            UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
             InputDelayTicks = MinInputDelayTicks;
@@ -836,7 +926,10 @@ namespace TABCoopMod.Sync
             AllyStates.Clear();
             _localOutgoingQueue.Clear();
             _hostTurnBuffer.Clear();
+            _hostSymmetricQueue.Clear();
             _pendingTurnCommands.Clear();
+            UI.MultiFactionPanel.Reset();
+            UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
             InputDelayTicks = MinInputDelayTicks;
@@ -857,6 +950,7 @@ namespace TABCoopMod.Sync
             _clientSnapshotAckReceived = false;
             _hasEnteredSyncedLevelInMatch = false;
             _pendingResyncSelectionGroups = null;
+            FactionOwnershipTracker.Reset();
             _pendingHostSnapshotExport = false;
             _pendingClientSnapshotLoadPath = null;
             _pendingBroadcastSavBytes = null;
@@ -1111,6 +1205,17 @@ namespace TABCoopMod.Sync
                 string savPath = Path.Combine(savesDir, tempBaseName + ".zxsav");
                 string chkPath = Path.Combine(savesDir, tempBaseName + ".zxcheck");
 
+                if (IsMultiFactionActive)
+                {
+                    if (!FactionOwnershipTracker.IsInitialized)
+                    {
+                        int pCount = Math.Max(1, GetEffectivePeers().Count);
+                        FactionOwnershipTracker.EnsureExtraCommandCentersInLiveLevel(pCount);
+                        FactionOwnershipTracker.AssignInitialOwnershipFromLevel(pCount);
+                    }
+                    FactionOwnershipTracker.SaveToLevelScriptVariables();
+                }
+
                 ModLogger.Info($"[CoopSessionManager] Exporting Host snapshot to {savPath}...");
                 GameBridge.WriteSaveFile(savPath);
 
@@ -1308,6 +1413,7 @@ namespace TABCoopMod.Sync
             if (!IsSessionActive) return;
 
             _pendingTurnCommands.Clear();
+            _hostSymmetricQueue.Clear();
             CommandInterceptor.ClearPendingLocalBuilds();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
@@ -1322,6 +1428,7 @@ namespace TABCoopMod.Sync
             _networkGate.MarkReady(cur + initialDelay);
             _hostLastBroadcastSimTick = cur;
             _hostLastBroadcastTargetTick = cur + initialDelay;
+            bool isFirstEntry = !_hasEnteredSyncedLevelInMatch;
             _hasEnteredSyncedLevelInMatch = true;
             IsInSyncedLevel = true;
             CommandInterceptor.IsInterceptionEnabled = true;
@@ -1352,6 +1459,23 @@ namespace TABCoopMod.Sync
             }
             GameBridge.ClearWaitCursor();
             GameBridge.ClearLoadingFadeOverlay();
+
+            if (IsMultiFactionActive)
+            {
+                FactionOwnershipTracker.InstallControlFilterIfNeeded();
+                if (isFirstEntry)
+                {
+                    FactionOwnershipTracker.CenterLocalCameraOnOwnBase(selectCc: true);
+                }
+                else
+                {
+                    var myCc = FactionOwnershipTracker.GetPrimaryCommandCenterForPlayer(CommandInterceptor.LocalPlayerId);
+                    if (myCc != null)
+                        GameBridge.SetLevelSysCurrentCommandCenter(myCc);
+                }
+                if (FactionContextManager.IsInitialized)
+                    FactionContextManager.RecalculateAllFactions();
+            }
 
             ModLogger.Info($"[CoopSessionManager] Entered synced level at tick {cur} (inputDelay={InputDelayTicks}, role={(Transport.IsHost ? "Host" : "Client")}).");
         }
@@ -1612,6 +1736,7 @@ namespace TABCoopMod.Sync
                 if (DXGame.Current != null) DXGame.Current.InputEnabled = false;
                 if (_hostSnapshotReloadPending && _hostWaitingOwnReload)
                 {
+                    FactionOwnershipTracker.TryLoadFromLevelScriptVariables();
                     RestoreLocalControlGroupsAfterMidGameReload();
                     _hostWaitingOwnReload = false;
                     ModLogger.InfoImmediate($"[CoopSessionManager] Host symmetric snapshot reload finished at tick={DXGame.Current?.IAIterationInt ?? 0} (clientAck={_clientSnapshotAckReceived}).");
@@ -1663,6 +1788,7 @@ namespace TABCoopMod.Sync
             if (!_awaitingSnapshotLoad) return;
 
             _awaitingSnapshotLoad = false;
+            FactionOwnershipTracker.TryLoadFromLevelScriptVariables();
             RestoreLocalControlGroupsAfterMidGameReload();
             IsInSyncedLevel = false;
             LockstepClock.SetSessionPause(true);
@@ -1732,6 +1858,8 @@ namespace TABCoopMod.Sync
             }
 
             CoopLobbyWindow.Tick();
+            UI.MultiFactionPanel.Tick();
+            UI.AllyOverlayRenderer.UpdateUnitFactionRings();
 
             if (!string.IsNullOrEmpty(_pendingVersionMismatchAlert)
                 && !TestHarnessConfig.Enabled
@@ -1993,13 +2121,45 @@ namespace TABCoopMod.Sync
             if (toSend != null)
             {
                 int clientTick = DXGame.Current?.IAIterationInt ?? 0;
-                Transport.SendToPeer(1, SendChannel.ReliableCommand, PacketType.ClientInputReport, w =>
+                if (IsMultiFactionActive)
                 {
-                    w.Write((ushort)toSend.Count);
-                    foreach (var c in toSend) c.WriteTo(w);
-                    w.Write(clientTick);
-                });
+                    int symDelay = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, InputDelayTicks));
+                    int readyFloor = _networkGate != null ? _networkGate.ReadyThrough + 1 : clientTick + symDelay;
+                    int symTick = Math.Max(clientTick + symDelay, readyFloor);
+                    foreach (var c in toSend)
+                    {
+                        if (c.TargetSimTick < symTick)
+                            c.TargetSimTick = symTick;
+                    }
+                    Transport.SendToPeer(1, SendChannel.ReliableCommand, PacketType.SymmetricTurnInput, w =>
+                    {
+                        w.Write((ushort)toSend.Count);
+                        foreach (var c in toSend) c.WriteTo(w);
+                        w.Write(clientTick);
+                    });
+                }
+                else
+                {
+                    Transport.SendToPeer(1, SendChannel.ReliableCommand, PacketType.ClientInputReport, w =>
+                    {
+                        w.Write((ushort)toSend.Count);
+                        foreach (var c in toSend) c.WriteTo(w);
+                        w.Write(clientTick);
+                    });
+                }
             }
+        }
+
+        private static int CompareSymmetricTurnCommand(NetCommand a, NetCommand b)
+        {
+            if (ReferenceEquals(a, b)) return 0;
+            if (a == null) return -1;
+            if (b == null) return 1;
+            int t = a.TargetSimTick.CompareTo(b.TargetSimTick);
+            if (t != 0) return t;
+            int p = a.PlayerId.CompareTo(b.PlayerId);
+            if (p != 0) return p;
+            return a.TraceId.CompareTo(b.TraceId);
         }
 
         private static void EmitHostTurns(int cur)
@@ -2012,6 +2172,10 @@ namespace TABCoopMod.Sync
             bool paused = LockstepClock.PausedBySession || (DXGame.Current != null && DXGame.Current.Paused);
             bool hasTurn = false;
             lock (_hostTurnBuffer) hasTurn = _hostTurnBuffer.Count > 0;
+            if (!hasTurn && IsMultiFactionActive)
+            {
+                lock (_hostSymmetricQueue) hasTurn = _hostSymmetricQueue.Count > 0;
+            }
             if (paused)
             {
                 if (!hasTurn) return;
@@ -2061,14 +2225,40 @@ namespace TABCoopMod.Sync
                 }
             }
 
+            if (IsMultiFactionActive)
+            {
+                lock (_hostSymmetricQueue)
+                {
+                    if (_hostSymmetricQueue.Count > 0)
+                    {
+                        var dueKeys = new List<int>();
+                        foreach (var kv in _hostSymmetricQueue)
+                        {
+                            if (kv.Key <= targetTick)
+                            {
+                                (turnCmds ?? (turnCmds = new List<NetCommand>())).AddRange(kv.Value);
+                                dueKeys.Add(kv.Key);
+                            }
+                        }
+                        for (int i = 0; i < dueKeys.Count; i++)
+                            _hostSymmetricQueue.Remove(dueKeys[i]);
+                    }
+                }
+            }
+
             if (turnCmds != null)
             {
                 foreach (var c in turnCmds) c.TargetSimTick = targetTick;
+                if (IsMultiFactionActive && turnCmds.Count > 1)
+                    turnCmds.Sort(CompareSymmetricTurnCommand);
+
                 lock (_pendingTurnCommands)
                 {
                     if (!_pendingTurnCommands.TryGetValue(targetTick, out var slot))
                         _pendingTurnCommands[targetTick] = slot = new List<NetCommand>();
                     slot.AddRange(turnCmds);
+                    if (IsMultiFactionActive && slot.Count > 1)
+                        slot.Sort(CompareSymmetricTurnCommand);
                 }
             }
 
@@ -2411,20 +2601,36 @@ namespace TABCoopMod.Sync
                     {
                         BalancePreset = (CoopBalancePreset)r.ReadByte();
                     }
-                    if (r.BaseStream.Position + 13 <= r.BaseStream.Length && !TestHarnessConfig.HasChaos && IsLocalLoopbackSession)
+                    if (r.BaseStream.Position < r.BaseStream.Length)
                     {
-                        bool chaosOn = r.ReadBoolean();
-                        int lat = r.ReadInt32();
-                        int jit = r.ReadInt32();
-                        float loss = r.ReadSingle();
-                        LocalChaosEnabled = chaosOn;
-                        LocalChaosLatencyMs = Math.Max(0, Math.Min(500, lat));
-                        LocalChaosJitterMs = Math.Max(0, Math.Min(300, jit));
-                        LocalChaosLossRate = Math.Round(Math.Max(0.0, Math.Min(0.30, (double)loss)), 3);
-                        if (Transport is ChaosTransport chaos)
+                        bool hasChaos = r.ReadBoolean();
+                        if (hasChaos && r.BaseStream.Position + 13 <= r.BaseStream.Length)
                         {
-                            chaos.UpdateConfig(BuildLocalChaosConfig());
+                            bool chaosOn = r.ReadBoolean();
+                            int lat = r.ReadInt32();
+                            int jit = r.ReadInt32();
+                            float loss = r.ReadSingle();
+                            if (!TestHarnessConfig.HasChaos && IsLocalLoopbackSession)
+                            {
+                                LocalChaosEnabled = chaosOn;
+                                LocalChaosLatencyMs = Math.Max(0, Math.Min(500, lat));
+                                LocalChaosJitterMs = Math.Max(0, Math.Min(300, jit));
+                                LocalChaosLossRate = Math.Round(Math.Max(0.0, Math.Min(0.30, (double)loss)), 3);
+                                if (Transport is ChaosTransport chaos)
+                                {
+                                    chaos.UpdateConfig(BuildLocalChaosConfig());
+                                }
+                            }
                         }
+                    }
+                    if (r.BaseStream.Position + 2 <= r.BaseStream.Length)
+                    {
+                        GameMode = (CoopGameMode)r.ReadByte();
+                        DefeatRule = (MultiFactionDefeatRule)r.ReadByte();
+                    }
+                    if (r.BaseStream.Position + 1 <= r.BaseStream.Length)
+                    {
+                        SpawnMode = (MultiFactionSpawnMode)r.ReadByte();
                     }
                     Transport.SyncPeers(_lobbyRoster);
                     LobbyStateChanged?.Invoke();
@@ -2521,6 +2727,33 @@ namespace TABCoopMod.Sync
                     break;
                 }
 
+                case PacketType.SymmetricTurnInput:
+                {
+                    if (!Transport.IsHost) break;
+                    ushort count = r.ReadUInt16();
+                    int curSim = DXGame.Current?.IAIterationInt ?? 0;
+                    int minSafeTick = Math.Max(_hostLastBroadcastTargetTick + 1, curSim + 1);
+                    lock (_hostSymmetricQueue)
+                    {
+                        for (int i = 0; i < count; i++)
+                        {
+                            var cmd = NetCommand.ReadFrom(r);
+                            cmd.PlayerId = senderId;
+                            int safeTick = Math.Max(cmd.TargetSimTick, minSafeTick);
+                            cmd.TargetSimTick = safeTick;
+                            if (!_hostSymmetricQueue.TryGetValue(safeTick, out var bucket))
+                                _hostSymmetricQueue[safeTick] = bucket = new List<NetCommand>();
+                            bucket.Add(cmd);
+                        }
+                    }
+                    if (r.BaseStream.Position + 4 <= r.BaseStream.Length)
+                    {
+                        int clientTick = r.ReadInt32();
+                        UpdatePeerSimTick(senderId, clientTick);
+                    }
+                    break;
+                }
+
                 case PacketType.ClientInputReport:
                 {
                     if (!Transport.IsHost) break;
@@ -2561,6 +2794,8 @@ namespace TABCoopMod.Sync
                             if (!_pendingTurnCommands.TryGetValue(targetTick, out var slot))
                                 _pendingTurnCommands[targetTick] = slot = new List<NetCommand>();
                             slot.AddRange(cmds);
+                            if (IsMultiFactionActive && slot.Count > 1)
+                                slot.Sort(CompareSymmetricTurnCommand);
                         }
                     }
 
@@ -4486,6 +4721,12 @@ namespace TABCoopMod.Sync
             try
             {
                 CaptureLocalControlGroupsForMidGameReload();
+                if (_pendingResyncSelectionGroups == null)
+                {
+                    // Initial join or reconnect from main menu: clear all 9 control-group slots
+                    // so Host control groups baked into coop_host_snapshot.zxsav are never inherited.
+                    _pendingResyncSelectionGroups = new ulong[9][];
+                }
                 IsInSyncedLevel = false;
                 LockstepClock.SetSessionPause(true);
                 if (DXGame.Current != null) DXGame.Current.InputEnabled = false;
@@ -4521,11 +4762,19 @@ namespace TABCoopMod.Sync
         /// level. LoadGameAndEnter gates the real load behind a DXAnimation chain that never runs if
         /// the background window's scene does not advance it.
         /// </summary>
+        public static void NotifyExternalLoadStarted()
+        {
+            _kickingLoadFade = true;
+            _loadFadeKickFrames = 0;
+            _loadFadeKickStartTicks = -1.0;
+        }
+
         private static void TickLoadingFade()
         {
             if (!_kickingLoadFade) return;
 
-            if (!_awaitingSnapshotLoad && !_hostWaitingOwnReload && !LockstepClock.LoadingLevel)
+            if (!_awaitingSnapshotLoad && !_hostWaitingOwnReload && !LockstepClock.LoadingLevel
+                && !GameBridge.IsGameLoading() && !GameBridge.IsLoadingFadeInScene())
             {
                 _kickingLoadFade = false;
                 return;

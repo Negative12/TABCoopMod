@@ -59,6 +59,17 @@ namespace TABCoopMod.Patches
             [HarmonyPrefix]
             public static bool Prefix(DXKeys __0, ref bool __result)
             {
+                if (__0 == DXKeys.F7
+                    && CoopSessionManager.IsMultiFactionActive
+                    && CoopSessionManager.IsInSyncedLevel
+                    && !LockstepClock.LoadingLevel
+                    && !DXModalScreen.IsInModal)
+                {
+                    UI.MultiFactionPanel.Toggle();
+                    __result = true;
+                    return false;
+                }
+
                 // Always query the active vanilla layout (Standard/WASD/Custom) instead of
                 // hardcoding Space, so custom Pause bindings work and rebound Space is not hijacked.
                 if (!GameBridge.IsKeyBoundToCommand(__0, ZXKeyboardCommand.Pause, DXKeys.Space)) return true;

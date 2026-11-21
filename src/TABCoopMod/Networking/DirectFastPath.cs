@@ -139,6 +139,10 @@ namespace TABCoopMod.Networking
             public CandidateProbeState ActiveCandidate;
             public long LastAnyPacketRecvTs;
             public long LastDataProgressTs;
+            public long ActivatedTs;
+            public long FallbackCooldownUntilTs;
+            public int ConsecutiveDataStalls;
+            public bool CircuitBroken;
             public bool VerifiedBidirectional;
             public bool TxEnabled;
             public bool CutoverSignaled;
@@ -357,6 +361,7 @@ namespace TABCoopMod.Networking
                             {
                                 long nowTs = Stopwatch.GetTimestamp();
                                 peer.TxEnabled = true;
+                                peer.ActivatedTs = nowTs;
                                 peer.LastAnyPacketRecvTs = nowTs;
                                 peer.LastDataProgressTs = nowTs;
                                 ModLogger.Info($"[DirectFastPath] Direct Fast-Path ACTIVATED for P{peerPlayerId} via {peer.ActiveCandidate.Candidate} (RTT={peer.ActiveCandidate.SmoothedRttMs:F1}ms)!");
@@ -366,6 +371,58 @@ namespace TABCoopMod.Networking
                 }
             }
             _pumpWake.Set();
+        }
+
+        public void GetTxNextSeqs(byte peerPlayerId, out uint cmdNextSeq, out uint bulkNextSeq)
+        {
+            cmdNextSeq = 1;
+            bulkNextSeq = 1;
+            PeerDirectState peer;
+            lock (_stateLock)
+            {
+                if (!_peers.TryGetValue(peerPlayerId, out peer)) return;
+            }
+            lock (peer.Sync)
+            {
+                cmdNextSeq = peer.CmdTx.NextSeq;
+                bulkNextSeq = peer.BulkTx.NextSeq;
+            }
+        }
+
+        public void SyncRxExpectedSeq(byte peerPlayerId, uint cmdExpectedSeq, uint bulkExpectedSeq)
+        {
+            PeerDirectState peer;
+            lock (_stateLock)
+            {
+                if (!_peers.TryGetValue(peerPlayerId, out peer)) return;
+            }
+            lock (peer.Sync)
+            {
+                AdvanceRxExpectedSeq(peer.CmdRx, cmdExpectedSeq);
+                AdvanceRxExpectedSeq(peer.BulkRx, bulkExpectedSeq);
+            }
+            _pumpWake.Set();
+        }
+
+        private static void AdvanceRxExpectedSeq(ChannelRxState rx, uint targetExpectedSeq)
+        {
+            if (targetExpectedSeq <= rx.ExpectedSeq) return;
+            rx.ExpectedSeq = targetExpectedSeq;
+            rx.SackMask = 0;
+            rx.AssemblingMsg.SetLength(0);
+            rx.IsAssembling = false;
+            if (rx.Buffered.Count > 0)
+            {
+                var stale = new List<uint>();
+                foreach (var seq in rx.Buffered.Keys)
+                {
+                    if (seq < targetExpectedSeq) stale.Add(seq);
+                    else break;
+                }
+                for (int i = 0; i < stale.Count; i++)
+                    rx.Buffered.Remove(stale[i]);
+            }
+            rx.AckDirty = true;
         }
 
         public bool TrySendPacket(byte targetPlayerId, SendChannel channel, PacketType type, byte[] payload)
@@ -1096,7 +1153,14 @@ namespace TABCoopMod.Networking
                     bool progBulk = ApplyAckToTx(peer.BulkTx, bulkAck, bulkSack);
                     bool progCmd = ApplyAckToTx(peer.CmdTx, cmdAck, cmdSack);
                     if (progBulk || progCmd)
+                    {
                         peer.LastDataProgressTs = nowTs;
+                        if (peer.ConsecutiveDataStalls > 0 && peer.ActivatedTs > 0
+                            && (nowTs - peer.ActivatedTs) * 1000.0 / Stopwatch.Frequency >= 20000.0)
+                        {
+                            peer.ConsecutiveDataStalls = 0;
+                        }
+                    }
                     needWake = true;
                 }
                 else if (kind == KindCommand || kind == KindBulk)
@@ -1117,7 +1181,14 @@ namespace TABCoopMod.Networking
                         ? ApplyAckToTx(peer.CmdTx, peerAckBase, peerSackMask)
                         : ApplyAckToTx(peer.BulkTx, peerAckBase, peerSackMask);
                     if (prog)
+                    {
                         peer.LastDataProgressTs = nowTs;
+                        if (peer.ConsecutiveDataStalls > 0 && peer.ActivatedTs > 0
+                            && (nowTs - peer.ActivatedTs) * 1000.0 / Stopwatch.Frequency >= 20000.0)
+                        {
+                            peer.ConsecutiveDataStalls = 0;
+                        }
+                    }
 
                     var rx = kind == KindCommand ? peer.CmdRx : peer.BulkRx;
                     var chunkBytes = new byte[plen];
@@ -1181,7 +1252,9 @@ namespace TABCoopMod.Networking
                     if (best != null)
                         peer.ActiveCandidate = best;
 
-                    if (!peer.TxEnabled && !peer.CutoverSignaled && peer.ActiveCandidate != null && match.PongCount >= 1)
+                    if (!peer.TxEnabled && !peer.CutoverSignaled && !peer.CircuitBroken
+                        && nowTs >= peer.FallbackCooldownUntilTs
+                        && peer.ActiveCandidate != null && match.PongCount >= 1)
                     {
                         peer.CutoverSignaled = true;
                         triggerCutover = true;
@@ -1357,7 +1430,7 @@ namespace TABCoopMod.Networking
                     lock (peer.Sync)
                     {
                         // 1. Send discovery/keepalive probes
-                        if (_sessionToken != 0 && peer.Candidates.Count > 0)
+                        if (_sessionToken != 0 && !peer.CircuitBroken && peer.Candidates.Count > 0)
                         {
                             double interval = peer.TxEnabled ? KeepaliveHeartbeatMs : DiscoveryProbeIntervalMs;
                             for (int c = 0; c < peer.Candidates.Count; c++)
@@ -1393,9 +1466,21 @@ namespace TABCoopMod.Networking
                                 string reason = silentMs >= DirectTimeoutMs
                                     ? $"path timeout ({silentMs:F0}ms silent)"
                                     : $"data channel stalled ({dataStallMs:F0}ms unacked, cmdFly={peer.CmdTx.InFlight.Count}, bulkFly={peer.BulkTx.InFlight.Count})";
-                                ModLogger.Warn($"[DirectFastPath] Direct {reason} for P{peer.PlayerId}; falling back cleanly to Steam P2P.");
+                                peer.ConsecutiveDataStalls++;
+                                if (peer.ConsecutiveDataStalls >= 3)
+                                {
+                                    peer.CircuitBroken = true;
+                                    ModLogger.Warn($"[DirectFastPath] Direct {reason} for P{peer.PlayerId} (#{peer.ConsecutiveDataStalls}); tripping circuit-breaker for this session (staying on Steam P2P).");
+                                }
+                                else
+                                {
+                                    double cooldownSec = peer.ConsecutiveDataStalls == 1 ? 10.0 : 30.0;
+                                    peer.FallbackCooldownUntilTs = nowTs + (long)(cooldownSec * Stopwatch.Frequency);
+                                    ModLogger.Warn($"[DirectFastPath] Direct {reason} for P{peer.PlayerId} (#{peer.ConsecutiveDataStalls}); falling back cleanly to Steam P2P (cooldown {cooldownSec:F0}s).");
+                                }
                                 peer.TxEnabled = false;
                                 peer.CutoverSignaled = false;
+                                peer.CutoverAckedByPeer = false;
                                 peer.VerifiedBidirectional = false;
                                 peer.ActiveCandidate = null;
 
@@ -1444,8 +1529,10 @@ namespace TABCoopMod.Networking
             }
             peer.CmdTx.InFlight.Clear();
             peer.CmdTx.PendingChunks.Clear();
+            peer.CmdTx.AckBase = peer.CmdTx.NextSeq > 0 ? peer.CmdTx.NextSeq - 1 : 0;
             peer.BulkTx.InFlight.Clear();
             peer.BulkTx.PendingChunks.Clear();
+            peer.BulkTx.AckBase = peer.BulkTx.NextSeq > 0 ? peer.BulkTx.NextSeq - 1 : 0;
             return list;
         }
 

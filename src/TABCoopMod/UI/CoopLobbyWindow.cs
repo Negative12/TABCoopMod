@@ -118,7 +118,10 @@ namespace TABCoopMod.UI
         private static DXButton _btnHostLoadSave;
         private static DXButton _btnHostNewSurvival;
         private static DXButton _btnHostCustomMap;
-        private static DXButton _btnBalancePreset;
+        private static CompactLobbyButton _btnBalancePreset;
+        private static CompactLobbyButton _btnGameMode;
+        private static CompactLobbyButton _btnDefeatRule;
+        private static CompactLobbyButton _btnSpawnMode;
         private static DXButton _btnDisbandRoom;
         private static DXButton _btnClientReady;
         private static DXTextObject _clientHintText;
@@ -169,6 +172,18 @@ namespace TABCoopMod.UI
                     CoopSessionManager.ToggleBalancePreset();
                     RefreshUI();
                     return true;
+                case "toggle_game_mode":
+                    CoopSessionManager.ToggleGameMode();
+                    RefreshUI();
+                    return true;
+                case "toggle_defeat_rule":
+                    CoopSessionManager.ToggleDefeatRule();
+                    RefreshUI();
+                    return true;
+                case "toggle_spawn_mode":
+                    CoopSessionManager.ToggleSpawnMode();
+                    RefreshUI();
+                    return true;
                 case "toggle_chaos":
                     CoopSessionManager.ToggleLocalChaosEnabled();
                     RefreshUI();
@@ -203,7 +218,7 @@ namespace TABCoopMod.UI
                 _noModalSinceTicks = -1.0;
                 _entryStatusMessage = string.Empty;
 
-                var win = GameBridge.CreateZXWindow($"多人合作等候大厅 {ModInfo.Tag} — 执政官模式", bigWindow: true);
+                var win = GameBridge.CreateZXWindow($"多人合作等候大厅 {ModInfo.Tag}", bigWindow: true);
                 if (win == null)
                 {
                     ModLogger.Error("[CoopLobbyWindow] CreateZXWindow returned null.");
@@ -604,13 +619,43 @@ namespace TABCoopMod.UI
             });
             _roomView.AddObject(_btnHostCustomMap);
 
-            ry += _btnHostCustomMap.Height + gapY;
-            _btnBalancePreset = CreateNativeButton("新局预设: 联机均衡", rightX, ry, -30, () =>
-            {
-                CoopSessionManager.ToggleBalancePreset();
-                RefreshUI();
-            }, smallFont: true);
+            float compactW = _btnHostCustomMap.Width > 40f ? _btnHostCustomMap.Width : rightW;
+            float compactH = 25f * u;
+            ry += _btnHostCustomMap.Height + 2f * u;
+            _btnBalancePreset = CreateCompactButton("新局预设: 联机均衡", rightX, ry, compactW, compactH, 9.5f * u,
+                Color.FromArgb(220, 26, 48, 36), BorderGoldColor, Color.WhiteSmoke, () =>
+                {
+                    CoopSessionManager.ToggleBalancePreset();
+                    RefreshUI();
+                });
             _roomView.AddObject(_btnBalancePreset);
+
+            ry += compactH + 4f * u;
+            _btnGameMode = CreateCompactButton("模式: 执政官共控", rightX, ry, compactW, compactH, 9.5f * u,
+                Color.FromArgb(220, 26, 36, 48), BorderGoldColor, Color.Khaki, () =>
+                {
+                    CoopSessionManager.ToggleGameMode();
+                    RefreshUI();
+                });
+            _roomView.AddObject(_btnGameMode);
+
+            ry += compactH + 4f * u;
+            _btnDefeatRule = CreateCompactButton("败北: 流亡交接", rightX, ry, compactW, compactH, 9.5f * u,
+                Color.FromArgb(220, 28, 34, 42), BorderDimColor, Color.Silver, () =>
+                {
+                    CoopSessionManager.ToggleDefeatRule();
+                    RefreshUI();
+                });
+            _roomView.AddObject(_btnDefeatRule);
+
+            ry += compactH + 4f * u;
+            _btnSpawnMode = CreateCompactButton("出生: 分离分城", rightX, ry, compactW, compactH, 9.5f * u,
+                Color.FromArgb(220, 24, 44, 52), Color.Cyan, Color.WhiteSmoke, () =>
+                {
+                    CoopSessionManager.ToggleSpawnMode();
+                    RefreshUI();
+                });
+            _roomView.AddObject(_btnSpawnMode);
 
             float leaveY = bodyH - _btnInviteSteam.Height - 4f * u;
             _btnDisbandRoom = CreateNativeButton("解散房间", rightX, leaveY, -120, LeaveOrDisbandClicked);
@@ -785,7 +830,9 @@ namespace TABCoopMod.UI
             byte localId = CoopSessionManager.Transport.LocalPlayerId;
             var peers = CoopSessionManager.GetEffectivePeers();
 
-            SetDynamicText(_rosterHeaderText, $"房间成员 ({peers.Count} / 3) — 执政官共控模式");
+            bool isMultiFaction = CoopSessionManager.GameMode == CoopGameMode.MultiFaction;
+            string modeTitle = isMultiFaction ? "独立基地合作 (M4)" : "执政官共控模式";
+            SetDynamicText(_rosterHeaderText, $"房间成员 ({peers.Count} / 3) — {modeTitle}");
 
             for (int i = 0; i < 3; i++)
             {
@@ -838,6 +885,9 @@ namespace TABCoopMod.UI
             _btnHostNewSurvival.Visible = isHost;
             _btnHostCustomMap.Visible = isHost;
             _btnBalancePreset.Visible = isHost;
+            _btnGameMode.Visible = isHost;
+            _btnDefeatRule.Visible = isHost && isMultiFaction;
+            _btnSpawnMode.Visible = isHost && isMultiFaction;
             _btnDisbandRoom.Visible = isHost;
 
             _btnClientReady.Visible = !isHost;
@@ -867,8 +917,59 @@ namespace TABCoopMod.UI
                 GameBridge.SetZXButtonSteamHue(_btnHostLoadSave, (canStart && hasSaves) ? -30 : 0);
                 GameBridge.SetZXButtonSteamHue(_btnHostNewSurvival, canStart ? -30 : 0);
                 GameBridge.SetZXButtonSteamHue(_btnHostCustomMap, canStart ? -30 : 0);
-                GameBridge.SetZXButtonSteamText(_btnBalancePreset, isBalanced ? "新局预设: 联机均衡" : "新局预设: 原版纯净");
-                GameBridge.SetZXButtonSteamHue(_btnBalancePreset, isBalanced ? -30 : 0);
+                if (isBalanced)
+                {
+                    SetCompactButtonStyle(_btnBalancePreset, "新局预设: 联机均衡",
+                        Color.FromArgb(220, 24, 56, 42), Color.FromArgb(240, 34, 76, 56),
+                        BorderGoldColor, Color.Gold, Color.WhiteSmoke);
+                }
+                else
+                {
+                    SetCompactButtonStyle(_btnBalancePreset, "新局预设: 原版纯净",
+                        Color.FromArgb(220, 32, 38, 46), Color.FromArgb(235, 48, 56, 68),
+                        BorderDimColor, Color.Silver, Color.Silver);
+                }
+
+                if (isMultiFaction)
+                {
+                    SetCompactButtonStyle(_btnGameMode, "模式: 独立基地 (M4)",
+                        Color.FromArgb(220, 26, 68, 48), Color.FromArgb(240, 36, 92, 64),
+                        Color.SpringGreen, Color.LightGreen, Color.White);
+                }
+                else
+                {
+                    SetCompactButtonStyle(_btnGameMode, "模式: 执政官共控",
+                        Color.FromArgb(220, 26, 36, 48), Color.FromArgb(240, 38, 54, 72),
+                        BorderGoldColor, Color.Gold, Color.Khaki);
+                }
+
+                bool isAnyLost = CoopSessionManager.DefeatRule == MultiFactionDefeatRule.AnyBaseLost;
+                if (isAnyLost)
+                {
+                    SetCompactButtonStyle(_btnDefeatRule, "败北: 一损俱损 (任意沦陷即败)",
+                        Color.FromArgb(220, 96, 32, 24), Color.FromArgb(240, 128, 42, 32),
+                        Color.OrangeRed, Color.Orange, Color.White);
+                }
+                else
+                {
+                    SetCompactButtonStyle(_btnDefeatRule, "败北: 流亡交接 (全灭才败)",
+                        Color.FromArgb(220, 28, 42, 56), Color.FromArgb(240, 42, 62, 82),
+                        Color.DodgerBlue, Color.LightSkyBlue, Color.WhiteSmoke);
+                }
+
+                bool isClustered = CoopSessionManager.SpawnMode == MultiFactionSpawnMode.Clustered;
+                if (isClustered)
+                {
+                    SetCompactButtonStyle(_btnSpawnMode, "出生: 聚集联城 (18~24格并网)",
+                        Color.FromArgb(220, 48, 46, 22), Color.FromArgb(240, 72, 68, 32),
+                        Color.Gold, Color.Khaki, Color.White);
+                }
+                else
+                {
+                    SetCompactButtonStyle(_btnSpawnMode, "出生: 分离分城 (85~105格对称)",
+                        Color.FromArgb(220, 20, 48, 56), Color.FromArgb(240, 28, 70, 82),
+                        Color.Cyan, Color.LightCyan, Color.WhiteSmoke);
+                }
             }
             else
             {
@@ -880,10 +981,20 @@ namespace TABCoopMod.UI
                     !joined ? "正在连接房主..." : (ready ? "取消准备" : "进入准备状态"));
                 GameBridge.SetZXButtonSteamHue(_btnClientReady, ready ? 0 : -30);
 
+                string defeatDesc = CoopSessionManager.DefeatRule == MultiFactionDefeatRule.AnyBaseLost
+                    ? "一损俱损 (任意基地沦陷即败)"
+                    : "流亡交接 (全员基地沦陷才败)";
+                string spawnDesc = CoopSessionManager.SpawnMode == MultiFactionSpawnMode.Clustered
+                    ? "聚集联城 (18~24格并网)"
+                    : "分离分城 (85~105格对称)";
+                string modeDesc = isMultiFaction
+                    ? $"\n  合作模式: 独立基地 (M4)\n  出生布局: {spawnDesc}\n  败北规则: {defeatDesc}"
+                    : "\n  合作模式: 执政官共控";
+
                 SetDynamicText(_clientHintText, (CoopSessionManager.RoomPhase == LobbyRoomPhase.InGame
                     ? "  房主当前正在对局中，\n  等待房主返回大厅或同步重连。"
                     : "  点击上方按钮切换准备状态。\n  全员准备后房主即可选图或读档，\n  加载完毕后将自动同步并开始。")
-                    + $"\n\n  新生存预设: {presetDesc}\n  (读档与自定义地图始终保持原版)");
+                    + $"{modeDesc}\n  新生存预设: {presetDesc}");
             }
 
             RefreshLocalChaosPanel(isHost);

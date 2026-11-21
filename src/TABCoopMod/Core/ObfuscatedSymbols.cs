@@ -102,6 +102,7 @@ namespace TABCoopMod.Core
         public const string Method_LevelSys_InitLevel          = "#=zmTU4kueQctVr";
         /// <summary>Main-thread finish action of the async save loader (level fully restored incl. GameTime/entities).</summary>
         public const string Method_LevelSys_OnLevelLoadComplete = "#=zwK_pUIeRBpbp";
+        public const string Method_LevelSys_ShowWonderCompleted = "#=zt0ix_4G8xUnfVBHt8A==";
         public const string Method_LevelSys_OnSceneRightClick  = "#=zGxTz6vGn2dxDprCE7A==";
         public const string Method_LevelSys_OnSceneLeftClick   = "#=zX9V39sQYkQxr95dJ7A==";
         public const string Method_LevelSys_ExecutePendingCmd  = "#=zN0jTYBQMVgRf";
@@ -297,5 +298,118 @@ namespace TABCoopMod.Core
         public const string Method_Building_RecalcResources    = "#=z3rO8Jok=";
         public const string Method_Structure_UpdateEnabled     = "#=zUBPru1Ew_PxN";
         public const string Method_LevelState_RecordEntityCreated = "#=zw0DWH2yCwj1E";
+
+        // ====================================================================
+        // 19. Phase 4 M1 Multi-Faction Mode Symbols
+        // ====================================================================
+        public const string Method_MapLayers_RebuildEnergyGrid     = "#=zK$nELVArHhqXXa$0lA==";
+        public const string Field_MapLayers_EnergyGrid             = "#=zVXTH1ahoIxQNg$omKQ==";
+        public const string Field_MapLayers_EnergyFrontier         = "#=zwfOTOoiNSnzaMdxGOw==";
+        public const string Field_MapLayers_EnergySources          = "#=zzdYbmlOsMh5Qdai_1wg_GcVnp1uyXUY2Jg==";
+        public const string Field_MapLayers_EnergyLastIdx          = "#=zI1XwqvydMOklwONBSr1AZauxHESdsKz87A==";
+        public const string Type_CEnergyTransferer                 = "ZX.Components.CEnergyTransferer";
+        public const string Field_ZXLevelState_CachedCC            = "#=zWcIPez8Xawjo";
+        public const string Method_ZXLevelState_RefreshCCCell      = "#=z1lX7NrLe$yjs";
+        public const string Field_LevelSys_CurrentCC               = "#=zWcIPez8Xawjo";
+        public const string Method_CSelectable_SetSelectedInternal = "#=zh0kwu2g=";
+        public const string Type_Train                             = "ZX.Commands.Train";
+        public const string Type_Upgrade                           = "ZX.Commands.Upgrade";
+        public const string Method_Command_OnComplete              = "#=znpSJWcQ=";
+        public const string Method_Command_ExecuteImpl             = "#=zfMM7feQ=";
+        public const string Method_ZXEntity_TransferUpgradeState   = "#=z7k$1Q4oQNHe8";
+        public const string Type_CNeutralJoinable                  = "ZX.Components.CNeutralJoinable";
+        public const string Method_CNeutralJoinable_Update         = "#=z5GPRaBw=";
+        public const string Type_CLife                             = "ZX.Components.CLife";
+        public const string Method_CLife_Update                    = "#=zzHXxhbjNa0Zf";
+        public const string Method_LevelState_RecordEntityDead     = "#=zmGjBHwC$KPGs";
+        public const string Field_ZXBehaviour_PickRoamingCell      = "#=zxLay8zPafKGD";
+        public const string Field_ZXBehaviour_SetInfectedDestiny   = "#=zxSb56aPcvAt3Ruzqaw==";
+        public const string Field_ZXBehaviour_SetInfectedDestiny2  = "#=zovJW5KjKdU4o";
+        public const string Field_ZXBehaviour_TargetCurrentCC      = "#=zVrYo0VGEG7Sj";
+        public const string Method_ZXBehaviour_FindBuildingOrCC    = "#=zTICDnCdrTfea";
+        public const string Method_ZXBehaviour_FindEnabledBldgOrCC = "#=zWl4GSKQNpFW2";
+
+        // ====================================================================
+        // 20. Phase 4 M2 & M3 Multi-Faction Economy, Tech, Wonders & Visuals
+        // ====================================================================
+        public const string Field_LevelState_ResourceStorage       = "#=z$AJASl1AiK8t";
+        public const string Field_LevelState_FoodSupply            = "#=zVBTXbFQWx5nv";
+        public const string Field_LevelState_WorkersSupply         = "#=zEfI2uaoUZ782";
+        public const string Field_LevelState_EnergySupply          = "#=zaZY8fVVs7KkTcrzcGA==";
+        public const string Field_LevelState_FoodNeeded            = "#=zjc0VGTlxmAwC";
+        public const string Field_LevelState_WorkersNeeded         = "#=zT3_qxWviRzqs";
+        public const string Field_LevelState_EnergyNeeded          = "#=zFQpg_1MTtOinPniq0A==";
+        public const string Field_LevelState_Colonists             = "#=zjHykNU3M_aZ44GcRCw==";
+        public const string Field_LevelState_GoldByCC              = "#=zTW_7s8UG6Tbcne31hQ==";
+        public const string Field_LevelState_TotalStock            = "#=zotIDJniiBmaD";
+        public const string Method_LevelState_Recalculate          = "#=zBpC6By32LAqv";
+        public const string Method_LevelState_8hStep               = "#=zgLWBIL0dUIT9ZcCNSQ==";
+        public const string Method_LevelState_SetEnhancerBuildings = "#=zxHjqi6_iced29ognGGOgp5TMC9stiUDrhg==";
+        public const string Method_LevelState_GetEnhancerBuildings = "#=zDsPVU4dXlejQD9RrXz8QIy8Ssk_1CySn7g==";
+        public const string Method_LevelState_AddWoodWithMarket    = "#=zpo2hsxCgQn3I";
+        public const string Method_LevelState_AddStoneWithMarket   = "#=zKBFI1SS2BzHt";
+        public const string Method_LevelState_AddIronWithMarket    = "#=zynafIZs0wZbU";
+        public const string Method_LevelState_AddOilWithMarket     = "#=zOgTGrsIA9_ZE";
+        public const string Method_LevelState_AddGoldDirect        = "#=z7dTWXp0=";
+        public const string Method_LevelState_AddCost              = "#=zG0slAM4=";
+        public const string Method_LevelState_ConsumeCost          = "#=z5YtS5bwlM1kX";
+        public const string Method_LevelState_AddOnlyOneExecuted   = "#=zNHCibbkaY4C1bNgYnQ==";
+        public const string Method_LevelState_HasOnlyOneExecuted   = "#=zNGgzojiiQIq14QwoDQ==";
+        public const string Method_LevelState_GetSellFactorWood    = "#=zTNxqKnSaBBRFMynxNZxc7qI=";
+        public const string Method_LevelState_GetSellFactorStone   = "#=zg4iNKCARS_A6O86uYq_VKlKqZ8a_";
+        public const string Method_LevelState_GetSellFactorIron    = "#=zLKYHUMak3IMsBXqDgwvXP1w=";
+        public const string Method_LevelState_GetSellFactorOil     = "#=zvzbRbTT3bnirsVecV8tTGAo=";
+        public const string Method_ZXGame_GetEntityName          = "#=zEM8NoV67DXOL";
+        public const string Type_CResourceGenerator                = "ZX.Components.CResourceGenerator";
+        public const string Method_CResourceGenerator_Update       = "#=zzHXxhbjNa0Zf";
+        public const string Type_PickableItem                      = "ZX.Entities.PickableItem";
+        public const string Method_PickableItem_Pick               = "#=zmrUbwuk=";
+        public const string Type_Technology                        = "ZX.Commands.Technology";
+        public const string Type_UndoBuilding                      = "ZX.Commands.UndoBuilding";
+        public const string Type_Destroy                           = "ZX.Commands.Destroy";
+        public const string Method_ZXCommand_GetCost               = "#=zcPu1$70ruiRE";
+        public const string Method_ZXCommand_CancelRefund          = "#=zTx92yEE=";
+        public const string Method_ZXCommand_CancelProgress        = "#=z9whD4sw=";
+        public const string Method_ZXMayor_LoadAll                 = "#=zl1IE4Os2suIF";
+        public const string Field_ZXEntity_CachedMinimapColor      = "#=zK_R0cmV1aBjs";
+        public const string Field_ZXEntity_BaseMinimapColor        = "#=zd_y1feWnG0usZCJzLQ==";
+        public const string Field_Building_ResourceCost            = "#=zXbxJzH8=";
+
+        // ====================================================================
+        // 21. Phase 4 M4 Multi-Base Map Generator & Multi-Wave Swarms
+        // ====================================================================
+        public const string Method_LevelEvent_PickGenerators       = "#=zUMCW0sQ=";
+        public const string Method_LevelEvent_Trigger              = "#=zrITPs$A=";
+        public const string Method_LevelEvent_BuildEntityCounts    = "#=zHI6D76EGh68R";
+        public const string Method_LevelEvent_BuildMessage         = "#=z9kNBieQ=";
+        public const string Method_LevelEvent_Notify               = "#=zBAspRIo=";
+        public const string Type_CUnitGenerator                    = "ZX.Components.CUnitGenerator";
+        public const string Method_CUnitGenerator_Update           = "#=zzHXxhbjNa0Zf";
+        public const string Method_CUnitGenerator_AddRequest       = "#=zERrxnH$byRKd";
+        public const string Method_GenerationRequest_GetTemplate   = "#=zgkfLCBPOBsM2";
+        public const string Method_GenerationRequest_SetTemplate   = "#=zloP7bF56hnHU";
+        public const string Type_CInfectionNest                    = "ZX.Components.CInfectionNest";
+        public const string Type_CMiniMapInfo                      = "ZX.Components.CMiniMapInfo";
+        public const string Method_CMiniMapInfo_GetConfig          = "#=zyohOqc5Ng1Am";
+        public const string Type_EntityTemplateCatalog             = "#=zYLpZK4K9zSHp";
+        public const string NestedType_Catalog_Buildings           = "#=zyx9SpHmg_Pj8YUXUOQ==";
+        public const string NestedType_Catalog_Zombies             = "#=zwwyTj9$ODjUy";
+        public const string Method_Catalog_DoomNestLarge           = "#=zFvWYnEaYcTiwWWz6pA==";
+        public const string Method_Catalog_DoomNestMedium          = "#=zdObI08b0EDdG0TaPCw==";
+        public const string Method_Catalog_DoomNestSmall           = "#=zAr9Fw3PhVc7FFNTBvw==";
+        public const string Method_Catalog_ZombieGiant             = "#=zq6F4jtPoQUZV263PTQ==";
+        public const string Method_Catalog_ZombieMutant            = "#=zETCVfaScp7p0jCA9Ag==";
+        public const string Method_Catalog_ZombieStrongA           = "#=zEMa9Cy26vxmi";
+        public const string Method_Catalog_ZombieVenom             = "#=zTuDKvlVxpn5uBRPB2A==";
+        public const string Method_Catalog_ZombieHarpy             = "#=z_1JbAdKCTe7jAmUh4A==";
+        public const string Type_ZombieGiant                       = "ZX.Entities.ZombieGiant";
+        public const string Type_ZombieMutant                      = "ZX.Entities.ZombieMutant";
+        public const string Type_ZombieStrongA                     = "ZX.Entities.ZombieStrongA";
+        public const string Type_ZombieVenom                       = "ZX.Entities.ZombieVenom";
+        public const string Type_ZombieHarpy                       = "ZX.Entities.ZombieHarpy";
+        public const string Type_ZombieDressedA                    = "ZX.Entities.ZombieDressedA";
+        public const string Type_ZombieWeakA                       = "ZX.Entities.ZombieWeakA";
+        public const string Type_ZombieMediumA                     = "ZX.Entities.ZombieMediumA";
+        public const string Type_ZombieWorkerA                     = "ZX.Entities.ZombieWorkerA";
     }
 }

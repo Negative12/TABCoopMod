@@ -13,6 +13,15 @@ namespace TABCoopMod.Patches
             if (!CoopSessionManager.IsSessionActive || !CoopSessionManager.IsInSyncedLevel || CoopSessionManager.Transport == null)
                 return true;
 
+            if (!won
+                && CoopSessionManager.IsMultiFactionActive
+                && CoopSessionManager.DefeatRule == MultiFactionDefeatRule.AllBasesLost
+                && FactionOwnershipTracker.CountAliveCommandCenters() > 0)
+            {
+                ModLogger.Info("[LevelEndSyncPatch] Suppressed TriggerGameEnd(won=false) under AllBasesLost rule while surviving CommandCenter(s) remain.");
+                return false;
+            }
+
             if (CoopSessionManager.Transport.IsHost)
             {
                 CoopSessionManager.NotifyHostLevelEnded(won);

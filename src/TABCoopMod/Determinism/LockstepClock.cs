@@ -58,7 +58,9 @@ namespace TABCoopMod.Determinism
         public static int CurrentSimTick => DXGame.Current?.IAIterationInt ?? 0;
 
         private static long _syncedEntityIdCounter = 100000L;
+        private static long _syncedProjectileIdCounter = 100000L;
         private static long _localUiIdCounter = 1L;
+        [ThreadStatic] private static int _projectileGuidDepth;
         private static int _syncedRandomSeed = 1337;
         public static int EffectiveLoadSeed => HasPendingPostLoadCalibration ? PendingLoadSeed : _syncedRandomSeed;
         private static DXRandom _syncedGlobalRandom;
@@ -405,6 +407,16 @@ namespace TABCoopMod.Determinism
             return (ulong)next;
         }
 
+        public static void EnterProjectileGuidContext() => _projectileGuidDepth++;
+        public static void ExitProjectileGuidContext() { if (_projectileGuidDepth > 0) _projectileGuidDepth--; }
+        public static bool IsInProjectileGuidContext => _projectileGuidDepth > 0;
+
+        public static ulong NextSyncedProjectileGuid()
+        {
+            long next = Interlocked.Increment(ref _syncedProjectileIdCounter);
+            return 0x4000000000000000UL | (ulong)next;
+        }
+
         public static ulong NextLocalUiGuid()
         {
             long next = Interlocked.Increment(ref _localUiIdCounter);
@@ -661,19 +673,31 @@ namespace TABCoopMod.Determinism
         public static void CalibrateEntityIdCounterFromLoadedLevel(int seed)
         {
             long maxId = 100000L;
+            long maxProjId = 100000L;
             if (DXGame.Current?.Entities != null)
             {
                 foreach (var ent in DXGame.Current.Entities)
                 {
-                    if (ent != null && (ent.ID & 0x8000000000000000UL) == 0)
+                    if (ent == null) continue;
+                    ulong hiBits = ent.ID & 0xC000000000000000UL;
+                    if (hiBits == 0)
                     {
                         if ((long)ent.ID > maxId)
                             maxId = (long)ent.ID;
+                    }
+                    else if (hiBits == 0x4000000000000000UL)
+                    {
+                        long rawProj = (long)(ent.ID & 0x3FFFFFFFFFFFFFFFUL);
+                        if (rawProj > maxProjId)
+                            maxProjId = rawProj;
                     }
                 }
             }
             // Stay clear of long.MaxValue: saved IDs are already close to 2^63-1 on late saves.
             long start = maxId > long.MaxValue - 8192L ? long.MaxValue - 8192L : maxId + 1000L;
+            _syncedProjectileIdCounter = maxProjId > (long)(0x3FFFFFFFFFFFFFFFUL - 8192UL)
+                ? (long)(0x3FFFFFFFFFFFFFFFUL - 8192UL)
+                : maxProjId + 1000L;
             EnableDeterministicSandbox(seed, start);
         }
 
@@ -1123,7 +1147,9 @@ namespace TABCoopMod.Determinism
                 || LockstepClock.IsLogicWorkerActive()
                 || LockstepClock.IsPhysicsThreadActive())
             {
-                __result = LockstepClock.NextSyncedGuid();
+                __result = LockstepClock.IsInProjectileGuidContext
+                    ? LockstepClock.NextSyncedProjectileGuid()
+                    : LockstepClock.NextSyncedGuid();
                 return false;
             }
 
@@ -2330,15 +2356,54 @@ namespace TABCoopMod.Determinism
             return tLevelSys != null ? AccessTools.Method(tLevelSys, "OnSetCamera", Type.EmptyTypes) : null;
         }
 
+        private static FieldInfo _fIntroAnim;
+        private static PropertyInfo _pNewCamCenter;
+        private static IntPtr _ownHwnd;
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        private static bool IsGameWindowForeground(DXGame game)
+        {
+            if (game == null || !game.Focused) return false;
+            try
+            {
+                IntPtr fg = GetForegroundWindow();
+                if (fg == IntPtr.Zero) return false;
+                if (_ownHwnd == IntPtr.Zero)
+                    _ownHwnd = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle;
+                return _ownHwnd == IntPtr.Zero || fg == _ownHwnd;
+            }
+            catch { return game.Focused; }
+        }
+
         [HarmonyPrefix]
-        public static void Prefix(out CamState __state)
+        public static bool Prefix(object __instance, out CamState __state)
         {
             __state = default;
             if (!LockstepClock.IsDeterministicModeActive || LockstepClock.LoadingLevel)
-                return;
+                return true;
             var scene = DXScene.Current;
             if (scene == null)
-                return;
+                return true;
+
+            // In FullBorderless mode, an unfocused window's ResetInput() (or a virtual-display
+            // idle cursor at (0,0)) matches ViewArea.TopLeft (0,0) and causes vanilla OnSetCamera
+            // to continuously edge-scroll toward the top-left corner of the map.
+            var game = DXGame.Current;
+            bool suppressIdleDrift = !IsGameWindowForeground(game)
+                || (Testing.TestHarnessConfig.ControlPort > 0 && DXMouseState.Current.Position.IsEmpty);
+            if (suppressIdleDrift && __instance != null)
+            {
+                if (_fIntroAnim == null)
+                    _fIntroAnim = AccessTools.Field(__instance.GetType(), ObfuscatedSymbols.Field_LevelSys_CameraIntroAnim);
+                if (_pNewCamCenter == null)
+                    _pNewCamCenter = AccessTools.Property(__instance.GetType(), "NewCameraCenter");
+                bool introActive = _fIntroAnim != null && _fIntroAnim.GetValue(null) is bool b && b;
+                bool hasNewCenter = _pNewCamCenter != null && _pNewCamCenter.GetValue(__instance, null) != null;
+                if (!introActive && !hasNewCenter)
+                    return false;
+            }
 
             long nowTs = System.Diagnostics.Stopwatch.GetTimestamp();
             double rawDtMs = _lastCamTs > 0 ? (nowTs - _lastCamTs) * _swToMs : 16.67;
@@ -2352,6 +2417,7 @@ namespace TABCoopMod.Determinism
             __state.PrevCam = scene.CameraArea;
             __state.UsedDtMs = useDtMs;
             scene.ElapsedTime = useDtMs;
+            return true;
         }
 
         [HarmonyFinalizer]
@@ -3625,12 +3691,56 @@ namespace TABCoopMod.Determinism
     [HarmonyPatch(typeof(DXEntity), nameof(DXEntity.OnPoolNew))]
     public static class DXEntityOnPoolNewPatch
     {
-        [HarmonyPrefix]
-        public static void Prefix(DXEntity __instance)
+        private static bool IsProjectileEntity(DXEntity ent)
         {
-            if (LockstepClock.IsDeterministicModeActive && __instance != null)
-                __instance.ID = 0L;
+            return ent != null && string.Equals(ent.GetType().Name, "Proyectile", StringComparison.Ordinal);
         }
+
+        [HarmonyPrefix]
+        public static void Prefix(DXEntity __instance, out bool __state)
+        {
+            __state = false;
+            if (LockstepClock.IsDeterministicModeActive && __instance != null)
+            {
+                __instance.ID = 0L;
+                if (IsProjectileEntity(__instance))
+                {
+                    LockstepClock.EnterProjectileGuidContext();
+                    __state = true;
+                }
+            }
+        }
+
+        [HarmonyFinalizer]
+        public static void Finalizer(bool __state)
+        {
+            if (__state)
+                LockstepClock.ExitProjectileGuidContext();
+        }
+    }
+
+    /// <summary>
+    /// Isolates Proyectile constructor DXGuid.New() calls into the dedicated Bit 62 namespace
+    /// (0x4000...) so DXPool&lt;Proyectile&gt; cache misses can never shift _syncedEntityIdCounter.
+    /// </summary>
+    [HarmonyPatch]
+    public static class ProjectileCtorGuidIsolationPatch
+    {
+        public static IEnumerable<MethodBase> TargetMethods()
+        {
+            var projType = AccessTools.TypeByName("ZX.Entities.Proyectile");
+            if (projType != null)
+            {
+                foreach (var c in AccessTools.GetDeclaredConstructors(projType))
+                    if (c != null) yield return c;
+            }
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix() => LockstepClock.EnterProjectileGuidContext();
+
+        [HarmonyFinalizer]
+        public static void Finalizer() => LockstepClock.ExitProjectileGuidContext();
     }
 
     /// <summary>

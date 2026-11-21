@@ -37,6 +37,7 @@ namespace TABCoopMod.Networking
         TurnInputBroadcast = 0x21,
         HostPauseKeepalive = 0x22,
         LevelEnded = 0x23,
+        SymmetricTurnInput = 0x24,
         StateChecksumReport = 0x30,
         DesyncDetectedAlert = 0x31,
         PosDriftSyncChunk = 0x32,

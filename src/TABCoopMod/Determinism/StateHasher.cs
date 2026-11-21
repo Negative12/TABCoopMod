@@ -308,24 +308,38 @@ namespace TABCoopMod.Determinism
                 hash *= 1099511628211UL;
             }
 
-            digest.SimTick = simTick;
-            digest.GameTimeMs = game.GameTimeInt;
-            digest.Gold = GameBridge.GetLevelInt("Gold");
-            digest.Wood = GameBridge.GetLevelInt("Wood");
-            digest.Stone = GameBridge.GetLevelInt("Stone");
-            digest.Iron = GameBridge.GetLevelInt("Iron");
-            digest.Oil = GameBridge.GetLevelInt("Oil");
+            bool swappedToP1 = TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive
+                && TABCoopMod.Sync.FactionContextManager.IsInitialized;
+            if (swappedToP1)
+                TABCoopMod.Sync.FactionContextManager.PushContext(1);
 
-            Mix(HashVersion);
-            Mix(digest.SimTick);
-            Mix(digest.GameTimeMs);
-            Mix(digest.Gold);
-            Mix(digest.Wood);
-            Mix(digest.Stone);
-            Mix(digest.Iron);
-            Mix(digest.Oil);
+            long reservationChecksum;
+            try
+            {
+                digest.SimTick = simTick;
+                digest.GameTimeMs = game.GameTimeInt;
+                digest.Gold = GameBridge.GetLevelInt("Gold");
+                digest.Wood = GameBridge.GetLevelInt("Wood");
+                digest.Stone = GameBridge.GetLevelInt("Stone");
+                digest.Iron = GameBridge.GetLevelInt("Iron");
+                digest.Oil = GameBridge.GetLevelInt("Oil");
 
-            long reservationChecksum = MixReservations(ls);
+                Mix(HashVersion);
+                Mix(digest.SimTick);
+                Mix(digest.GameTimeMs);
+                Mix(digest.Gold);
+                Mix(digest.Wood);
+                Mix(digest.Stone);
+                Mix(digest.Iron);
+                Mix(digest.Oil);
+
+                reservationChecksum = MixReservations(ls);
+            }
+            finally
+            {
+                if (swappedToP1)
+                    TABCoopMod.Sync.FactionContextManager.PopContext();
+            }
             digest.ReservationChecksum = reservationChecksum;
             digest.EntityCount = acc.EntityCount;
             digest.ProjectileCount = acc.ProjectileCount;
@@ -350,6 +364,12 @@ namespace TABCoopMod.Determinism
             Mix(acc.ProjectileChecksum);
             Mix(acc.ProductionChecksum);
             Mix(reservationChecksum);
+            if (TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive)
+            {
+                Mix(unchecked((long)TABCoopMod.Sync.FactionOwnershipTracker.ComputeOwnershipHash()));
+                Mix(unchecked((long)TABCoopMod.Sync.FactionContextManager.ComputeEconomyHash()));
+                Mix(unchecked((long)TABCoopMod.Sync.WonderCrowdfundManager.ComputeHash()));
+            }
             digest.HardHash = hash;
 
             Mix(acc.PosChecksum);

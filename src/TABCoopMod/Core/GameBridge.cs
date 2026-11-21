@@ -190,6 +190,123 @@ namespace TABCoopMod.Core
         private static PropertyInfo _propWindowMsgTitle;
         private static PropertyInfo _propWindowMsgText;
 
+        // 13. Phase 4 M1 Multi-Faction Mode Handles
+        private static Type _typeZXSystemMapLayers;
+        private static FieldInfo _fieldMapLayersCurrent;
+        private static FieldInfo _fieldMapLayersEnergyGrid;
+        private static FieldInfo _fieldMapLayersEnergyFrontier;
+        private static FieldInfo _fieldMapLayersEnergySources;
+        private static FieldInfo _fieldMapLayersEnergyLastIdx;
+        private static MethodInfo _methodMapLayersRebuildEnergyGrid;
+        public static Type TypeCEnergyTransferer { get; private set; }
+        public static Type TypeCNeutralJoinable { get; private set; }
+        public static Type TypeCLife { get; private set; }
+        public static Type TypeTrain { get; private set; }
+        public static Type TypeUpgrade { get; private set; }
+        private static FieldInfo _fieldLevelStateCachedCC;
+        private static MethodInfo _methodLevelStateRefreshCCCell;
+        private static PropertyInfo _propLevelStateCurrentCCCell;
+        private static PropertyInfo _propLevelStateInfectedDestiny;
+        private static PropertyInfo _propLevelStateScriptVars;
+        private static FieldInfo _fieldLevelSysCurrentCC;
+        private static PropertyInfo _propBuildingInfected;
+        private static PropertyInfo _propDefaultParamsEnergyRadius;
+        private static Type _typeBData;
+        private static MethodInfo _methodBDataGetOwner;
+        private static PropertyInfo _propBDataTargetPos;
+        private static PropertyInfo _propEntityRefEntity;
+        private static PropertyInfo _propEntityRefId;
+        private static MethodInfo _methodTerrainSystemGetCurrent;
+        private static PropertyInfo _propTerrainSystemCells;
+
+        // 14. Phase 4 M2 & M3 Multi-Faction Economy, Tech, Wonders & Visuals
+        public static Type TypeTechnology { get; private set; }
+        public static Type TypeUndoBuilding { get; private set; }
+        public static Type TypeDestroy { get; private set; }
+        public static Type TypeCResourceGenerator { get; private set; }
+        public static Type TypePickableItem { get; private set; }
+        public static Type TypeTheGreatTelescope { get; private set; }
+        public static Type TypeTheAcademy { get; private set; }
+        public static Type TypeTheSpire { get; private set; }
+        public static Type TypeTheCrystalPalace { get; private set; }
+        public static Type TypeTheTransmutator { get; private set; }
+        public static Type TypeTheVictorious { get; private set; }
+        public static Type TypeTechGreatTelescope { get; private set; }
+        public static Type TypeTechSoldierAcademy { get; private set; }
+        public static Type TypeTechElectricSpire { get; private set; }
+        public static Type TypeZXResourcesCost { get; private set; }
+        public static Type TypeZXMayor { get; private set; }
+
+        private static FieldInfo _fLsWood, _fLsStone, _fLsIron, _fLsOil, _fLsGold, _fLsStorage;
+        private static FieldInfo _fLsFoodSup, _fLsWorkSup, _fLsEngSup, _fLsFoodNeed, _fLsWorkNeed, _fLsEngNeed;
+        private static FieldInfo _fLsColonists, _fLsGoldByCc, _fLsTotalStock;
+        private static PropertyInfo _pLsExtraEnergy, _pLsFoodRes, _pLsWorkRes, _pLsEngRes;
+        private static PropertyInfo _pLsWoodProd, _pLsStoneProd, _pLsIronProd, _pLsOilProd, _pLsGoldProd;
+        private static PropertyInfo _pLsWoodProdRes, _pLsStoneProdRes, _pLsIronProdRes, _pLsOilProdRes;
+        private static PropertyInfo _pLsNegGoldTurns, _pLsNegFoodTurns, _pLsNMarkets, _pLsMaxGoldExport, _pLsMaxColonists;
+        private static PropertyInfo _pLsArmyGold, _pLsArmyFoodPen, _pLsStructGold, _pLsGoldPerCol;
+        private static PropertyInfo _pLsBonusTemplates, _pLsOnlyOneCmds, _pLsShowFullMap, _pLsCurrentCc;
+        private static MethodInfo _mLsRecalculate, _mLsSetEnhancerBuildings, _mLsAddWoodMarket, _mLsAddStoneMarket;
+        private static MethodInfo _mLsAddIronMarket, _mLsAddOilMarket, _mLsAddGoldDirect, _mLsAddCost, _mLsConsumeCost;
+        private static MethodInfo _mLsAddOnlyOne, _mLsHasOnlyOne;
+        private static MethodInfo _mLsSellWood, _mLsSellStone, _mLsSellIron, _mLsSellOil;
+
+        private static MethodInfo _mResCostForType;
+        private static PropertyInfo _pResGold, _pResWood, _pResStone, _pResIron, _pResOil, _pResFood, _pResWorkers, _pResEnergy;
+        private static PropertyInfo _pCcTelescopeEnabled;
+        private static FieldInfo _fBldgResCost, _fEntityCachedColor, _fEntityBaseColor;
+        private static PropertyInfo _pBldgCanSupply, _pBldgDisabledManual, _pBldgTotalFoodSup, _pBldgTotalWorkSup, _pBldgTotalEngSup;
+        private static PropertyInfo _pBldgTotalWoodSup, _pBldgTotalStoneSup, _pBldgTotalIronSup, _pBldgTotalOilSup, _pBldgTotalGoldSup, _pBldgTotalFoodNeed;
+        private static PropertyInfo _pDefMaxInstances, _pDefReturnFactor, _pDefCanEnhance, _pDefResGenTime, _pDefConvertResToGold;
+        private static PropertyInfo _pDefColonists, _pDefResStorage, _pDefGoldGen, _pDefGoldPerCol, _pDefFoodNeed, _pDefWorkNeed, _pDefWorkSupply, _pDefEngNeed;
+        private static PropertyInfo _pDefWoodGen, _pDefStoneGen, _pDefIronGen, _pDefOilGen, _pDefResCollectRadius, _pDefGoldCost, _pDefLevel;
+        private static MethodInfo _mCmdGetCost;
+        private static PropertyInfo _pMayorBonusEntities, _pMayorBonusTechs, _pMayorExtraGold, _pMayorExtraWood, _pMayorExtraStone, _pMayorExtraIron, _pMayorExtraOil;
+        private static PropertyInfo _pMayorNameProp, _pMayorIdProp, _pMayorLevelProp, _pMayorQuoteProp, _pMayorActiveProp, _pMayorCustomProp;
+
+        // 14. Phase 4 M4 Multi-Base Map Generator & Multi-Wave Swarms Handles
+        private static PropertyInfo _propMapThemeNumDoomVillages;
+        private static PropertyInfo _propMapDrawerLayerZombies;
+        private static PropertyInfo _propLevelEventNTimesTriggered;
+        private static PropertyInfo _propLevelEventShowCountdown;
+        private static PropertyInfo _propLevelEventMaxRepetitions;
+        private static PropertyInfo _propLevelEventAttackCC;
+        private static PropertyInfo _propLevelEventFactorUnitsPerRep;
+        private static PropertyInfo _propLevelEventMaxFactorUnitsPerRep;
+        private static PropertyInfo _propLevelEventMessage;
+        private static PropertyInfo _propLevelEventGenerators;
+        private static PropertyInfo _propLevelEventCurrentUnitGenerators;
+        private static Type _typeCUnitGenerator;
+        private static Type _typeGenerationRequest;
+        private static PropertyInfo _propUnitGenConfig;
+        private static PropertyInfo _propUnitGenConfigName;
+        private static PropertyInfo _propGenReqIDEvent;
+        private static PropertyInfo _propGenReqCount;
+        private static PropertyInfo _propGenReqGenSpeed;
+        private static PropertyInfo _propGenReqAttackCC;
+        private static MethodInfo _methodGenReqGetTemplate;
+        private static MethodInfo _methodCatalogDoomNestLarge, _methodCatalogDoomNestMedium, _methodCatalogDoomNestSmall;
+        private static Type _typeCInfectionNest;
+        private static PropertyInfo _propInfectionNestConfig;
+        private static PropertyInfo _propInfectionNestFactor;
+        private static Type _typeCMiniMapInfo;
+        private static PropertyInfo _propZombieCellsAwayRoaming;
+        public static Type TypeZombieGiant { get; private set; }
+        public static Type TypeZombieMutant { get; private set; }
+        public static Type TypeZombieStrongA { get; private set; }
+        public static Type TypeZombieVenom { get; private set; }
+        public static Type TypeZombieHarpy { get; private set; }
+        public static Type TypeZombieDressedA { get; private set; }
+        public static Type TypeZombieWeakA { get; private set; }
+        public static Type TypeZombieMediumA { get; private set; }
+        public static Type TypeZombieWorkerA { get; private set; }
+
+        /// <summary>
+        /// Optional predicate set by FactionOwnershipTracker in Multi-Faction mode
+        /// to restrict GetSelectedPlayerEntityIds() to entities owned by LocalPlayerId.
+        /// </summary>
+        public static Func<DXEntity, bool> LocalEntityControlFilter;
+
         public static bool IsInitialized { get; private set; }
 
         public static bool InitializeAndValidate()
@@ -529,6 +646,7 @@ namespace TABCoopMod.Core
                 }
                 if (_typeZXMapTheme != null)
                 {
+                    _propMapThemeNumDoomVillages = AccessTools.Property(_typeZXMapTheme, "NumDoomVillages");
                     _propMapThemeDoomVillagesSize = AccessTools.Property(_typeZXMapTheme, "DoomVillagesSize");
                     _propMapThemeNumTreasures = AccessTools.Property(_typeZXMapTheme, "NumTreasures");
                     _propMapThemeNumSuppyFood = AccessTools.Property(_typeZXMapTheme, "NumSuppyFood");
@@ -547,6 +665,7 @@ namespace TABCoopMod.Core
                     _propMapDrawerExtraEntities = AccessTools.Property(_typeZXMapDrawer, "ExtraEntities");
                     _propMapDrawerLayerTerrain = AccessTools.Property(_typeZXMapDrawer, "LayerTerrain");
                     _propMapDrawerLayerObjects = AccessTools.Property(_typeZXMapDrawer, "LayerObjects");
+                    _propMapDrawerLayerZombies = AccessTools.Property(_typeZXMapDrawer, "LayerZombies");
                     _propMapDrawerNCells = AccessTools.Property(_typeZXMapDrawer, "NCells");
                 }
                 if (_typeZXLevelEvent != null)
@@ -554,12 +673,267 @@ namespace TABCoopMod.Core
                     _propLevelEventStartTimeH = AccessTools.Property(_typeZXLevelEvent, "StartTimeH");
                     _propLevelEventGameTimeH = AccessTools.Property(_typeZXLevelEvent, "GameTimeH");
                     _propLevelEventFinalSwarm = AccessTools.Property(_typeZXLevelEvent, "FinalSwarm");
+                    _propLevelEventNTimesTriggered = AccessTools.Property(_typeZXLevelEvent, "NTimesTriggered");
+                    _propLevelEventShowCountdown = AccessTools.Property(_typeZXLevelEvent, "ShowCountdown");
+                    _propLevelEventMaxRepetitions = AccessTools.Property(_typeZXLevelEvent, "MaxRepetitions");
+                    _propLevelEventAttackCC = AccessTools.Property(_typeZXLevelEvent, "AttackCommandCenter");
+                    _propLevelEventFactorUnitsPerRep = AccessTools.Property(_typeZXLevelEvent, "FactorUnitsNumberPerRepetition");
+                    _propLevelEventMaxFactorUnitsPerRep = AccessTools.Property(_typeZXLevelEvent, "MaxFactorUnitsNumberPerRepetition");
+                    _propLevelEventMessage = AccessTools.Property(_typeZXLevelEvent, "Message");
+                    _propLevelEventGenerators = AccessTools.Property(_typeZXLevelEvent, "Generators");
+                    _propLevelEventCurrentUnitGenerators = AccessTools.Property(_typeZXLevelEvent, "CurrentUnitGenerators");
+                }
+
+                _typeCUnitGenerator = GameAssembly.GetType(ObfuscatedSymbols.Type_CUnitGenerator);
+                if (_typeCUnitGenerator != null)
+                {
+                    _propUnitGenConfig = AccessTools.Property(_typeCUnitGenerator, "Configuration");
+                    _propUnitGenConfigName = _propUnitGenConfig?.PropertyType?.GetProperty("Name", BindingFlags.Public | BindingFlags.Instance);
+                    _typeGenerationRequest = _typeCUnitGenerator.GetNestedType("GenerationRequest", BindingFlags.Public | BindingFlags.NonPublic);
+                    if (_typeGenerationRequest != null)
+                    {
+                        _propGenReqIDEvent = AccessTools.Property(_typeGenerationRequest, "IDEvent");
+                        _propGenReqCount = AccessTools.Property(_typeGenerationRequest, "Count");
+                        _propGenReqGenSpeed = AccessTools.Property(_typeGenerationRequest, "GenerationSpeed");
+                        _propGenReqAttackCC = AccessTools.Property(_typeGenerationRequest, "AttackCommandCenter");
+                        _methodGenReqGetTemplate = AccessTools.Method(_typeGenerationRequest, ObfuscatedSymbols.Method_GenerationRequest_GetTemplate, Type.EmptyTypes);
+                    }
+                }
+                _typeCInfectionNest = GameAssembly.GetType(ObfuscatedSymbols.Type_CInfectionNest);
+                if (_typeCInfectionNest != null)
+                {
+                    _propInfectionNestConfig = AccessTools.Property(_typeCInfectionNest, "Configuration");
+                    _propInfectionNestFactor = _propInfectionNestConfig?.PropertyType?.GetProperty("InfectedFactor", BindingFlags.Public | BindingFlags.Instance);
+                }
+                _typeCMiniMapInfo = GameAssembly.GetType(ObfuscatedSymbols.Type_CMiniMapInfo);
+                if (_typeZombie != null)
+                {
+                    _propZombieCellsAwayRoaming = AccessTools.Property(_typeZombie, "CellsAwayCommandCenterWhenRoaming");
+                }
+                TypeZombieGiant = GameAssembly.GetType(ObfuscatedSymbols.Type_ZombieGiant);
+                TypeZombieMutant = GameAssembly.GetType(ObfuscatedSymbols.Type_ZombieMutant);
+                TypeZombieStrongA = GameAssembly.GetType(ObfuscatedSymbols.Type_ZombieStrongA);
+                TypeZombieVenom = GameAssembly.GetType(ObfuscatedSymbols.Type_ZombieVenom);
+                TypeZombieHarpy = GameAssembly.GetType(ObfuscatedSymbols.Type_ZombieHarpy);
+                TypeZombieDressedA = GameAssembly.GetType(ObfuscatedSymbols.Type_ZombieDressedA);
+                TypeZombieWeakA = GameAssembly.GetType(ObfuscatedSymbols.Type_ZombieWeakA);
+                TypeZombieMediumA = GameAssembly.GetType(ObfuscatedSymbols.Type_ZombieMediumA);
+                TypeZombieWorkerA = GameAssembly.GetType(ObfuscatedSymbols.Type_ZombieWorkerA);
+                var catalogBuildingsType = GameAssembly.GetType($"{ObfuscatedSymbols.Type_EntityTemplateCatalog}+{ObfuscatedSymbols.NestedType_Catalog_Buildings}");
+                if (catalogBuildingsType != null)
+                {
+                    _methodCatalogDoomNestLarge = AccessTools.Method(catalogBuildingsType, ObfuscatedSymbols.Method_Catalog_DoomNestLarge, Type.EmptyTypes);
+                    _methodCatalogDoomNestMedium = AccessTools.Method(catalogBuildingsType, ObfuscatedSymbols.Method_Catalog_DoomNestMedium, Type.EmptyTypes);
+                    _methodCatalogDoomNestSmall = AccessTools.Method(catalogBuildingsType, ObfuscatedSymbols.Method_Catalog_DoomNestSmall, Type.EmptyTypes);
                 }
                 var lsType = LevelStateType ?? GameAssembly.GetType("ZX.ZXLevelState");
                 if (lsType != null)
                 {
                     _propLevelStateExtraWorkers = AccessTools.Property(lsType, "CommandCenterExtraWorkers");
                     _propLevelStateExtraFood = AccessTools.Property(lsType, "CommandCenterExtraFood");
+                    _fieldLevelStateCachedCC = AccessTools.Field(lsType, ObfuscatedSymbols.Field_ZXLevelState_CachedCC);
+                    _methodLevelStateRefreshCCCell = AccessTools.Method(lsType, ObfuscatedSymbols.Method_ZXLevelState_RefreshCCCell, Type.EmptyTypes);
+                    _propLevelStateCurrentCCCell = AccessTools.Property(lsType, "CurrentCommandCenterCell");
+                    _propLevelStateInfectedDestiny = AccessTools.Property(lsType, "DefaultCellInfectedDestiny");
+                    _propLevelStateScriptVars = AccessTools.Property(lsType, "ScriptVariables");
+                }
+
+                _typeZXSystemMapLayers = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXSystemMapLayers);
+                if (_typeZXSystemMapLayers != null)
+                {
+                    _fieldMapLayersCurrent = AccessTools.Field(_typeZXSystemMapLayers, ObfuscatedSymbols.Field_MapLayers_Current);
+                    _fieldMapLayersEnergyGrid = AccessTools.Field(_typeZXSystemMapLayers, ObfuscatedSymbols.Field_MapLayers_EnergyGrid);
+                    _fieldMapLayersEnergyFrontier = AccessTools.Field(_typeZXSystemMapLayers, ObfuscatedSymbols.Field_MapLayers_EnergyFrontier);
+                    _fieldMapLayersEnergySources = AccessTools.Field(_typeZXSystemMapLayers, ObfuscatedSymbols.Field_MapLayers_EnergySources);
+                    _fieldMapLayersEnergyLastIdx = AccessTools.Field(_typeZXSystemMapLayers, ObfuscatedSymbols.Field_MapLayers_EnergyLastIdx);
+                    _methodMapLayersRebuildEnergyGrid = AccessTools.Method(_typeZXSystemMapLayers, ObfuscatedSymbols.Method_MapLayers_RebuildEnergyGrid, Type.EmptyTypes);
+                }
+                TypeCEnergyTransferer = GameAssembly.GetType(ObfuscatedSymbols.Type_CEnergyTransferer);
+                TypeCNeutralJoinable = GameAssembly.GetType(ObfuscatedSymbols.Type_CNeutralJoinable);
+                TypeCLife = GameAssembly.GetType(ObfuscatedSymbols.Type_CLife);
+                TypeTrain = GameAssembly.GetType(ObfuscatedSymbols.Type_Train);
+                TypeUpgrade = GameAssembly.GetType(ObfuscatedSymbols.Type_Upgrade);
+                _fieldLevelSysCurrentCC = TypeZXSystemGameLevel != null
+                    ? AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_CurrentCC)
+                    : null;
+                _propBuildingInfected = TypeBuilding?.GetProperty("Infected", BindingFlags.Public | BindingFlags.Instance);
+                if (TypeZXEntity != null)
+                {
+                    var defParamsType = _methodEntityGetDefaultParams?.ReturnType;
+                    _propDefaultParamsEnergyRadius = defParamsType?.GetProperty("EnergyTransferRadius", BindingFlags.Public | BindingFlags.Instance);
+                }
+                _typeBData = GameAssembly.GetType("ZX.Behaviours.BData");
+                if (_typeBData != null)
+                {
+                    _methodBDataGetOwner = AccessTools.Method(_typeBData, ObfuscatedSymbols.Method_BData_GetOwner, Type.EmptyTypes);
+                    _propBDataTargetPos = _typeBData.GetProperty("TargetPosition", BindingFlags.Public | BindingFlags.Instance);
+                    _fieldBDataTargetRef = _typeBData.GetField(ObfuscatedSymbols.Field_BData_TargetRef, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                }
+
+                // 14. Phase 4 M2 & M3 bindings
+                TypeTechnology = GameAssembly.GetType(ObfuscatedSymbols.Type_Technology);
+                TypeUndoBuilding = GameAssembly.GetType(ObfuscatedSymbols.Type_UndoBuilding);
+                TypeDestroy = GameAssembly.GetType(ObfuscatedSymbols.Type_Destroy);
+                TypeCResourceGenerator = GameAssembly.GetType(ObfuscatedSymbols.Type_CResourceGenerator);
+                TypePickableItem = GameAssembly.GetType(ObfuscatedSymbols.Type_PickableItem);
+                TypeTheGreatTelescope = GameAssembly.GetType("ZX.Entities.TheGreatTelescope");
+                TypeTheAcademy = GameAssembly.GetType("ZX.Entities.TheAcademy");
+                TypeTheSpire = GameAssembly.GetType("ZX.Entities.TheSpire");
+                TypeTheCrystalPalace = GameAssembly.GetType("ZX.Entities.TheCrystalPalace");
+                TypeTheTransmutator = GameAssembly.GetType("ZX.Entities.TheTransmutator");
+                TypeTheVictorious = GameAssembly.GetType("ZX.Entities.TheVictorious");
+                TypeTechGreatTelescope = GameAssembly.GetType("ZX.Commands.TechTheGreatTelescope");
+                TypeTechSoldierAcademy = GameAssembly.GetType("ZX.Commands.TechTheSoldierAcademy");
+                TypeTechElectricSpire = GameAssembly.GetType("ZX.Commands.TechTheElectricSpire");
+                TypeZXResourcesCost = GameAssembly.GetType("ZX.ZXResourcesCost");
+                TypeZXMayor = GameAssembly.GetType("ZX.ZXMayor");
+
+                if (lsType != null)
+                {
+                    BindingFlags bfInst = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                    _fLsWood = lsType.GetField("#=z7B6S4Sy2cfMB", bfInst);
+                    _fLsStone = lsType.GetField("#=zmeRyIHKzw5Wa", bfInst);
+                    _fLsIron = lsType.GetField("#=z4eMPvDrfJ8a8", bfInst);
+                    _fLsOil = lsType.GetField("#=zblsCLsuBmakA", bfInst);
+                    _fLsGold = lsType.GetField("#=zzOFOrHo=", bfInst);
+                    _fLsStorage = lsType.GetField(ObfuscatedSymbols.Field_LevelState_ResourceStorage, bfInst);
+                    _fLsFoodSup = lsType.GetField(ObfuscatedSymbols.Field_LevelState_FoodSupply, bfInst);
+                    _fLsWorkSup = lsType.GetField(ObfuscatedSymbols.Field_LevelState_WorkersSupply, bfInst);
+                    _fLsEngSup = lsType.GetField(ObfuscatedSymbols.Field_LevelState_EnergySupply, bfInst);
+                    _fLsFoodNeed = lsType.GetField(ObfuscatedSymbols.Field_LevelState_FoodNeeded, bfInst);
+                    _fLsWorkNeed = lsType.GetField(ObfuscatedSymbols.Field_LevelState_WorkersNeeded, bfInst);
+                    _fLsEngNeed = lsType.GetField(ObfuscatedSymbols.Field_LevelState_EnergyNeeded, bfInst);
+                    _fLsColonists = lsType.GetField(ObfuscatedSymbols.Field_LevelState_Colonists, bfInst);
+                    _fLsGoldByCc = lsType.GetField(ObfuscatedSymbols.Field_LevelState_GoldByCC, bfInst);
+                    _fLsTotalStock = lsType.GetField(ObfuscatedSymbols.Field_LevelState_TotalStock, bfInst);
+
+                    _pLsExtraEnergy = lsType.GetProperty("CommandCenterExtraEnergy", bfInst);
+                    _pLsFoodRes = lsType.GetProperty("FoodReserved", bfInst);
+                    _pLsWorkRes = lsType.GetProperty("WorkersReserved", bfInst);
+                    _pLsEngRes = lsType.GetProperty("EnergyReserved", bfInst);
+                    _pLsWoodProd = lsType.GetProperty("WoodProduction", bfInst);
+                    _pLsStoneProd = lsType.GetProperty("StoneProduction", bfInst);
+                    _pLsIronProd = lsType.GetProperty("IronProduction", bfInst);
+                    _pLsOilProd = lsType.GetProperty("OilProduction", bfInst);
+                    _pLsGoldProd = lsType.GetProperty("GoldProduction", bfInst);
+                    _pLsWoodProdRes = lsType.GetProperty("WoodProductionReserved", bfInst);
+                    _pLsStoneProdRes = lsType.GetProperty("StoneProductionReserved", bfInst);
+                    _pLsIronProdRes = lsType.GetProperty("IronProductionReserved", bfInst);
+                    _pLsOilProdRes = lsType.GetProperty("OilProductionReserved", bfInst);
+                    _pLsNegGoldTurns = lsType.GetProperty("NTurnsWithNegativeGold", bfInst);
+                    _pLsNegFoodTurns = lsType.GetProperty("NTurnsWithNegativeFood", bfInst);
+                    _pLsNMarkets = lsType.GetProperty("NMarkets", bfInst);
+                    _pLsMaxGoldExport = lsType.GetProperty("MaxGoldByExportingExcedents", bfInst);
+                    _pLsMaxColonists = lsType.GetProperty("MaxColonists", bfInst);
+                    _pLsArmyGold = lsType.GetProperty("ArmyGoldCost", bfInst);
+                    _pLsArmyFoodPen = lsType.GetProperty("ArmyFoodPenaltyCost", bfInst);
+                    _pLsStructGold = lsType.GetProperty("StructuresGoldCost", bfInst);
+                    _pLsGoldPerCol = lsType.GetProperty("TotalGoldPerColonists", bfInst);
+                    _pLsBonusTemplates = lsType.GetProperty("BonusEntityTemplates", bfInst);
+                    _pLsOnlyOneCmds = lsType.GetProperty("OnlyOneExecutedCommandsFinished", bfInst);
+                    _pLsShowFullMap = lsType.GetProperty("ShowFullMap", bfInst);
+                    _pLsCurrentCc = lsType.GetProperty("CurrentCommandCenter", bfInst);
+
+                    _mLsRecalculate = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_Recalculate, Type.EmptyTypes);
+                    _mLsSetEnhancerBuildings = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_SetEnhancerBuildings);
+                    _mLsAddWoodMarket = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_AddWoodWithMarket, new[] { typeof(int) });
+                    _mLsAddStoneMarket = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_AddStoneWithMarket, new[] { typeof(int) });
+                    _mLsAddIronMarket = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_AddIronWithMarket, new[] { typeof(int) });
+                    _mLsAddOilMarket = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_AddOilWithMarket, new[] { typeof(int) });
+                    _mLsAddGoldDirect = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_AddGoldDirect, new[] { typeof(int) });
+                    if (TypeZXResourcesCost != null)
+                    {
+                        _mLsAddCost = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_AddCost, new[] { TypeZXResourcesCost });
+                        _mLsConsumeCost = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_ConsumeCost, new[] { TypeZXResourcesCost });
+                    }
+                    if (TypeZXCommand != null)
+                    {
+                        _mLsAddOnlyOne = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_AddOnlyOneExecuted, new[] { TypeZXCommand, typeof(bool) });
+                        _mLsHasOnlyOne = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_HasOnlyOneExecuted, new[] { TypeZXCommand });
+                    }
+                    _mLsSellWood = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_GetSellFactorWood, Type.EmptyTypes);
+                    _mLsSellStone = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_GetSellFactorStone, Type.EmptyTypes);
+                    _mLsSellIron = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_GetSellFactorIron, Type.EmptyTypes);
+                    _mLsSellOil = AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_GetSellFactorOil, Type.EmptyTypes);
+                }
+
+                if (TypeZXResourcesCost != null)
+                {
+                    _mResCostForType = AccessTools.Method(TypeZXResourcesCost, "#=zg0ptF1Dj8iTQ", new[] { typeof(Type) });
+                    _pResGold = TypeZXResourcesCost.GetProperty("Gold", BindingFlags.Public | BindingFlags.Instance);
+                    _pResWood = TypeZXResourcesCost.GetProperty("Wood", BindingFlags.Public | BindingFlags.Instance);
+                    _pResStone = TypeZXResourcesCost.GetProperty("Stone", BindingFlags.Public | BindingFlags.Instance);
+                    _pResIron = TypeZXResourcesCost.GetProperty("Iron", BindingFlags.Public | BindingFlags.Instance);
+                    _pResOil = TypeZXResourcesCost.GetProperty("Oil", BindingFlags.Public | BindingFlags.Instance);
+                    _pResFood = TypeZXResourcesCost.GetProperty("Food", BindingFlags.Public | BindingFlags.Instance);
+                    _pResWorkers = TypeZXResourcesCost.GetProperty("Workers", BindingFlags.Public | BindingFlags.Instance);
+                    _pResEnergy = TypeZXResourcesCost.GetProperty("Energy", BindingFlags.Public | BindingFlags.Instance);
+                }
+                if (TypeCommandCenter != null)
+                    _pCcTelescopeEnabled = TypeCommandCenter.GetProperty("TelescopeEnabled", BindingFlags.Public | BindingFlags.Instance);
+                if (TypeBuilding != null)
+                {
+                    BindingFlags bfInst = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                    _fBldgResCost = TypeBuilding.GetField(ObfuscatedSymbols.Field_Building_ResourceCost, bfInst);
+                    _pBldgCanSupply = TypeBuilding.GetProperty("CanSupplyResources", bfInst);
+                    _pBldgDisabledManual = TypeBuilding.GetProperty("DisabledManually", bfInst);
+                    _pBldgTotalFoodSup = TypeBuilding.GetProperty("TotalFoodSupply", bfInst);
+                    _pBldgTotalWorkSup = TypeBuilding.GetProperty("TotalWorkersSupply", bfInst);
+                    _pBldgTotalEngSup = TypeBuilding.GetProperty("TotalEnergySupply", bfInst);
+                    _pBldgTotalWoodSup = TypeBuilding.GetProperty("TotalWoodSupply", bfInst);
+                    _pBldgTotalStoneSup = TypeBuilding.GetProperty("TotalStoneSupply", bfInst);
+                    _pBldgTotalIronSup = TypeBuilding.GetProperty("TotalIronSupply", bfInst);
+                    _pBldgTotalOilSup = TypeBuilding.GetProperty("TotalOilSupply", bfInst);
+                    _pBldgTotalGoldSup = TypeBuilding.GetProperty("TotalGoldSupply", bfInst);
+                    _pBldgTotalFoodNeed = TypeBuilding.GetProperty("TotalFoodNeeded", bfInst);
+                }
+                if (TypeZXEntity != null)
+                {
+                    BindingFlags bfInst = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                    _fEntityCachedColor = TypeZXEntity.GetField(ObfuscatedSymbols.Field_ZXEntity_CachedMinimapColor, bfInst);
+                    _fEntityBaseColor = TypeZXEntity.GetField(ObfuscatedSymbols.Field_ZXEntity_BaseMinimapColor, bfInst);
+                }
+                var dpType = _methodEntityGetDefaultParams?.ReturnType;
+                if (dpType != null)
+                {
+                    _pDefMaxInstances = dpType.GetProperty("MaxInstances", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefReturnFactor = dpType.GetProperty("FactorResourcesReturn", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefCanEnhance = dpType.GetProperty("CanEnhanceNearBuildings", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefResGenTime = dpType.GetProperty("ResourcesGenerationTimeFactor", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefConvertResToGold = dpType.GetProperty("ConvertResourcesIntoGold", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefColonists = dpType.GetProperty("Colonists", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefResStorage = dpType.GetProperty("ResourcesStorage", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefGoldGen = dpType.GetProperty("GoldGen", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefGoldPerCol = dpType.GetProperty("GoldGenPerColonist", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefFoodNeed = dpType.GetProperty("FoodNeeded", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefWorkNeed = dpType.GetProperty("WorkersNeeded", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefWorkSupply = dpType.GetProperty("WorkersSupply", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefEngNeed = dpType.GetProperty("EnergyNeeded", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefWoodGen = dpType.GetProperty("WoodGen", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefStoneGen = dpType.GetProperty("StoneGen", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefIronGen = dpType.GetProperty("IronGen", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefOilGen = dpType.GetProperty("OilGen", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefResCollectRadius = dpType.GetProperty("ResourceCollectionRadius", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefGoldCost = dpType.GetProperty("GoldCost", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefLevel = dpType.GetProperty("Level", BindingFlags.Public | BindingFlags.Instance);
+                }
+                if (TypeZXCommand != null && TypeZXEntity != null)
+                    _mCmdGetCost = AccessTools.Method(TypeZXCommand, ObfuscatedSymbols.Method_ZXCommand_GetCost, new[] { TypeZXEntity });
+                if (TypeZXMayor != null)
+                {
+                    _pMayorBonusEntities = TypeZXMayor.GetProperty("BonusEntities", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorBonusTechs = TypeZXMayor.GetProperty("BonusTechnologies", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorExtraGold = TypeZXMayor.GetProperty("ExtraGold", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorExtraWood = TypeZXMayor.GetProperty("ExtraWood", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorExtraStone = TypeZXMayor.GetProperty("ExtraStone", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorExtraIron = TypeZXMayor.GetProperty("ExtraIron", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorExtraOil = TypeZXMayor.GetProperty("ExtraOil", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorNameProp = TypeZXMayor.GetProperty("Name", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorIdProp = TypeZXMayor.GetProperty("ID", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorLevelProp = TypeZXMayor.GetProperty("Level", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorQuoteProp = TypeZXMayor.GetProperty("Quote", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorActiveProp = TypeZXMayor.GetProperty("Active", BindingFlags.Public | BindingFlags.Instance);
+                    _pMayorCustomProp = TypeZXMayor.GetProperty("Custom", BindingFlags.Public | BindingFlags.Instance);
                 }
 
                 Check(TypeZXMapGenerator, "Type RandomMapGenerator");
@@ -629,6 +1003,85 @@ namespace TABCoopMod.Core
                 Check(_propMovableTargetPosProp, "CMovable.TargetPosition");
                 Check(_propMovablePath, "CMovable.Path");
                 Check(_fieldMovablePendingPath, "CMovable.PendingPathRequest");
+                Check(_typeZXSystemMapLayers, "Type ZXSystemMapLayers");
+                Check(_fieldMapLayersCurrent, "ZXSystemMapLayers.Current");
+                Check(_fieldMapLayersEnergyGrid, "ZXSystemMapLayers.EnergyGrid");
+                Check(_fieldMapLayersEnergyFrontier, "ZXSystemMapLayers.EnergyFrontier");
+                Check(_fieldMapLayersEnergySources, "ZXSystemMapLayers.EnergySources");
+                Check(_fieldMapLayersEnergyLastIdx, "ZXSystemMapLayers.EnergyLastIdx");
+                Check(_methodMapLayersRebuildEnergyGrid, "ZXSystemMapLayers.RebuildEnergyGrid");
+                Check(TypeCEnergyTransferer, "Type CEnergyTransferer");
+                Check(TypeCNeutralJoinable, "Type CNeutralJoinable");
+                Check(TypeCLife, "Type CLife");
+                Check(TypeTrain, "Type ZX.Commands.Train");
+                Check(TypeUpgrade, "Type ZX.Commands.Upgrade");
+                Check(_fieldLevelStateCachedCC, "ZXLevelState.CachedCC");
+                Check(_methodLevelStateRefreshCCCell, "ZXLevelState.RefreshCCCell");
+                Check(_propLevelStateCurrentCCCell, "ZXLevelState.CurrentCommandCenterCell");
+                Check(_propLevelStateInfectedDestiny, "ZXLevelState.DefaultCellInfectedDestiny");
+                Check(_propLevelStateScriptVars, "ZXLevelState.ScriptVariables");
+                Check(_fieldLevelSysCurrentCC, "ZXSystemGameLevel.CurrentCommandCenter");
+                Check(_propBuildingInfected, "Building.Infected");
+                Check(_propDefaultParamsEnergyRadius, "ZXEntityDefaultParams.EnergyTransferRadius");
+                Check(_typeBData, "Type ZX.Behaviours.BData");
+                Check(_methodBDataGetOwner, "BData.GetOwner");
+                Check(_propBDataTargetPos, "BData.TargetPosition");
+                Check(TypeTechnology, "Type ZX.Commands.Technology");
+                Check(TypeUndoBuilding, "Type ZX.Commands.UndoBuilding");
+                Check(TypeDestroy, "Type ZX.Commands.Destroy");
+                Check(TypeCResourceGenerator, "Type ZX.Components.CResourceGenerator");
+                Check(TypePickableItem, "Type ZX.Entities.PickableItem");
+                Check(TypeTheGreatTelescope, "Type ZX.Entities.TheGreatTelescope");
+                Check(TypeTheAcademy, "Type ZX.Entities.TheAcademy");
+                Check(TypeTheSpire, "Type ZX.Entities.TheSpire");
+                Check(TypeTheCrystalPalace, "Type ZX.Entities.TheCrystalPalace");
+                Check(TypeTheTransmutator, "Type ZX.Entities.TheTransmutator");
+                Check(TypeTheVictorious, "Type ZX.Entities.TheVictorious");
+                Check(TypeTechGreatTelescope, "Type ZX.Commands.TechTheGreatTelescope");
+                Check(TypeTechSoldierAcademy, "Type ZX.Commands.TechTheSoldierAcademy");
+                Check(TypeTechElectricSpire, "Type ZX.Commands.TechTheElectricSpire");
+                Check(TypeZXResourcesCost, "Type ZX.ZXResourcesCost");
+                Check(TypeZXMayor, "Type ZX.ZXMayor");
+                Check(_fLsWood, "ZXLevelState.Wood field");
+                Check(_fLsGold, "ZXLevelState.Gold field");
+                Check(_fLsStorage, "ZXLevelState.ResourceStorage field");
+                Check(_pLsOnlyOneCmds, "ZXLevelState.OnlyOneExecutedCommandsFinished");
+                Check(_mLsRecalculate, "ZXLevelState.Recalculate");
+                Check(_mLsAddWoodMarket, "ZXLevelState.AddWoodWithMarket");
+                Check(_mLsAddGoldDirect, "ZXLevelState.AddGoldDirect");
+                Check(_mLsConsumeCost, "ZXLevelState.ConsumeCost");
+                Check(_mLsAddCost, "ZXLevelState.AddCost");
+                Check(_mResCostForType, "ZXResourcesCost.ForEntityType");
+                Check(_pCcTelescopeEnabled, "CommandCenter.TelescopeEnabled");
+                Check(_fBldgResCost, "Building.ResourceCost field");
+                Check(_pDefMaxInstances, "ZXEntityDefaultParams.MaxInstances");
+                Check(_pDefWorkSupply, "ZXEntityDefaultParams.WorkersSupply");
+                Check(_mCmdGetCost, "ZXCommand.GetCost");
+                Check(_propMapThemeNumDoomVillages, "ZXMapTheme.NumDoomVillages");
+                Check(_propMapDrawerLayerZombies, "ZXMapDrawer.LayerZombies");
+                Check(_propLevelEventNTimesTriggered, "ZXLevelEvent.NTimesTriggered");
+                Check(_propLevelEventShowCountdown, "ZXLevelEvent.ShowCountdown");
+                Check(_propLevelEventMaxRepetitions, "ZXLevelEvent.MaxRepetitions");
+                Check(_propLevelEventAttackCC, "ZXLevelEvent.AttackCommandCenter");
+                Check(_propLevelEventCurrentUnitGenerators, "ZXLevelEvent.CurrentUnitGenerators");
+                Check(_typeCUnitGenerator, "Type ZX.Components.CUnitGenerator");
+                Check(_propUnitGenConfigName, "CUnitGenerator.Configuration.Name");
+                Check(_propGenReqIDEvent, "GenerationRequest.IDEvent");
+                Check(_propGenReqCount, "GenerationRequest.Count");
+                Check(_propGenReqGenSpeed, "GenerationRequest.GenerationSpeed");
+                Check(_methodGenReqGetTemplate, "GenerationRequest.GetTemplate");
+                Check(_typeCInfectionNest, "Type ZX.Components.CInfectionNest");
+                Check(_propInfectionNestFactor, "CInfectionNest.Configuration.InfectedFactor");
+                Check(_typeCMiniMapInfo, "Type ZX.Components.CMiniMapInfo");
+                Check(_propZombieCellsAwayRoaming, "Zombie.CellsAwayCommandCenterWhenRoaming");
+                Check(TypeZombieGiant, "Type ZX.Entities.ZombieGiant");
+                Check(TypeZombieMutant, "Type ZX.Entities.ZombieMutant");
+                Check(TypeZombieStrongA, "Type ZX.Entities.ZombieStrongA");
+                Check(TypeZombieVenom, "Type ZX.Entities.ZombieVenom");
+                Check(TypeZombieHarpy, "Type ZX.Entities.ZombieHarpy");
+                Check(_methodCatalogDoomNestLarge, "Catalog.DoomNestLarge");
+                Check(_methodCatalogDoomNestMedium, "Catalog.DoomNestMedium");
+                Check(_methodCatalogDoomNestSmall, "Catalog.DoomNestSmall");
 
                 if (missingCount == 0)
                 {
@@ -840,6 +1293,7 @@ namespace TABCoopMod.Core
                 var groups = _methodLevelStateGetSelectionGroups.Invoke(ls, null) as IList;
                 if (groups == null) return;
 
+                var filter = LocalEntityControlFilter;
                 int slotCount = Math.Min(savedGroups.Length, groups.Count);
                 int restoredTotal = 0;
                 for (int i = 0; i < slotCount; i++)
@@ -854,9 +1308,15 @@ namespace TABCoopMod.Core
                     for (int j = 0; j < ids.Length; j++)
                     {
                         DXEntity ent = game.GetEntityByID(ids[j]);
-                        if (ent is ZXEntity zxEnt && !zxEnt.Disposed && !list.Contains(zxEnt))
+                        // Never reference internal ZXEntity directly at runtime (CLR 4.6 TypeAccessException);
+                        // check via TypeZXEntity reflection and enforce local ownership filter.
+                        if (ent != null && !ent.Disposed
+                            && (TypeZXEntity == null || TypeZXEntity.IsInstanceOfType(ent))
+                            && IsPlayerEntity(ent)
+                            && (filter == null || filter(ent))
+                            && !list.Contains(ent))
                         {
-                            list.Add(zxEnt);
+                            list.Add(ent);
                             restoredTotal++;
                         }
                     }
@@ -1347,9 +1807,20 @@ namespace TABCoopMod.Core
         public static void CancelCurrentOrderObject(object commandable) => _mCancelCur?.Invoke(commandable, null);
         public static void CancelQueueSlotObject(object commandable, int slotIndex) => _mCancelSlot?.Invoke(commandable, new object[] { slotIndex });
 
-        public static DXConcurrentList<CSelectable> GetLocallySelectedList()
+        private static PropertyInfo _propSelectedSetData;
+
+        public static object GetLocallySelectedList()
         {
-            return (DXConcurrentList<CSelectable>)_fieldSelectedList.GetValue(null);
+            return _fieldSelectedList?.GetValue(null);
+        }
+
+        private static IEnumerable EnumerateSelectedComponents()
+        {
+            object setObj = _fieldSelectedList?.GetValue(null);
+            if (setObj == null) return Array.Empty<object>();
+            if (_propSelectedSetData == null)
+                _propSelectedSetData = setObj.GetType().GetProperty("Data", BindingFlags.Public | BindingFlags.Instance);
+            return (_propSelectedSetData?.GetValue(setObj, null) as IEnumerable) ?? Array.Empty<object>();
         }
 
         public static ZXEntity GetPrimarySelectedEntity() => (ZXEntity)_mPrimarySel.Invoke(null, null);
@@ -1624,7 +2095,7 @@ namespace TABCoopMod.Core
             return ok;
         }
 
-        private static object GetMapLayersInstance()
+        public static object GetMapLayersInstance()
         {
             if (_mapLayersType == null)
                 _mapLayersType = GameAssembly?.GetType(ObfuscatedSymbols.Type_ZXSystemMapLayers);
@@ -2248,16 +2719,15 @@ namespace TABCoopMod.Core
 
         public static ulong[] GetSelectedPlayerEntityIds()
         {
-            var listObj = _fieldSelectedList?.GetValue(null) as IEnumerable;
-            if (listObj == null) return Array.Empty<ulong>();
-
             var ids = new List<ulong>();
-            foreach (object item in listObj)
+            foreach (object item in EnumerateSelectedComponents())
             {
                 var comp = item as DXComponent;
                 var ent = comp?.Entity;
                 if (ent == null || ent.Disposed) continue;
-                if (HasComponent(ent, TypeCMovable) && HasComponent(ent, TypeCCommandable) && IsPlayerEntity(ent))
+                var filter = LocalEntityControlFilter;
+                if (HasComponent(ent, TypeCMovable) && HasComponent(ent, TypeCCommandable) && IsPlayerEntity(ent)
+                    && (filter == null || filter(ent)))
                     ids.Add(ent.ID);
             }
             ids.Sort();
@@ -2274,6 +2744,9 @@ namespace TABCoopMod.Core
                     GameAssembly.GetType("ZX.Commands.Travel"),
                     GameAssembly.GetType("ZX.Commands.Patrol"),
                     GameAssembly.GetType("ZX.Commands.Chase"),
+                    GameAssembly.GetType("ZX.Commands.Attack"),
+                    GameAssembly.GetType("ZX.Commands.Stop"),
+                    GameAssembly.GetType("ZX.Commands.Hold"),
                     GameAssembly.GetType("ZX.Commands.UseItem_Grenade")
                 };
             }
@@ -3161,14 +3634,19 @@ namespace TABCoopMod.Core
         /// </summary>
         public static bool HasComponent(DXEntity entity, Type componentType)
         {
-            if (entity == null || componentType == null) return false;
+            return FindComponent(entity, componentType) != null;
+        }
+
+        public static DXComponent FindComponent(DXEntity entity, Type componentType)
+        {
+            if (entity == null || componentType == null) return null;
             var comps = entity.Components;
-            if (comps == null) return false;
+            if (comps == null) return null;
             for (int i = 0; i < comps.Count; i++)
             {
-                if (IsComponentOfType(comps[i], componentType)) return true;
+                if (IsComponentOfType(comps[i], componentType)) return comps[i];
             }
-            return false;
+            return null;
         }
 
         private static bool IsComponentOfType(object component, Type componentType) => componentType.IsInstanceOfType(component);
@@ -3964,11 +4442,9 @@ namespace TABCoopMod.Core
         {
             EnsureInteractionMeta();
             if (_fCmdableCurCmd == null || _fCmdableCurTarget == null) return null;
-            var listObj = _fieldSelectedList?.GetValue(null) as IEnumerable;
-            if (listObj == null) return null;
 
             List<CommandableSnapshot> snaps = null;
-            foreach (object item in listObj)
+            foreach (object item in EnumerateSelectedComponents())
             {
                 var ent = (item as DXComponent)?.Entity;
                 if (ent == null || ent.Disposed || !IsPlayerEntity(ent)) continue;
@@ -4304,6 +4780,7 @@ namespace TABCoopMod.Core
         public struct MapThemeBalanceSnapshot
         {
             public object ThemeObj;
+            public DXRange<int> NumDoomVillages;
             public DXRange<int> DoomVillagesSize;
             public DXRange<int> NumTreasures;
             public DXRange<int> NumSuppyFood;
@@ -4318,6 +4795,7 @@ namespace TABCoopMod.Core
             return new MapThemeBalanceSnapshot
             {
                 ThemeObj = themeObj,
+                NumDoomVillages = _propMapThemeNumDoomVillages != null ? (DXRange<int>)_propMapThemeNumDoomVillages.GetValue(themeObj) : default(DXRange<int>),
                 DoomVillagesSize = (DXRange<int>)_propMapThemeDoomVillagesSize.GetValue(themeObj),
                 NumTreasures = (DXRange<int>)_propMapThemeNumTreasures.GetValue(themeObj),
                 NumSuppyFood = (DXRange<int>)_propMapThemeNumSuppyFood.GetValue(themeObj),
@@ -4350,6 +4828,8 @@ namespace TABCoopMod.Core
 
         public static void RestoreMapThemeSnapshot(MapThemeBalanceSnapshot snap)
         {
+            if (snap.ThemeObj != null && _propMapThemeNumDoomVillages != null)
+                _propMapThemeNumDoomVillages.SetValue(snap.ThemeObj, snap.NumDoomVillages);
             ApplyMapThemeValues(
                 snap.ThemeObj,
                 snap.DoomVillagesSize,
@@ -4542,7 +5022,9 @@ namespace TABCoopMod.Core
             float factorZombiePop = 1f,
             float factorDuration = 1f,
             Sync.CoopBalancePreset? overridePreset = null,
-            int? overridePlayerCount = null)
+            int? overridePlayerCount = null,
+            bool? overrideMultiFaction = null,
+            Sync.MultiFactionSpawnMode? overrideSpawnMode = null)
         {
             if (SurvivalGenInProgress)
             {
@@ -4636,6 +5118,8 @@ namespace TABCoopMod.Core
 
                         Sync.CoopBalanceManager.TestOverridePreset = overridePreset;
                         Sync.CoopBalanceManager.TestOverridePlayerCount = overridePlayerCount;
+                        Sync.CoopBalanceManager.TestOverrideMultiFaction = overrideMultiFaction;
+                        Sync.CoopBalanceManager.TestOverrideSpawnMode = overrideSpawnMode;
 
                         ModLogger.Info("[GameBridge] StartSurvivalAsync worker calling MapGenerator.Generate...");
                         generated = _methodMapGeneratorGenerate.Invoke(null, new[] { randParams }) as DXLevel;
@@ -4659,6 +5143,8 @@ namespace TABCoopMod.Core
                     {
                         Sync.CoopBalanceManager.TestOverridePreset = null;
                         Sync.CoopBalanceManager.TestOverridePlayerCount = null;
+                        Sync.CoopBalanceManager.TestOverrideMultiFaction = null;
+                        Sync.CoopBalanceManager.TestOverrideSpawnMode = null;
                     }
                 };
 
@@ -4674,7 +5160,16 @@ namespace TABCoopMod.Core
                             ClearWaitCursor();
                             if (game != null) game.Paused = true;
                             SurvivalGenLastOk = DXLevel.Current != null && CurrentLevelState != null;
-                            if (!SurvivalGenLastOk) SurvivalGenLastError = "DXLevel or LevelState null after EnterGameView";
+                            if (!SurvivalGenLastOk)
+                            {
+                                SurvivalGenLastError = "DXLevel or LevelState null after EnterGameView";
+                            }
+                            else if (overrideMultiFaction == true && !Sync.CoopSessionManager.IsSessionActive)
+                            {
+                                int pCount = Math.Max(2, Math.Min(3, overridePlayerCount ?? 2));
+                                Sync.FactionOwnershipTracker.AssignInitialOwnershipFromLevel(pCount);
+                                Patches.MultiWaveSwarmContext.Reset();
+                            }
                         }
                         else
                         {
@@ -4734,8 +5229,14 @@ namespace TABCoopMod.Core
             res["ccExtraFood"] = ccF;
 
             int rangers = 0, soldiers = 0, zombies = 0, giants = 0, mutants = 0;
+            int weakZombies = 0, mediumZombies = 0, strongZombies = 0;
+            int chubbyZombies = 0, venomZombies = 0, harpyZombies = 0;
             int doomVillages = 0, oilSources = 0, pickables = 0, trees = 0, minerals = 0;
             var nestType = GameAssembly?.GetType("ZX.Components.CInfectionNest");
+            var ccEntities = new List<DXEntity>();
+            var oilCells = new List<Point>();
+            var zombieCells = new List<Point>();
+            var doomCells = new List<Point>();
 
             if (DXGame.Current?.Entities != null)
             {
@@ -4743,24 +5244,42 @@ namespace TABCoopMod.Core
                 {
                     if (e == null || e.Disposed) continue;
                     string tn = e.GetType().Name;
+                    if (IsCommandCenter(e)) ccEntities.Add(e);
                     if (tn == "Ranger") rangers++;
                     else if (tn == "SoldierRegular") soldiers++;
-                    else if (tn == "OilSource") oilSources++;
-                    else if (tn.Contains("Giant") && _typeZombie != null && _typeZombie.IsInstanceOfType(e)) { giants++; zombies++; }
-                    else if (tn.Contains("Mutant") && _typeZombie != null && _typeZombie.IsInstanceOfType(e)) { mutants++; zombies++; }
-                    else if (_typeZombie != null && _typeZombie.IsInstanceOfType(e)) zombies++;
+                    else if (tn == "OilSource") { oilSources++; oilCells.Add(e.Cell); }
+                    else if (tn.Contains("Giant") && _typeZombie != null && _typeZombie.IsInstanceOfType(e)) { giants++; zombies++; zombieCells.Add(e.Cell); }
+                    else if (tn.Contains("Mutant") && _typeZombie != null && _typeZombie.IsInstanceOfType(e)) { mutants++; zombies++; zombieCells.Add(e.Cell); }
+                    else if (_typeZombie != null && _typeZombie.IsInstanceOfType(e))
+                    {
+                        zombies++;
+                        zombieCells.Add(e.Cell);
+                        if (tn.StartsWith("ZombieWeak", StringComparison.Ordinal)) weakZombies++;
+                        else if (tn.StartsWith("ZombieMedium", StringComparison.Ordinal) || tn.StartsWith("ZombieWorker", StringComparison.Ordinal)) mediumZombies++;
+                        else if (tn.StartsWith("ZombieDressed", StringComparison.Ordinal)) strongZombies++;
+                        else if (tn.StartsWith("ZombieStrong", StringComparison.Ordinal)) chubbyZombies++;
+                        else if (tn == "ZombieVenom") venomZombies++;
+                        else if (tn == "ZombieHarpy") harpyZombies++;
+                    }
                     else if (tn.Contains("Pickable") || tn.Contains("Item") || tn.Contains("Gold") && !tn.Contains("Mineral")) pickables++;
                     else if (tn.Contains("Forest") || tn.Contains("Tree")) trees++;
                     else if (tn.Contains("Mineral")) minerals++;
 
                     if (nestType != null && e.Components != null && e.Components.Exists(c => c != null && nestType.IsInstanceOfType(c)))
+                    {
                         doomVillages++;
+                        doomCells.Add(e.Cell);
+                    }
                 }
             }
 
             // Also count static map-layer mineral/forest cells from MapDrawer
             int terrainTrees = 0, terrainGold = 0, terrainStone = 0, terrainIron = 0;
-            if (DXLevel.Current != null && TryGetGeneratedLevelContext(DXLevel.Current, out _, out _, out _, out var layerObj, out int gN, out _))
+            var ccDetails = new List<Dictionary<string, object>>();
+            DXGridLayerEnum<ZXMapLayerTerrainType> layerTerrain = null;
+            DXGridLayerEnum<ZXMapLayerObjectType> layerObj = null;
+            int gN = 0;
+            if (DXLevel.Current != null && TryGetGeneratedLevelContext(DXLevel.Current, out _, out _, out layerTerrain, out layerObj, out gN, out _))
             {
                 if (layerObj != null && gN > 0)
                 {
@@ -4778,10 +5297,116 @@ namespace TABCoopMod.Core
                 }
             }
 
+            for (int ci = 0; ci < ccEntities.Count; ci++)
+            {
+                var cc = ccEntities[ci];
+                int cx = cc.CellX, cy = cc.CellY;
+                double minOtherDist = ccEntities.Count > 1 ? double.MaxValue : 0.0;
+                for (int oi = 0; oi < ccEntities.Count; oi++)
+                {
+                    if (oi == ci) continue;
+                    double dx = ccEntities[oi].CellX - cx;
+                    double dy = ccEntities[oi].CellY - cy;
+                    double d = Math.Sqrt(dx * dx + dy * dy);
+                    if (d < minOtherDist) minOtherDist = d;
+                }
+                double distToFirst = ci == 0 ? 0.0 : Math.Sqrt((cx - ccEntities[0].CellX) * (double)(cx - ccEntities[0].CellX) + (cy - ccEntities[0].CellY) * (double)(cy - ccEntities[0].CellY));
+
+                double minZombieDist = -1.0;
+                for (int zi = 0; zi < zombieCells.Count; zi++)
+                {
+                    double dx = zombieCells[zi].X - cx;
+                    double dy = zombieCells[zi].Y - cy;
+                    double d = Math.Sqrt(dx * dx + dy * dy);
+                    if (minZombieDist < 0.0 || d < minZombieDist) minZombieDist = d;
+                }
+
+                double minDoomDist = -1.0;
+                for (int di = 0; di < doomCells.Count; di++)
+                {
+                    double dx = doomCells[di].X - cx;
+                    double dy = doomCells[di].Y - cy;
+                    double d = Math.Sqrt(dx * dx + dy * dy);
+                    if (minDoomDist < 0.0 || d < minDoomDist) minDoomDist = d;
+                }
+
+                int oil48 = 0;
+                for (int oi = 0; oi < oilCells.Count; oi++)
+                {
+                    long dx = oilCells[oi].X - cx;
+                    long dy = oilCells[oi].Y - cy;
+                    if (dx * dx + dy * dy <= 48L * 48L) oil48++;
+                }
+
+                int trees16 = 0, grass16 = 0, water16 = 0, stone24 = 0, iron48 = 0, gold30 = 0;
+                if (layerObj != null && layerTerrain != null && gN > 0)
+                {
+                    int xMin = Math.Max(0, cx - 48), xMax = Math.Min(gN - 1, cx + 48);
+                    int yMin = Math.Max(0, cy - 48), yMax = Math.Min(gN - 1, cy + 48);
+                    for (int x = xMin; x <= xMax; x++)
+                    {
+                        int dx = x - cx;
+                        for (int y = yMin; y <= yMax; y++)
+                        {
+                            int dy = y - cy;
+                            int d2 = dx * dx + dy * dy;
+                            if (d2 > 48 * 48) continue;
+                            var o = layerObj[x, y];
+                            var tr = layerTerrain[x, y];
+                            if (d2 <= 16 * 16)
+                            {
+                                if (o == ZXMapLayerObjectType.Tree) trees16++;
+                                if (tr == ZXMapLayerTerrainType.Grass) grass16++;
+                                else if (tr == ZXMapLayerTerrainType.Water) water16++;
+                            }
+                            if (d2 <= 24 * 24 && o == ZXMapLayerObjectType.MineralStone) stone24++;
+                            if (d2 <= 30 * 30 && o == ZXMapLayerObjectType.MineralGold) gold30++;
+                            if (o == ZXMapLayerObjectType.MineralIron) iron48++;
+                        }
+                    }
+                }
+
+                ccDetails.Add(new Dictionary<string, object>
+                {
+                    ["index"] = ci + 1,
+                    ["x"] = cx,
+                    ["y"] = cy,
+                    ["normX"] = gN > 0 ? Math.Round((double)cx / gN, 4) : 0.0,
+                    ["normY"] = gN > 0 ? Math.Round((double)cy / gN, 4) : 0.0,
+                    ["distToCc1"] = Math.Round(distToFirst, 1),
+                    ["minOtherCcDist"] = Math.Round(minOtherDist, 1),
+                    ["trees16"] = trees16,
+                    ["grass16"] = grass16,
+                    ["water16"] = water16,
+                    ["stone24"] = stone24,
+                    ["iron48"] = iron48,
+                    ["gold30"] = gold30,
+                    ["oil48"] = oil48,
+                    ["nearestZombieDist"] = minZombieDist >= 0.0 ? Math.Round(minZombieDist, 1) : -1.0,
+                    ["nearestDoomDist"] = minDoomDist >= 0.0 ? Math.Round(minDoomDist, 1) : -1.0
+                });
+            }
+
             int levelEventsCount = GetLevelCollectionCount("LevelEvents");
+            bool allCcsConnected = CheckAllCcsWalkableConnected(ccEntities, layerTerrain, layerObj, gN);
+            double cc1CenterDist = 0.0;
+            if (ccEntities.Count > 0 && gN > 0)
+            {
+                double dx = ccEntities[0].CellX - gN * 0.5;
+                double dy = ccEntities[0].CellY - gN * 0.5;
+                cc1CenterDist = Math.Round(Math.Sqrt(dx * dx + dy * dy), 1);
+            }
+            res["commandCenterCount"] = ccEntities.Count;
+            res["commandCenters"] = ccDetails;
             res["rangers"] = rangers;
             res["soldiers"] = soldiers;
             res["zombiesTotal"] = zombies;
+            res["weakZombies"] = weakZombies;
+            res["mediumZombies"] = mediumZombies;
+            res["strongZombies"] = strongZombies;
+            res["chubbyZombies"] = chubbyZombies;
+            res["venomZombies"] = venomZombies;
+            res["harpyZombies"] = harpyZombies;
             res["giants"] = giants;
             res["mutants"] = mutants;
             res["doomVillages"] = doomVillages;
@@ -4792,7 +5417,1296 @@ namespace TABCoopMod.Core
             res["terrainStoneCells"] = terrainStone;
             res["terrainIronCells"] = terrainIron;
             res["levelEventsCount"] = levelEventsCount;
+            res["spawnMode"] = Sync.FactionOwnershipTracker.ActiveSpawnMode.ToString();
+            res["mutationTendency"] = Sync.FactionOwnershipTracker.ActiveMutationTendency.ToString();
+            res["allCcsConnected"] = allCcsConnected;
+            res["cc1DistFromCenter"] = cc1CenterDist;
             return res;
+        }
+
+        private static bool CheckAllCcsWalkableConnected(
+            List<DXEntity> ccs,
+            DXGridLayerEnum<ZXMapLayerTerrainType> layerTerrain,
+            DXGridLayerEnum<ZXMapLayerObjectType> layerObj,
+            int gN)
+        {
+            if (ccs == null || ccs.Count <= 1 || layerTerrain == null || layerObj == null || gN <= 0)
+                return true;
+
+            var visited = new bool[gN, gN];
+            var q = new Queue<Point>(4096);
+            // Seed around CC1's 5x5 footprint
+            for (int dx = -3; dx <= 3; dx++)
+            {
+                for (int dy = -3; dy <= 3; dy++)
+                {
+                    int sx = ccs[0].CellX + dx;
+                    int sy = ccs[0].CellY + dy;
+                    if (sx > 1 && sy > 1 && sx < gN - 1 && sy < gN - 1 && !visited[sx, sy])
+                    {
+                        var tr = layerTerrain[sx, sy];
+                        var ob = layerObj[sx, sy];
+                        if ((tr == ZXMapLayerTerrainType.Earth || tr == ZXMapLayerTerrainType.Grass) &&
+                            (ob == ZXMapLayerObjectType.None || ob == ZXMapLayerObjectType.MineralGold ||
+                             ob == ZXMapLayerObjectType.MineralStone || ob == ZXMapLayerObjectType.MineralIron))
+                        {
+                            visited[sx, sy] = true;
+                            q.Enqueue(new Point(sx, sy));
+                        }
+                    }
+                }
+            }
+
+            while (q.Count > 0)
+            {
+                Point p = q.Dequeue();
+                for (int dir = 0; dir < 4; dir++)
+                {
+                    int nx = p.X + (dir == 0 ? 1 : (dir == 1 ? -1 : 0));
+                    int ny = p.Y + (dir == 2 ? 1 : (dir == 3 ? -1 : 0));
+                    if (nx <= 1 || ny <= 1 || nx >= gN - 1 || ny >= gN - 1 || visited[nx, ny]) continue;
+                    var tr = layerTerrain[nx, ny];
+                    var ob = layerObj[nx, ny];
+                    if ((tr != ZXMapLayerTerrainType.Earth && tr != ZXMapLayerTerrainType.Grass) ||
+                        ob == ZXMapLayerObjectType.Mountain || ob == ZXMapLayerObjectType.Tree)
+                        continue;
+                    visited[nx, ny] = true;
+                    q.Enqueue(new Point(nx, ny));
+                }
+            }
+
+            for (int i = 1; i < ccs.Count; i++)
+            {
+                bool reached = false;
+                for (int dx = -3; dx <= 3 && !reached; dx++)
+                {
+                    for (int dy = -3; dy <= 3 && !reached; dy++)
+                    {
+                        int tx = ccs[i].CellX + dx;
+                        int ty = ccs[i].CellY + dy;
+                        if (tx > 0 && ty > 0 && tx < gN && ty < gN && visited[tx, ty])
+                            reached = true;
+                    }
+                }
+                if (!reached) return false;
+            }
+            return true;
+        }
+
+        // ====================================================================
+        // Phase 4 M1 Multi-Faction Helpers
+        // ====================================================================
+
+        public static bool IsCommandCenter(DXEntity entity)
+        {
+            return entity != null && TypeCommandCenter != null && TypeCommandCenter.IsInstanceOfType(entity);
+        }
+
+        public static bool IsBuildingInfected(DXEntity entity)
+        {
+            if (entity == null || _propBuildingInfected == null || TypeBuilding == null || !TypeBuilding.IsInstanceOfType(entity))
+                return false;
+            try { return (bool)_propBuildingInfected.GetValue(entity); } catch { return false; }
+        }
+
+        public static bool IsEntityAlive(DXEntity entity)
+        {
+            if (entity == null || entity.Disposed) return false;
+            object life = GetLifeObject(entity);
+            if (life == null) return true;
+            try
+            {
+                Type t = life.GetType();
+                if (!_isAlivePropCache.TryGetValue(t, out PropertyInfo aliveProp))
+                {
+                    aliveProp = t.GetProperty("IsAlive", BindingFlags.Public | BindingFlags.Instance);
+                    _isAlivePropCache[t] = aliveProp;
+                }
+                return aliveProp == null || (bool)aliveProp.GetValue(life);
+            }
+            catch { return true; }
+        }
+
+        public static List<DXEntity> GetAllCommandCenters(bool aliveOnly = true)
+        {
+            var result = new List<DXEntity>();
+            var game = DXGame.Current;
+            if (game == null) return result;
+            var entities = GetEntitiesList(game);
+            if (entities != null)
+            {
+                for (int i = 0; i < entities.Count; i++)
+                {
+                    var e = entities[i];
+                    if (e == null || e.Disposed || !IsCommandCenter(e)) continue;
+                    if (!IsPlayerEntity(e)) continue;
+                    if (aliveOnly && (!IsEntityAlive(e) || IsBuildingInfected(e))) continue;
+                    result.Add(e);
+                }
+            }
+            else if (game.Entities != null)
+            {
+                foreach (var e in game.Entities)
+                {
+                    if (e == null || e.Disposed || !IsCommandCenter(e)) continue;
+                    if (!IsPlayerEntity(e)) continue;
+                    if (aliveOnly && (!IsEntityAlive(e) || IsBuildingInfected(e))) continue;
+                    result.Add(e);
+                }
+            }
+            result.Sort((a, b) =>
+            {
+                int cx = a.CellX.CompareTo(b.CellX);
+                if (cx != 0) return cx;
+                int cy = a.CellY.CompareTo(b.CellY);
+                if (cy != 0) return cy;
+                return a.ID.CompareTo(b.ID);
+            });
+            return result;
+        }
+
+        public static DXEntity GetLevelSysCurrentCommandCenter()
+        {
+            var lvlSys = LevelSystemInstance;
+            if (lvlSys == null || _fieldLevelSysCurrentCC == null) return null;
+            try { return _fieldLevelSysCurrentCC.GetValue(lvlSys) as DXEntity; } catch { return null; }
+        }
+
+        public static void SetLevelSysCurrentCommandCenter(DXEntity cc)
+        {
+            var lvlSys = LevelSystemInstance;
+            if (lvlSys == null || _fieldLevelSysCurrentCC == null) return;
+            try { _fieldLevelSysCurrentCC.SetValue(lvlSys, cc); } catch { }
+        }
+
+        public static void RefreshLevelStateCommandCenter(DXEntity preferredCc = null)
+        {
+            var ls = CurrentLevelState;
+            if (ls == null) return;
+            try
+            {
+                if (preferredCc != null && !preferredCc.Disposed)
+                {
+                    _fieldLevelStateCachedCC?.SetValue(ls, preferredCc);
+                    _propLevelStateCurrentCCCell?.SetValue(ls, (Point?)preferredCc.Cell);
+                    _propLevelStateInfectedDestiny?.SetValue(ls, preferredCc.Cell);
+                }
+                else
+                {
+                    _fieldLevelStateCachedCC?.SetValue(ls, null);
+                    _methodLevelStateRefreshCCCell?.Invoke(ls, null);
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] RefreshLevelStateCommandCenter failed: {ex.Message}");
+            }
+        }
+
+        public static bool SetLevelStateCurrentCommandCenterCell(Point? cell, out Point? previous)
+        {
+            previous = null;
+            var ls = CurrentLevelState;
+            if (ls == null || _propLevelStateCurrentCCCell == null) return false;
+            try
+            {
+                previous = (Point?)_propLevelStateCurrentCCCell.GetValue(ls);
+                _propLevelStateCurrentCCCell.SetValue(ls, cell);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        public static void SelectOnlyEntity(DXEntity entity)
+        {
+            if (entity == null || entity.Disposed || _mUnselectAll == null || _mGetEntitySel == null) return;
+            try
+            {
+                _mUnselectAll.Invoke(null, null);
+                object sel = _mGetEntitySel.Invoke(entity, null);
+                if (sel != null)
+                {
+                    var prop = sel.GetType().GetProperty("Selected", BindingFlags.Public | BindingFlags.Instance);
+                    prop?.SetValue(sel, true);
+                }
+                _methodLevelSysRefreshCmdPanel?.Invoke(LevelSystemInstance, null);
+            }
+            catch { }
+        }
+
+        public static void UnselectAllEntities()
+        {
+            try
+            {
+                _mUnselectAll?.Invoke(null, null);
+                _methodLevelSysRefreshCmdPanel?.Invoke(LevelSystemInstance, null);
+            }
+            catch { }
+        }
+
+        public static bool IsEntitySelected(DXEntity entity)
+        {
+            if (entity == null || _fieldSelectedList == null) return false;
+            foreach (object item in EnumerateSelectedComponents())
+            {
+                if ((item as DXComponent)?.Entity == entity)
+                    return true;
+            }
+            return false;
+        }
+
+        public static IDictionary GetLevelScriptVariables()
+        {
+            var ls = CurrentLevelState;
+            if (ls == null || _propLevelStateScriptVars == null) return null;
+            try { return _propLevelStateScriptVars.GetValue(ls) as IDictionary; } catch { return null; }
+        }
+
+        public static bool TryGetEnergyGridState(
+            object mapLayers,
+            out uint[,] energyGrid,
+            out List<Point> frontier,
+            out IList sources,
+            out int lastIdx)
+        {
+            energyGrid = null;
+            frontier = null;
+            sources = null;
+            lastIdx = 0;
+            if (mapLayers == null || _fieldMapLayersEnergyGrid == null || _fieldMapLayersEnergyFrontier == null || _fieldMapLayersEnergySources == null)
+                return false;
+            try
+            {
+                energyGrid = _fieldMapLayersEnergyGrid.GetValue(mapLayers) as uint[,];
+                frontier = _fieldMapLayersEnergyFrontier.GetValue(mapLayers) as List<Point>;
+                sources = _fieldMapLayersEnergySources.GetValue(mapLayers) as IList;
+                lastIdx = _fieldMapLayersEnergyLastIdx != null ? Convert.ToInt32(_fieldMapLayersEnergyLastIdx.GetValue(mapLayers)) : 0;
+                return energyGrid != null && frontier != null && sources != null;
+            }
+            catch { return false; }
+        }
+
+        public static void SetEnergyLastIdx(object mapLayers, int idx)
+        {
+            if (mapLayers == null || _fieldMapLayersEnergyLastIdx == null) return;
+            try { _fieldMapLayersEnergyLastIdx.SetValue(mapLayers, idx); } catch { }
+        }
+
+        public static void RebuildEnergyGridNow()
+        {
+            var ml = GetMapLayersInstance();
+            if (ml == null || _methodMapLayersRebuildEnergyGrid == null) return;
+            try { _methodMapLayersRebuildEnergyGrid.Invoke(ml, null); } catch { }
+        }
+
+        public static int GetEntityEnergyTransferRadius(DXEntity entity)
+        {
+            if (entity == null || _methodEntityGetDefaultParams == null || _propDefaultParamsEnergyRadius == null) return 0;
+            try
+            {
+                object p = _methodEntityGetDefaultParams.Invoke(entity, null);
+                return p != null ? Convert.ToInt32(_propDefaultParamsEnergyRadius.GetValue(p)) : 0;
+            }
+            catch { return 0; }
+        }
+
+        public static ZXTerrainResourceType[,] GetTerrainResourceCells()
+        {
+            try
+            {
+                if (_methodTerrainSystemGetCurrent == null)
+                {
+                    var tTerr = GameAssembly?.GetType(ObfuscatedSymbols.Type_TerrainSystem);
+                    if (tTerr != null)
+                    {
+                        _methodTerrainSystemGetCurrent = AccessTools.Method(tTerr, ObfuscatedSymbols.Method_TerrainSystem_GetCurrent, Type.EmptyTypes);
+                        _propTerrainSystemCells = tTerr.GetProperty(ObfuscatedSymbols.Prop_TerrainSystem_Cells, BindingFlags.Public | BindingFlags.Instance);
+                    }
+                }
+                object inst = _methodTerrainSystemGetCurrent?.Invoke(null, null);
+                if (inst == null || _propTerrainSystemCells == null) return null;
+                return _propTerrainSystemCells.GetValue(inst) as ZXTerrainResourceType[,];
+            }
+            catch { return null; }
+        }
+
+        public static DXEntity GetBDataOwner(object bData)
+        {
+            if (bData == null || _methodBDataGetOwner == null) return null;
+            try { return _methodBDataGetOwner.Invoke(bData, null) as DXEntity; } catch { return null; }
+        }
+
+        public static DXEntity GetBDataTargetEntity(object bData)
+        {
+            if (bData == null || _fieldBDataTargetRef == null) return null;
+            try
+            {
+                object boxedRef = _fieldBDataTargetRef.GetValue(bData);
+                if (boxedRef == null) return null;
+                if (_propEntityRefEntity == null)
+                    _propEntityRefEntity = boxedRef.GetType().GetProperty("Entity", BindingFlags.Public | BindingFlags.Instance);
+                return _propEntityRefEntity?.GetValue(boxedRef) as DXEntity;
+            }
+            catch { return null; }
+        }
+
+        public static void SetBDataTargetEntity(object bData, DXEntity target)
+        {
+            if (bData == null || _fieldBDataTargetRef == null) return;
+            try
+            {
+                object boxedRef = Activator.CreateInstance(_fieldBDataTargetRef.FieldType);
+                if (_propEntityRefId == null)
+                    _propEntityRefId = _fieldBDataTargetRef.FieldType.GetProperty("IDEntity", BindingFlags.Public | BindingFlags.Instance);
+                _propEntityRefId?.SetValue(boxedRef, target != null ? target.ID : 0UL);
+                _fieldBDataTargetRef.SetValue(bData, boxedRef);
+            }
+            catch { }
+        }
+
+        public static PointF? GetBDataTargetPosition(object bData)
+        {
+            if (bData == null || _propBDataTargetPos == null) return null;
+            try { return (PointF?)_propBDataTargetPos.GetValue(bData); } catch { return null; }
+        }
+
+        public static void SetBDataTargetPosition(object bData, PointF? pos)
+        {
+            if (bData == null || _propBDataTargetPos == null) return;
+            try { _propBDataTargetPos.SetValue(bData, pos); } catch { }
+        }
+
+        public static void SetEntityTeamAndRelation(DXEntity ent, ZXTeamType team, ZXRelationshipType relation)
+        {
+            if (ent == null) return;
+            try
+            {
+                if (_propEntityRelation != null)
+                    _propEntityRelation.SetValue(ent, Enum.ToObject(_propEntityRelation.PropertyType, (int)relation));
+                if (_propEntityTeam != null)
+                    _propEntityTeam.SetValue(ent, Enum.ToObject(_propEntityTeam.PropertyType, (int)team));
+            }
+            catch { }
+        }
+
+        public static void NotifyLocalPlayerBannerAndSound(string text, Color color, int durationMs = 3500)
+        {
+            ShowTopBanner(text, color, durationMs);
+        }
+
+        // ====================================================================
+        // Phase 4 M2 & M3 Multi-Faction Economy / Tech / Mayor / Visuals
+        // ====================================================================
+
+        public struct RawLevelEconomyState
+        {
+            public int Wood, Stone, Iron, Oil, Gold, ResourceStorage;
+            public int FoodSupply, WorkersSupply, EnergySupply, FoodNeeded, WorkersNeeded, EnergyNeeded;
+            public int Colonists, GoldByCc, TotalStock;
+            public int ExtraFood, ExtraWorkers, ExtraEnergy;
+            public int FoodReserved, WorkersReserved, EnergyReserved;
+            public int WoodProd, StoneProd, IronProd, OilProd, GoldProd;
+            public int WoodProdRes, StoneProdRes, IronProdRes, OilProdRes;
+            public int NegGoldTurns, NegFoodTurns, NMarkets, MaxGoldExport, MaxColonists;
+            public int ArmyGold, ArmyFoodPen, StructGold;
+            public float GoldPerColonist;
+            public bool ShowFullMap;
+        }
+
+        public static bool ReadRawLevelEconomyState(out RawLevelEconomyState s)
+        {
+            s = default;
+            object ls = CurrentLevelState;
+            if (ls == null) return false;
+            try
+            {
+                s.Wood = (int)_fLsWood.GetValue(ls);
+                s.Stone = (int)_fLsStone.GetValue(ls);
+                s.Iron = (int)_fLsIron.GetValue(ls);
+                s.Oil = (int)_fLsOil.GetValue(ls);
+                s.Gold = (int)_fLsGold.GetValue(ls);
+                s.ResourceStorage = (int)_fLsStorage.GetValue(ls);
+                s.FoodSupply = (int)_fLsFoodSup.GetValue(ls);
+                s.WorkersSupply = (int)_fLsWorkSup.GetValue(ls);
+                s.EnergySupply = (int)_fLsEngSup.GetValue(ls);
+                s.FoodNeeded = (int)_fLsFoodNeed.GetValue(ls);
+                s.WorkersNeeded = (int)_fLsWorkNeed.GetValue(ls);
+                s.EnergyNeeded = (int)_fLsEngNeed.GetValue(ls);
+                s.Colonists = (int)_fLsColonists.GetValue(ls);
+                s.GoldByCc = (int)_fLsGoldByCc.GetValue(ls);
+                s.TotalStock = (int)_fLsTotalStock.GetValue(ls);
+
+                s.ExtraFood = _propLevelStateExtraFood != null ? (int)_propLevelStateExtraFood.GetValue(ls) : 0;
+                s.ExtraWorkers = _propLevelStateExtraWorkers != null ? (int)_propLevelStateExtraWorkers.GetValue(ls) : 0;
+                s.ExtraEnergy = _pLsExtraEnergy != null ? (int)_pLsExtraEnergy.GetValue(ls) : 0;
+                s.FoodReserved = (int)_pLsFoodRes.GetValue(ls);
+                s.WorkersReserved = (int)_pLsWorkRes.GetValue(ls);
+                s.EnergyReserved = (int)_pLsEngRes.GetValue(ls);
+                s.WoodProd = (int)_pLsWoodProd.GetValue(ls);
+                s.StoneProd = (int)_pLsStoneProd.GetValue(ls);
+                s.IronProd = (int)_pLsIronProd.GetValue(ls);
+                s.OilProd = (int)_pLsOilProd.GetValue(ls);
+                s.GoldProd = (int)_pLsGoldProd.GetValue(ls);
+                s.WoodProdRes = (int)_pLsWoodProdRes.GetValue(ls);
+                s.StoneProdRes = (int)_pLsStoneProdRes.GetValue(ls);
+                s.IronProdRes = (int)_pLsIronProdRes.GetValue(ls);
+                s.OilProdRes = (int)_pLsOilProdRes.GetValue(ls);
+                s.NegGoldTurns = (int)_pLsNegGoldTurns.GetValue(ls);
+                s.NegFoodTurns = (int)_pLsNegFoodTurns.GetValue(ls);
+                s.NMarkets = (int)_pLsNMarkets.GetValue(ls);
+                s.MaxGoldExport = (int)_pLsMaxGoldExport.GetValue(ls);
+                s.MaxColonists = (int)_pLsMaxColonists.GetValue(ls);
+                s.ArmyGold = (int)_pLsArmyGold.GetValue(ls);
+                s.ArmyFoodPen = (int)_pLsArmyFoodPen.GetValue(ls);
+                s.StructGold = (int)_pLsStructGold.GetValue(ls);
+                s.GoldPerColonist = (float)_pLsGoldPerCol.GetValue(ls);
+                s.ShowFullMap = _pLsShowFullMap != null && (bool)_pLsShowFullMap.GetValue(ls);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] ReadRawLevelEconomyState failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        public static void WriteRawLevelEconomyState(in RawLevelEconomyState s)
+        {
+            object ls = CurrentLevelState;
+            if (ls == null) return;
+            try
+            {
+                _fLsWood.SetValue(ls, s.Wood);
+                _fLsStone.SetValue(ls, s.Stone);
+                _fLsIron.SetValue(ls, s.Iron);
+                _fLsOil.SetValue(ls, s.Oil);
+                _fLsGold.SetValue(ls, s.Gold);
+                _fLsStorage.SetValue(ls, s.ResourceStorage);
+                _fLsFoodSup.SetValue(ls, s.FoodSupply);
+                _fLsWorkSup.SetValue(ls, s.WorkersSupply);
+                _fLsEngSup.SetValue(ls, s.EnergySupply);
+                _fLsFoodNeed.SetValue(ls, s.FoodNeeded);
+                _fLsWorkNeed.SetValue(ls, s.WorkersNeeded);
+                _fLsEngNeed.SetValue(ls, s.EnergyNeeded);
+                _fLsColonists.SetValue(ls, s.Colonists);
+                _fLsGoldByCc.SetValue(ls, s.GoldByCc);
+                _fLsTotalStock.SetValue(ls, s.TotalStock);
+
+                _propLevelStateExtraFood?.SetValue(ls, s.ExtraFood);
+                _propLevelStateExtraWorkers?.SetValue(ls, s.ExtraWorkers);
+                _pLsExtraEnergy?.SetValue(ls, s.ExtraEnergy);
+                _pLsFoodRes.SetValue(ls, s.FoodReserved);
+                _pLsWorkRes.SetValue(ls, s.WorkersReserved);
+                _pLsEngRes.SetValue(ls, s.EnergyReserved);
+                _pLsWoodProd.SetValue(ls, s.WoodProd);
+                _pLsStoneProd.SetValue(ls, s.StoneProd);
+                _pLsIronProd.SetValue(ls, s.IronProd);
+                _pLsOilProd.SetValue(ls, s.OilProd);
+                _pLsGoldProd.SetValue(ls, s.GoldProd);
+                _pLsWoodProdRes.SetValue(ls, s.WoodProdRes);
+                _pLsStoneProdRes.SetValue(ls, s.StoneProdRes);
+                _pLsIronProdRes.SetValue(ls, s.IronProdRes);
+                _pLsOilProdRes.SetValue(ls, s.OilProdRes);
+                _pLsNegGoldTurns.SetValue(ls, s.NegGoldTurns);
+                _pLsNegFoodTurns.SetValue(ls, s.NegFoodTurns);
+                _pLsNMarkets.SetValue(ls, s.NMarkets);
+                _pLsMaxGoldExport.SetValue(ls, s.MaxGoldExport);
+                _pLsMaxColonists.SetValue(ls, s.MaxColonists);
+                _pLsArmyGold.SetValue(ls, s.ArmyGold);
+                _pLsArmyFoodPen.SetValue(ls, s.ArmyFoodPen);
+                _pLsStructGold.SetValue(ls, s.StructGold);
+                _pLsGoldPerCol.SetValue(ls, s.GoldPerColonist);
+                if (_pLsShowFullMap != null) _pLsShowFullMap.SetValue(ls, s.ShowFullMap);
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] WriteRawLevelEconomyState failed: {ex.Message}");
+            }
+        }
+
+        public static Dictionary<ulong, int> GetLevelBonusTemplatesDict()
+        {
+            object ls = CurrentLevelState;
+            return ls != null ? _pLsBonusTemplates?.GetValue(ls) as Dictionary<ulong, int> : null;
+        }
+
+        public static void SetLevelBonusTemplatesDict(Dictionary<ulong, int> dict)
+        {
+            object ls = CurrentLevelState;
+            if (ls != null && dict != null)
+                _pLsBonusTemplates?.SetValue(ls, dict);
+        }
+
+        public static Dictionary<int, int> GetLevelOnlyOneCommandsDict()
+        {
+            object ls = CurrentLevelState;
+            return ls != null ? _pLsOnlyOneCmds?.GetValue(ls) as Dictionary<int, int> : null;
+        }
+
+        public static void SetLevelOnlyOneCommandsDict(Dictionary<int, int> dict)
+        {
+            object ls = CurrentLevelState;
+            if (ls != null && dict != null)
+                _pLsOnlyOneCmds?.SetValue(ls, dict);
+        }
+
+        public static void SetLevelStateExtraStats(int extraFood, int extraWorkers, int extraEnergy)
+        {
+            object ls = CurrentLevelState;
+            if (ls == null) return;
+            _propLevelStateExtraFood?.SetValue(ls, extraFood);
+            _propLevelStateExtraWorkers?.SetValue(ls, extraWorkers);
+            _pLsExtraEnergy?.SetValue(ls, extraEnergy);
+        }
+
+        public static void GetLevelStateExtraStats(out int extraFood, out int extraWorkers, out int extraEnergy)
+        {
+            object ls = CurrentLevelState;
+            if (ls == null) { extraFood = extraWorkers = extraEnergy = 0; return; }
+            extraFood = _propLevelStateExtraFood != null ? (int)_propLevelStateExtraFood.GetValue(ls) : 0;
+            extraWorkers = _propLevelStateExtraWorkers != null ? (int)_propLevelStateExtraWorkers.GetValue(ls) : 0;
+            extraEnergy = _pLsExtraEnergy != null ? (int)_pLsExtraEnergy.GetValue(ls) : 0;
+        }
+
+        public static object GetLevelStateCachedCurrentCC()
+        {
+            object ls = CurrentLevelState;
+            return ls != null ? _pLsCurrentCc?.GetValue(ls) : null;
+        }
+
+        public static void SetLevelStateShowFullMap(bool show)
+        {
+            object ls = CurrentLevelState;
+            if (ls != null && _pLsShowFullMap != null)
+                _pLsShowFullMap.SetValue(ls, show);
+        }
+
+        public static bool GetLevelStateShowFullMap()
+        {
+            object ls = CurrentLevelState;
+            return ls != null && _pLsShowFullMap != null && (bool)_pLsShowFullMap.GetValue(ls);
+        }
+
+        public static void CallLevelStateRecalculate()
+        {
+            object ls = CurrentLevelState;
+            if (ls != null) _mLsRecalculate?.Invoke(ls, null);
+        }
+
+        public static void CallLevelStateSetEnhancerBuildings(IList buildings)
+        {
+            object ls = CurrentLevelState;
+            if (ls == null || _mLsSetEnhancerBuildings == null || TypeBuilding == null) return;
+            try
+            {
+                var typedList = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(TypeBuilding));
+                if (buildings != null)
+                {
+                    for (int i = 0; i < buildings.Count; i++)
+                    {
+                        if (TypeBuilding.IsInstanceOfType(buildings[i]))
+                            typedList.Add(buildings[i]);
+                    }
+                }
+                _mLsSetEnhancerBuildings.Invoke(ls, new object[] { typedList });
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] SetEnhancerBuildings failed: {ex.Message}");
+            }
+        }
+
+        public static float GetLevelSellFactor(int resourceIndex)
+        {
+            object ls = CurrentLevelState;
+            if (ls == null) return 0f;
+            try
+            {
+                switch (resourceIndex)
+                {
+                    case 0: return _mLsSellWood != null ? (float)_mLsSellWood.Invoke(ls, null) : 0f;
+                    case 1: return _mLsSellStone != null ? (float)_mLsSellStone.Invoke(ls, null) : 0f;
+                    case 2: return _mLsSellIron != null ? (float)_mLsSellIron.Invoke(ls, null) : 0f;
+                    case 3: return _mLsSellOil != null ? (float)_mLsSellOil.Invoke(ls, null) : 0f;
+                    default: return 0f;
+                }
+            }
+            catch { return 0f; }
+        }
+
+        public static void AddLevelGoldDirect(int delta)
+        {
+            object ls = CurrentLevelState;
+            if (ls != null) _mLsAddGoldDirect?.Invoke(ls, new object[] { delta });
+        }
+
+        public static void AddLevelResourceWithMarket(int resType, int delta)
+        {
+            object ls = CurrentLevelState;
+            if (ls == null || delta == 0) return;
+            switch (resType)
+            {
+                case 0: _mLsAddGoldDirect?.Invoke(ls, new object[] { delta }); break;
+                case 1: _mLsAddWoodMarket?.Invoke(ls, new object[] { delta }); break;
+                case 2: _mLsAddStoneMarket?.Invoke(ls, new object[] { delta }); break;
+                case 3: _mLsAddIronMarket?.Invoke(ls, new object[] { delta }); break;
+                case 4: _mLsAddOilMarket?.Invoke(ls, new object[] { delta }); break;
+            }
+        }
+
+        public static void UnlockOnlyOneCommandById(int commandId)
+        {
+            object ls = CurrentLevelState;
+            if (ls == null || commandId == 0) return;
+            var dict = GetLevelOnlyOneCommandsDict();
+            if (dict != null && !dict.ContainsKey(commandId))
+                dict[commandId] = 1;
+        }
+
+        public static bool IsOnlyOneCommandUnlocked(object cmd)
+        {
+            object ls = CurrentLevelState;
+            if (ls == null || cmd == null || _mLsHasOnlyOne == null) return false;
+            try { return (bool)_mLsHasOnlyOne.Invoke(ls, new[] { cmd }); }
+            catch { return false; }
+        }
+
+        public static object GetCommandByType(Type cmdType)
+        {
+            if (cmdType == null) return null;
+            return GetCommandGeneric(cmdType);
+        }
+
+        public static void RefreshCommandPanelNow()
+        {
+            try
+            {
+                object sys = LevelSystemInstance;
+                if (sys != null) _methodLevelSysRefreshCmdPanel?.Invoke(sys, null);
+            }
+            catch { }
+        }
+
+        public static void PlayLocalSoundEffect(string soundId)
+        {
+            // Keep silent/safe fallback when audio singleton isn't needed.
+        }
+
+        public static bool TryGetCommandResourcesCost(object cmd, object executorEntity, out int gold, out int wood, out int stone, out int iron, out int oil, out int food, out int workers, out int energy)
+        {
+            gold = wood = stone = iron = oil = food = workers = energy = 0;
+            if (cmd == null || _mCmdGetCost == null) return false;
+            try
+            {
+                object res = _mCmdGetCost.Invoke(cmd, new[] { executorEntity });
+                if (res == null) return false;
+                ReadResourcesCostBoxed(res, out gold, out wood, out stone, out iron, out oil, out food, out workers, out energy);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        public static bool TryGetEntityResourcesCost(Type entityType, out int gold, out int wood, out int stone, out int iron, out int oil, out int food, out int workers, out int energy)
+        {
+            gold = wood = stone = iron = oil = food = workers = energy = 0;
+            if (entityType == null || _mResCostForType == null) return false;
+            try
+            {
+                object res = _mResCostForType.Invoke(null, new object[] { entityType });
+                if (res == null) return false;
+                ReadResourcesCostBoxed(res, out gold, out wood, out stone, out iron, out oil, out food, out workers, out energy);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        public static void ReadResourcesCostBoxed(object res, out int gold, out int wood, out int stone, out int iron, out int oil, out int food, out int workers, out int energy)
+        {
+            gold = _pResGold != null ? (int)_pResGold.GetValue(res) : 0;
+            wood = _pResWood != null ? (int)_pResWood.GetValue(res) : 0;
+            stone = _pResStone != null ? (int)_pResStone.GetValue(res) : 0;
+            iron = _pResIron != null ? (int)_pResIron.GetValue(res) : 0;
+            oil = _pResOil != null ? (int)_pResOil.GetValue(res) : 0;
+            food = _pResFood != null ? (int)_pResFood.GetValue(res) : 0;
+            workers = _pResWorkers != null ? (int)_pResWorkers.GetValue(res) : 0;
+            energy = _pResEnergy != null ? (int)_pResEnergy.GetValue(res) : 0;
+        }
+
+        public static object WriteResourcesCostBoxed(object templateCost, int gold, int wood, int stone, int iron, int oil, int food, int workers, int energy)
+        {
+            object box = templateCost ?? Activator.CreateInstance(TypeZXResourcesCost);
+            _pResGold?.SetValue(box, gold);
+            _pResWood?.SetValue(box, wood);
+            _pResStone?.SetValue(box, stone);
+            _pResIron?.SetValue(box, iron);
+            _pResOil?.SetValue(box, oil);
+            _pResFood?.SetValue(box, food);
+            _pResWorkers?.SetValue(box, workers);
+            _pResEnergy?.SetValue(box, energy);
+            return box;
+        }
+
+        public static object GetEntityDefaultParamsBoxed(DXEntity entity)
+        {
+            if (entity == null || _methodEntityGetDefaultParams == null) return null;
+            try { return _methodEntityGetDefaultParams.Invoke(entity, null); } catch { return null; }
+        }
+
+        public static bool IsCommandCenterTelescopeEnabled(DXEntity cc)
+        {
+            if (cc == null || _pCcTelescopeEnabled == null) return false;
+            try { return (bool)_pCcTelescopeEnabled.GetValue(cc); } catch { return false; }
+        }
+
+        public static bool GetBuildingDisabledManually(DXEntity bldg)
+        {
+            if (bldg == null || _pBldgDisabledManual == null) return false;
+            try { return (bool)_pBldgDisabledManual.GetValue(bldg); } catch { return false; }
+        }
+
+        public static bool GetBuildingCanSupplyResources(DXEntity bldg)
+        {
+            if (bldg == null || _pBldgCanSupply == null) return false;
+            try { return (bool)_pBldgCanSupply.GetValue(bldg); } catch { return false; }
+        }
+
+        public static void ReadBuildingTotals(DXEntity bldg, out int foodSup, out int workSup, out int engSup, out int woodSup, out int stoneSup, out int ironSup, out int oilSup, out int goldSup, out int foodNeed)
+        {
+            foodSup = (int)_pBldgTotalFoodSup.GetValue(bldg);
+            workSup = (int)_pBldgTotalWorkSup.GetValue(bldg);
+            engSup = (int)_pBldgTotalEngSup.GetValue(bldg);
+            woodSup = (int)_pBldgTotalWoodSup.GetValue(bldg);
+            stoneSup = (int)_pBldgTotalStoneSup.GetValue(bldg);
+            ironSup = (int)_pBldgTotalIronSup.GetValue(bldg);
+            oilSup = (int)_pBldgTotalOilSup.GetValue(bldg);
+            goldSup = (int)_pBldgTotalGoldSup.GetValue(bldg);
+            foodNeed = (int)_pBldgTotalFoodNeed.GetValue(bldg);
+        }
+
+        public static void ScaleBuildingCachedEnergySupply(DXEntity bldg, int numerator, int denominator)
+        {
+            if (bldg == null || _fBldgResCost == null || _pResEnergy == null) return;
+            try
+            {
+                object cost = _fBldgResCost.GetValue(bldg);
+                if (cost == null) return;
+                int baseEng = (int)_pResEnergy.GetValue(cost);
+                int scaled = (baseEng * numerator) / denominator;
+                _pResEnergy.SetValue(cost, scaled);
+                _fBldgResCost.SetValue(bldg, cost);
+            }
+            catch { }
+        }
+
+        public static void ReadDefaultParamsStats(
+            object dp,
+            out bool canEnhance, out float resGenTime, out bool convertGold,
+            out int colonists, out int resStorage, out int goldGen, out float goldPerCol,
+            out int foodNeed, out int workNeed, out int engNeed,
+            out int woodGen, out int stoneGen, out int ironGen, out int oilGen,
+            out int resCollectRadius, out int goldCost, out int level,
+            out int maxInstances, out float returnFactor)
+        {
+            canEnhance = (bool)_pDefCanEnhance.GetValue(dp);
+            resGenTime = (float)_pDefResGenTime.GetValue(dp);
+            convertGold = (bool)_pDefConvertResToGold.GetValue(dp);
+            colonists = (int)_pDefColonists.GetValue(dp);
+            resStorage = (int)_pDefResStorage.GetValue(dp);
+            goldGen = (int)_pDefGoldGen.GetValue(dp);
+            goldPerCol = (float)_pDefGoldPerCol.GetValue(dp);
+            foodNeed = (int)_pDefFoodNeed.GetValue(dp);
+            workNeed = (int)_pDefWorkNeed.GetValue(dp);
+            engNeed = (int)_pDefEngNeed.GetValue(dp);
+            woodGen = (int)_pDefWoodGen.GetValue(dp);
+            stoneGen = (int)_pDefStoneGen.GetValue(dp);
+            ironGen = (int)_pDefIronGen.GetValue(dp);
+            oilGen = (int)_pDefOilGen.GetValue(dp);
+            resCollectRadius = (int)_pDefResCollectRadius.GetValue(dp);
+            goldCost = (int)_pDefGoldCost.GetValue(dp);
+            level = (int)_pDefLevel.GetValue(dp);
+            maxInstances = (int)_pDefMaxInstances.GetValue(dp);
+            returnFactor = (float)_pDefReturnFactor.GetValue(dp);
+        }
+
+        public static void ApplyZeroFeeMayorToRegistry()
+        {
+            EnsureMayorMeta();
+            if (TypeZXMayor == null || _mayorRegistryField == null) return;
+            var dict = _mayorRegistryField.GetValue(null) as IDictionary;
+            if (dict == null || dict.Contains(Sync.FactionContextManager.CoopMayorZeroFeeId)) return;
+
+            try
+            {
+                object mayor = Activator.CreateInstance(TypeZXMayor);
+                _pMayorIdProp?.SetValue(mayor, Sync.FactionContextManager.CoopMayorZeroFeeId);
+                _pMayorNameProp?.SetValue(mayor, "Trade Guild Envoy (0% Transfer Fee)");
+                _pMayorQuoteProp?.SetValue(mayor, "Free trade binds our colonies together.");
+                _pMayorLevelProp?.SetValue(mayor, 1);
+                _pMayorActiveProp?.SetValue(mayor, true);
+                _pMayorCustomProp?.SetValue(mayor, false);
+                _pMayorExtraGold?.SetValue(mayor, 0);
+                _pMayorExtraWood?.SetValue(mayor, 0);
+                _pMayorExtraStone?.SetValue(mayor, 0);
+                _pMayorExtraIron?.SetValue(mayor, 0);
+                _pMayorExtraOil?.SetValue(mayor, 0);
+                _pMayorBonusTechs?.SetValue(mayor, Activator.CreateInstance(_pMayorBonusTechs.PropertyType));
+                _pMayorBonusEntities?.SetValue(mayor, Activator.CreateInstance(_pMayorBonusEntities.PropertyType));
+                dict.Add(Sync.FactionContextManager.CoopMayorZeroFeeId, mayor);
+                ModLogger.Info($"[GameBridge] Registered custom 0-fee Mayor '{Sync.FactionContextManager.CoopMayorZeroFeeId}' into ZXMayor registry.");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] Failed to register custom 0-fee Mayor: {ex.Message}");
+            }
+        }
+
+        public static int GetEntityWorkSupplyFallback(object dp)
+        {
+            if (dp == null || _pDefWorkSupply == null) return 0;
+            return (int)_pDefWorkSupply.GetValue(dp);
+        }
+
+        public static void RefreshEntityFactionColor(DXEntity entity, Color c)
+        {
+            if (entity == null || _fEntityCachedColor == null || _fEntityBaseColor == null) return;
+            try
+            {
+                _fEntityBaseColor.SetValue(entity, c);
+                _fEntityCachedColor.SetValue(entity, (Color?)c);
+            }
+            catch { }
+        }
+
+        public static Type FindEntityTypeByName(string fullName)
+        {
+            if (string.IsNullOrEmpty(fullName) || GameAssembly == null) return null;
+            return GameAssembly.GetType(fullName);
+        }
+
+        public static Type FindCommandTypeByName(string fullName)
+        {
+            if (string.IsNullOrEmpty(fullName) || GameAssembly == null) return null;
+            return GameAssembly.GetType(fullName);
+        }
+
+        public static object GetCommandInstanceByType(Type cmdType)
+        {
+            return cmdType != null ? GetCommandGeneric(cmdType) : null;
+        }
+
+        public static bool GetCommandCenterTelescopeEnabled(object cc)
+        {
+            if (cc == null || _pCcTelescopeEnabled == null) return false;
+            try { return (bool)_pCcTelescopeEnabled.GetValue(cc); }
+            catch { return false; }
+        }
+
+        public static bool IsBuildingBeingBuilt(object bldg)
+        {
+            if (bldg == null || _propStructureIsBeingBuilt == null) return false;
+            try { return (bool)_propStructureIsBeingBuilt.GetValue(bldg); }
+            catch { return false; }
+        }
+
+        public static void CallBuildingRecalculateNear(object bldg)
+        {
+            if (bldg == null || _methodBuildingRecalcResources == null) return;
+            try { _methodBuildingRecalcResources.Invoke(bldg, null); } catch { }
+        }
+
+        public static void ApplyBuildingEnergyOverride(object bldg, int newTotalEnergy)
+        {
+            if (bldg == null || _fBldgResCost == null || _pResEnergy == null) return;
+            try
+            {
+                object boxed = _fBldgResCost.GetValue(bldg);
+                if (boxed == null) return;
+                _pResEnergy.SetValue(boxed, newTotalEnergy);
+                _fBldgResCost.SetValue(bldg, boxed);
+            }
+            catch { }
+        }
+
+        public static void AddLevelResource(Sync.ResourceTransferKind res, int delta)
+        {
+            if (delta == 0) return;
+            if (!ReadRawLevelEconomyState(out var e)) return;
+            switch (res)
+            {
+                case Sync.ResourceTransferKind.Gold:
+                    e.Gold = Math.Max(-10000, Math.Min(Math.Max(50, e.ResourceStorage) * 40, e.Gold + delta));
+                    break;
+                case Sync.ResourceTransferKind.Wood:
+                    e.Wood = Math.Max(0, Math.Min(Math.Max(50, e.ResourceStorage), e.Wood + delta));
+                    break;
+                case Sync.ResourceTransferKind.Stone:
+                    e.Stone = Math.Max(0, Math.Min(Math.Max(50, e.ResourceStorage), e.Stone + delta));
+                    break;
+                case Sync.ResourceTransferKind.Iron:
+                    e.Iron = Math.Max(0, Math.Min(Math.Max(50, e.ResourceStorage), e.Iron + delta));
+                    break;
+                case Sync.ResourceTransferKind.Oil:
+                    e.Oil = Math.Max(0, Math.Min(Math.Max(50, e.ResourceStorage), e.Oil + delta));
+                    break;
+            }
+            WriteRawLevelEconomyState(in e);
+        }
+
+        public static float GetBuildableFactor(object cBuildable)
+        {
+            if (cBuildable == null || _propCBuildableFactor == null) return 0f;
+            try { return Convert.ToSingle(_propCBuildableFactor.GetValue(cBuildable)); }
+            catch { return 0f; }
+        }
+
+        public static string GetMayorId(object mayorObj)
+        {
+            EnsureMayorMeta();
+            if (mayorObj == null || _mayorIdProp == null) return null;
+            try { return _mayorIdProp.GetValue(mayorObj) as string; }
+            catch { return null; }
+        }
+
+        public static string GetMayorName(object mayorObj)
+        {
+            EnsureMayorMeta();
+            if (mayorObj == null || _mayorNameProp == null) return null;
+            try { return _mayorNameProp.GetValue(mayorObj) as string; }
+            catch { return null; }
+        }
+
+        public static Type TypeCBuildable => _typeCBuildable;
+
+        private static Type _tHuman, _tDefMachine, _tDwelling, _tCInsideBuilding;
+        private static PropertyInfo _pStructEnabled, _pDwellColAvail, _pDwellByUpg, _pDwellTmpl, _pTmplEntity;
+        private static MethodInfo _mLsSetNeedsRecalc;
+        private static PropertyInfo _pDefWoodCost, _pDefStoneCost, _pDefIronCost, _pDefOilCost;
+        private static bool _dpResourceCostsResolved;
+
+        public static bool PushZeroCostOnDefaultParams(object dp, out int origGold, out int origWood, out int origStone, out int origIron, out int origOil)
+        {
+            origGold = origWood = origStone = origIron = origOil = 0;
+            if (dp == null || _pDefGoldCost == null) return false;
+            if (!_dpResourceCostsResolved)
+            {
+                _dpResourceCostsResolved = true;
+                Type t = dp.GetType();
+                _pDefWoodCost = t.GetProperty("WoodCost", BindingFlags.Public | BindingFlags.Instance);
+                _pDefStoneCost = t.GetProperty("StoneCost", BindingFlags.Public | BindingFlags.Instance);
+                _pDefIronCost = t.GetProperty("IronCost", BindingFlags.Public | BindingFlags.Instance);
+                _pDefOilCost = t.GetProperty("OilCost", BindingFlags.Public | BindingFlags.Instance);
+            }
+            try
+            {
+                origGold = (int)_pDefGoldCost.GetValue(dp);
+                origWood = _pDefWoodCost != null ? (int)_pDefWoodCost.GetValue(dp) : 0;
+                origStone = _pDefStoneCost != null ? (int)_pDefStoneCost.GetValue(dp) : 0;
+                origIron = _pDefIronCost != null ? (int)_pDefIronCost.GetValue(dp) : 0;
+                origOil = _pDefOilCost != null ? (int)_pDefOilCost.GetValue(dp) : 0;
+                _pDefGoldCost.SetValue(dp, 0);
+                _pDefWoodCost?.SetValue(dp, 0);
+                _pDefStoneCost?.SetValue(dp, 0);
+                _pDefIronCost?.SetValue(dp, 0);
+                _pDefOilCost?.SetValue(dp, 0);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        public static void PopZeroCostOnDefaultParams(object dp, int origGold, int origWood, int origStone, int origIron, int origOil)
+        {
+            if (dp == null || _pDefGoldCost == null) return;
+            try
+            {
+                _pDefGoldCost.SetValue(dp, origGold);
+                _pDefWoodCost?.SetValue(dp, origWood);
+                _pDefStoneCost?.SetValue(dp, origStone);
+                _pDefIronCost?.SetValue(dp, origIron);
+                _pDefOilCost?.SetValue(dp, origOil);
+            }
+            catch { }
+        }
+
+        public static bool IsEntityEnabled(DXEntity ent)
+        {
+            if (ent == null) return false;
+            if (_pStructEnabled == null && TypeZXEntity != null)
+                _pStructEnabled = TypeZXEntity.GetProperty("Enabled", BindingFlags.Public | BindingFlags.Instance);
+            if (_pStructEnabled == null) return false;
+            try { return (bool)_pStructEnabled.GetValue(ent); } catch { return false; }
+        }
+
+        public static bool IsHumanEntity(DXEntity ent)
+        {
+            if (ent == null) return false;
+            if (_tHuman == null) _tHuman = GameAssembly?.GetType("ZX.Entities.Human");
+            return _tHuman != null && _tHuman.IsInstanceOfType(ent);
+        }
+
+        public static bool IsDefensiveMachineEntity(DXEntity ent)
+        {
+            if (ent == null) return false;
+            if (_tDefMachine == null) _tDefMachine = GameAssembly?.GetType("ZX.Entities.DeffensiveMachine");
+            return _tDefMachine != null && _tDefMachine.IsInstanceOfType(ent);
+        }
+
+        public static bool IsUnitEntity(DXEntity ent)
+        {
+            return ent != null && _typeUnit != null && _typeUnit.IsInstanceOfType(ent);
+        }
+
+        public static bool HasInsideBuildingComponent(DXEntity ent)
+        {
+            if (ent == null) return false;
+            if (_tCInsideBuilding == null) _tCInsideBuilding = GameAssembly?.GetType("ZX.Components.CInsideBuilding");
+            return _tCInsideBuilding != null && HasComponent(ent, _tCInsideBuilding);
+        }
+
+        public static DXEntity TryGetDwellingPreUpgradeTemplateEntity(DXEntity ent)
+        {
+            if (ent == null) return null;
+            if (_tDwelling == null) _tDwelling = GameAssembly?.GetType("ZX.Entities.Dwelling");
+            if (_tDwelling == null || !_tDwelling.IsInstanceOfType(ent)) return null;
+            if (_pDwellColAvail == null)
+            {
+                _pDwellColAvail = _tDwelling.GetProperty("ColonistsAvailable", BindingFlags.Public | BindingFlags.Instance);
+                _pDwellByUpg = _tDwelling.GetProperty("CreatedByUpgrading", BindingFlags.Public | BindingFlags.Instance);
+                _pDwellTmpl = _tDwelling.GetProperty("TemplateThatCanUpgradeToThis", BindingFlags.Public | BindingFlags.Instance);
+            }
+            if (_pDwellColAvail == null || _pDwellByUpg == null || _pDwellTmpl == null) return null;
+            try
+            {
+                bool colAvail = (bool)_pDwellColAvail.GetValue(ent);
+                bool byUpg = (bool)_pDwellByUpg.GetValue(ent);
+                if (colAvail || !byUpg) return null;
+                object tmpl = _pDwellTmpl.GetValue(ent);
+                if (tmpl == null) return null;
+                if (_pTmplEntity == null)
+                    _pTmplEntity = tmpl.GetType().GetProperty("Entity", BindingFlags.Public | BindingFlags.Instance);
+                var tmplEnt = _pTmplEntity?.GetValue(tmpl) as DXEntity;
+                return tmplEnt != null ? DXGame.Current?.GetEntityFromType(tmplEnt.GetType()) as DXEntity : null;
+            }
+            catch { return null; }
+        }
+
+        public static void SetLevelStateNeedsRecalculate(bool dirty)
+        {
+            if (_mLsSetNeedsRecalc == null && LevelStateType != null)
+                _mLsSetNeedsRecalc = AccessTools.Method(LevelStateType, "#=zHvnkp4e5mPxDjXPACA==", new[] { typeof(bool) });
+            try { _mLsSetNeedsRecalc?.Invoke(null, new object[] { dirty }); } catch { }
+        }
+
+        public static void SetZeroFeeMayorActive(bool active)
+        {
+            EnsureMayorMeta();
+            ApplyZeroFeeMayorToRegistry();
+            var dict = _mayorRegistryField?.GetValue(null) as IDictionary;
+            if (dict == null || !dict.Contains(Sync.FactionContextManager.CoopMayorZeroFeeId)) return;
+            try { _pMayorActiveProp?.SetValue(dict[Sync.FactionContextManager.CoopMayorZeroFeeId], active); }
+            catch { }
+        }
+
+        // ====================================================================
+        // Phase 4 M4 Multi-Base Map Generator & Multi-Wave Swarm Helpers
+        // ====================================================================
+
+        public static DXGridLayerEnum<ZXMapLayerZombies> GetMapDrawerZombieLayer(object mapDrawer)
+        {
+            if (mapDrawer == null || _propMapDrawerLayerZombies == null) return null;
+            return _propMapDrawerLayerZombies.GetValue(mapDrawer) as DXGridLayerEnum<ZXMapLayerZombies>;
+        }
+
+        public static DXRange<int> GetMapThemeNumDoomVillages(object themeObj)
+        {
+            if (themeObj == null || _propMapThemeNumDoomVillages == null) return default(DXRange<int>);
+            return (DXRange<int>)_propMapThemeNumDoomVillages.GetValue(themeObj);
+        }
+
+        public static void SetMapThemeNumDoomVillages(object themeObj, DXRange<int> range)
+        {
+            if (themeObj == null || _propMapThemeNumDoomVillages == null) return;
+            _propMapThemeNumDoomVillages.SetValue(themeObj, range);
+        }
+
+        public static bool IsInfectionNestEntity(DXEntity entity)
+        {
+            return entity != null && _typeCInfectionNest != null && HasComponent(entity, _typeCInfectionNest);
+        }
+
+        public static void SetInfectionNestFactor(DXEntity entity, float factor)
+        {
+            if (entity == null || _typeCInfectionNest == null || _propInfectionNestConfig == null || _propInfectionNestFactor == null)
+                return;
+            var comp = FindComponent(entity, _typeCInfectionNest);
+            object cfg = comp != null ? _propInfectionNestConfig.GetValue(comp) : null;
+            if (cfg != null)
+                _propInfectionNestFactor.SetValue(cfg, factor);
+        }
+
+        public static DXEntityTemplate GetDoomNestTemplate(int tier)
+        {
+            MethodInfo m = tier >= 2 ? _methodCatalogDoomNestLarge : (tier == 1 ? _methodCatalogDoomNestMedium : _methodCatalogDoomNestSmall);
+            return m?.Invoke(null, null) as DXEntityTemplate;
+        }
+
+        public static void SetZombieRoamingDistance(DXEntity zombie, int cellsAway)
+        {
+            if (zombie == null || _propZombieCellsAwayRoaming == null) return;
+            if (_typeZombie != null && _typeZombie.IsInstanceOfType(zombie))
+                _propZombieCellsAwayRoaming.SetValue(zombie, cellsAway);
+        }
+
+        public static void AttachAutoMiniMapInfo(DXEntity entity)
+        {
+            if (entity == null || _typeCMiniMapInfo == null) return;
+            try
+            {
+                if (!HasComponent(entity, _typeCMiniMapInfo))
+                {
+                    if (Activator.CreateInstance(_typeCMiniMapInfo) is DXComponent comp)
+                        entity.AddComponent(comp);
+                }
+            }
+            catch { }
+        }
+
+        public static float ColonyHours
+        {
+            get
+            {
+                try
+                {
+                    var ls = CurrentLevelState;
+                    var prop = ls != null ? GetLevelProperty("ColonyMinutes") : null;
+                    if (prop != null)
+                        return Convert.ToSingle(prop.GetValue(ls)) / 60f;
+                }
+                catch { }
+                return 0f;
+            }
+        }
+
+        public static int GridNCells => DXLevel.Current?.NCells ?? 0;
+
+        public static IList GetCurrentLevelEvents()
+        {
+            var fromState = GetLevelProperty("LevelEvents")?.GetValue(CurrentLevelState) as IList;
+            if (fromState != null && fromState.Count > 0)
+                return fromState;
+            object ext = DXLevel.Current?.Extension;
+            if (ext != null && _propLevelExtLevelEvents != null)
+            {
+                var fromExt = _propLevelExtLevelEvents.GetValue(ext) as IList;
+                if (fromExt != null && fromExt.Count > 0)
+                    return fromExt;
+            }
+            return fromState;
+        }
+
+        public static int GetLevelEventNTimesTriggered(object levelEvent)
+        {
+            if (levelEvent == null || _propLevelEventNTimesTriggered == null) return 0;
+            return (int)_propLevelEventNTimesTriggered.GetValue(levelEvent);
+        }
+
+        public static bool IsLevelEventPeriodicSwarm(object levelEvent, out bool isFinalSwarm, out bool showCountdown, out bool attackCC, out int maxReps)
+        {
+            isFinalSwarm = false;
+            showCountdown = false;
+            attackCC = false;
+            maxReps = 0;
+            if (levelEvent == null) return false;
+            isFinalSwarm = _propLevelEventFinalSwarm != null && (bool)_propLevelEventFinalSwarm.GetValue(levelEvent);
+            showCountdown = _propLevelEventShowCountdown != null && (bool)_propLevelEventShowCountdown.GetValue(levelEvent);
+            attackCC = _propLevelEventAttackCC != null && (bool)_propLevelEventAttackCC.GetValue(levelEvent);
+            maxReps = _propLevelEventMaxRepetitions != null ? (int)_propLevelEventMaxRepetitions.GetValue(levelEvent) : 0;
+            return attackCC && !isFinalSwarm;
+        }
+
+        public static void GetLevelEventRepetitionScale(object levelEvent, out float factorPerRep, out float maxFactor)
+        {
+            factorPerRep = _propLevelEventFactorUnitsPerRep != null ? (float)_propLevelEventFactorUnitsPerRep.GetValue(levelEvent) : 0f;
+            maxFactor = _propLevelEventMaxFactorUnitsPerRep != null ? (float)_propLevelEventMaxFactorUnitsPerRep.GetValue(levelEvent) : 0f;
+        }
+
+        public static string GetLevelEventMessage(object levelEvent)
+        {
+            return _propLevelEventMessage?.GetValue(levelEvent) as string;
+        }
+
+        public static void SetLevelEventMessage(object levelEvent, string msg)
+        {
+            if (levelEvent != null && _propLevelEventMessage != null)
+                _propLevelEventMessage.SetValue(levelEvent, msg);
+        }
+
+        public static string GetUnitGeneratorName(object unitGen)
+        {
+            if (unitGen == null || _propUnitGenConfig == null || _propUnitGenConfigName == null) return string.Empty;
+            object cfg = _propUnitGenConfig.GetValue(unitGen);
+            return cfg != null ? (_propUnitGenConfigName.GetValue(cfg) as string ?? string.Empty) : string.Empty;
+        }
+
+        public static IList GetAllEdgeUnitGenerators()
+        {
+            var game = DXGame.Current;
+            if (game?.Entities == null || _typeCUnitGenerator == null) return null;
+            var list = new List<object>();
+            foreach (var ent in game.Entities)
+            {
+                if (ent == null || ent.Disposed) continue;
+                var comp = FindComponent(ent, _typeCUnitGenerator);
+                if (comp != null) list.Add(comp);
+            }
+            return list;
+        }
+
+        public static IList CreateTypedUnitGeneratorList(IEnumerable<object> items)
+        {
+            if (_typeCUnitGenerator == null) return null;
+            var listType = typeof(List<>).MakeGenericType(_typeCUnitGenerator);
+            var typedList = (IList)Activator.CreateInstance(listType);
+            if (items != null)
+            {
+                foreach (var item in items)
+                {
+                    if (item != null && _typeCUnitGenerator.IsInstanceOfType(item))
+                        typedList.Add(item);
+                }
+            }
+            return typedList;
+        }
+
+        public static void SetLevelEventCurrentGenerators(object levelEvent, IList typedList)
+        {
+            if (levelEvent != null && _propLevelEventCurrentUnitGenerators != null)
+                _propLevelEventCurrentUnitGenerators.SetValue(levelEvent, typedList);
+        }
+
+        public static ulong GetGenerationRequestEventId(object req)
+        {
+            return req != null && _propGenReqIDEvent != null ? (ulong)_propGenReqIDEvent.GetValue(req) : 0UL;
+        }
+
+        public static int GetGenerationRequestCount(object req)
+        {
+            return req != null && _propGenReqCount != null ? (int)_propGenReqCount.GetValue(req) : 0;
+        }
+
+        public static int GetGenerationRequestSpeed(object req)
+        {
+            return req != null && _propGenReqGenSpeed != null ? (int)_propGenReqGenSpeed.GetValue(req) : 6;
+        }
+
+        public static void SetGenerationRequestSpeed(object req, int speed)
+        {
+            if (req != null && _propGenReqGenSpeed != null)
+                _propGenReqGenSpeed.SetValue(req, Math.Max(1, Math.Min(12, speed)));
+        }
+
+        public static DXEntityTemplate GetGenerationRequestTemplate(object req)
+        {
+            return req != null && _methodGenReqGetTemplate != null ? _methodGenReqGetTemplate.Invoke(req, null) as DXEntityTemplate : null;
         }
     }
 }
