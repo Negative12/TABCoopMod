@@ -5285,6 +5285,7 @@ namespace TABCoopMod.Core
             res["ccExtraFood"] = ccF;
 
             int rangers = 0, soldiers = 0, zombies = 0, giants = 0, mutants = 0;
+            int zombiesPlayable = 0, t3Playable = 0, zombiesOutside = 0, t3Outside = 0;
             int weakZombies = 0, mediumZombies = 0, strongZombies = 0;
             int chubbyZombies = 0, venomZombies = 0, harpyZombies = 0;
             int doomVillages = 0, oilSources = 0, pickables = 0, trees = 0, minerals = 0;
@@ -5310,12 +5311,16 @@ namespace TABCoopMod.Core
                     {
                         zombies++;
                         zombieCells.Add(e.Cell);
+                        bool isInPlay = DXLevel.Current == null || DXLevel.Current.IsCellInPlayableArea(e.Cell);
+                        bool isT3Mob = false;
                         if (tn.StartsWith("ZombieWeak", StringComparison.Ordinal)) weakZombies++;
                         else if (tn.StartsWith("ZombieMedium", StringComparison.Ordinal) || tn.StartsWith("ZombieWorker", StringComparison.Ordinal)) mediumZombies++;
                         else if (tn.StartsWith("ZombieDressed", StringComparison.Ordinal)) strongZombies++;
-                        else if (tn.StartsWith("ZombieStrong", StringComparison.Ordinal)) chubbyZombies++;
-                        else if (tn == "ZombieVenom") venomZombies++;
-                        else if (tn == "ZombieHarpy") harpyZombies++;
+                        else if (tn.StartsWith("ZombieStrong", StringComparison.Ordinal)) { chubbyZombies++; isT3Mob = true; }
+                        else if (tn == "ZombieVenom") { venomZombies++; isT3Mob = true; }
+                        else if (tn == "ZombieHarpy") { harpyZombies++; isT3Mob = true; }
+                        if (isInPlay) { zombiesPlayable++; if (isT3Mob) t3Playable++; }
+                        else { zombiesOutside++; if (isT3Mob) t3Outside++; }
                     }
                     else if (tn.Contains("Pickable") || tn.Contains("Item") || tn.Contains("Gold") && !tn.Contains("Mineral")) pickables++;
                     else if (tn.Contains("Forest") || tn.Contains("Tree")) trees++;
@@ -5457,6 +5462,10 @@ namespace TABCoopMod.Core
             res["rangers"] = rangers;
             res["soldiers"] = soldiers;
             res["zombiesTotal"] = zombies;
+            res["zombiesPlayable"] = zombiesPlayable;
+            res["t3Playable"] = t3Playable;
+            res["zombiesOutsidePlayable"] = zombiesOutside;
+            res["t3OutsidePlayable"] = t3Outside;
             res["weakZombies"] = weakZombies;
             res["mediumZombies"] = mediumZombies;
             res["strongZombies"] = strongZombies;

@@ -1115,11 +1115,6 @@ namespace TABCoopMod.Sync
             double num43 = Math.Max(0.001, infectedFactor * factorPop);
             double spawnThreshold = 1.0 - num43;
 
-            int minX = Math.Max(4, (int)Math.Ceiling(playable.Left) + 1);
-            int maxX = Math.Min(gN - 5, (int)Math.Floor(playable.Right) - 1);
-            int minY = Math.Max(4, (int)Math.Ceiling(playable.Top) + 1);
-            int maxY = Math.Min(gN - 5, (int)Math.Floor(playable.Bottom) - 1);
-
             int effOuterStart = spawnMode == MultiFactionSpawnMode.Separated
                 ? Math.Max(minMed + 8, minPowerful - 10)
                 : minPowerful;
@@ -1137,7 +1132,7 @@ namespace TABCoopMod.Sync
             {
                 for (int y = 0; y < gN; y++)
                 {
-                    if (x < minX || x > maxX || y < minY || y > maxY)
+                    if (!IsCellInPlayableArea(x, y, playable, gN))
                     {
                         layerZombies[x, y] = ZXMapLayerZombies.None;
                         continue;
@@ -1313,8 +1308,8 @@ namespace TABCoopMod.Sync
             // Pass 3: Ensure total entity count stays proportional to prePromotionCount (>=80%)
             // without exceeding the 25k 30Hz lockstep ceiling.
             int currentCount = 0;
-            for (int x = minX; x <= maxX; x++)
-                for (int y = minY; y <= maxY; y++)
+            for (int x = 4; x < gN - 4; x++)
+                for (int y = 4; y < gN - 4; y++)
                     currentCount += GetLayerZombieCellCount(layerZombies[x, y]);
 
             int targetTotal = Math.Min(25000, (int)Math.Round(prePromotionCount * 0.85));
@@ -1565,11 +1560,18 @@ namespace TABCoopMod.Sync
             return layerObjects[x, y] == ZXMapLayerObjectType.None;
         }
 
+        private static bool IsCellInPlayableArea(int x, int y, RectangleF playable, int gN)
+        {
+            if (x < 4 || y < 4 || x >= gN - 4 || y >= gN - 4) return false;
+            if (playable.IsEmpty) return true;
+            return playable.Contains(DXWorldGrid.ScenePointFromWorldCell(x, y, gN));
+        }
+
         private static bool IsWithinSafePlayable(int x, int y, RectangleF playable, int gN, float sceneMargin)
         {
             if (x < 16 || y < 16 || x >= gN - 16 || y >= gN - 16) return false;
             if (playable.IsEmpty) return true;
-            PointF scenePt = DXWorldGrid.ScenePointFromWorldCell(x, y);
+            PointF scenePt = DXWorldGrid.ScenePointFromWorldCell(x, y, gN);
             RectangleF safe = playable;
             safe.Inflate(-sceneMargin, -sceneMargin);
             return safe.Contains(scenePt);
