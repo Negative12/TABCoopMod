@@ -92,7 +92,7 @@
 1. 完全关闭游戏。
 2. 在 Steam 中右键《They Are Billions》→ **管理** → **浏览本地文件**，打开游戏根目录。
 3. **备份**游戏根目录中原有的 `TheyAreBillions.exe.config`（例如重命名为 `TheyAreBillions.exe.config.bak`）。
-4. 下载发行压缩包（如 `TABCoopMod-v0.2.1.zip`），将压缩包内的所有文件**直接解压到游戏根目录**，提示替换 `TheyAreBillions.exe.config` 时选择覆盖。
+4. 下载发行压缩包（如 `TABCoopMod-v0.2.2.zip`），将压缩包内的所有文件**直接解压到游戏根目录**，提示替换 `TheyAreBillions.exe.config` 时选择覆盖。
 5. 通过 Steam 正常启动游戏，主菜单出现【多人合作模式】按钮即安装成功。
 
 ### 快速开黑流程
