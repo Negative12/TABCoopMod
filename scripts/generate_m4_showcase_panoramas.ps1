@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$GameDir = "",
     [string]$OutputDir = "",
     [int]$Resolution = 2048,
@@ -65,12 +65,12 @@ $psi.EnvironmentVariables["TABCOOP_LOG_NAME"] = "TABCoopMod.pano_m4.log"
 $psi.EnvironmentVariables.Remove("TABCOOP_TEST")
 
 $themes = @(
-    @{ theme = "BR"; cnName = "暗黑荒原 (BR)"; enName = "The Dark Moorland"; seed = 202611 },
-    @{ theme = "AL"; cnName = "宁静低地 (AL)"; enName = "The Peaceful Lowlands"; seed = 202631 },
-    @{ theme = "TM"; cnName = "荒芜旷野 (TM)"; enName = "The Frozen Highlands"; seed = 202624 },
-    @{ theme = "DS"; cnName = "干旱高地 (DS)"; enName = "The Desolated Wasteland"; seed = 202641 },
-    @{ theme = "FA"; cnName = "深寒苔原 (FA)"; enName = "The Frozen Lake / Tundra"; seed = 202653 },
-    @{ theme = "VO"; cnName = "酸蚀之地 (VO)"; enName = "The Caustic Lands"; seed = 202661 }
+    @{ theme = "BR"; cnName = "暗黑荒原 (BR)"; enName = "The Dark Moorland"; seed = 202611; factorPop = 1.0; factorDuration = 1.0 },
+    @{ theme = "AL"; cnName = "宁静低地 (AL)"; enName = "The Peaceful Lowlands"; seed = 202631; factorPop = 1.0; factorDuration = 1.0 },
+    @{ theme = "TM"; cnName = "荒芜旷野 (TM)"; enName = "The Frozen Highlands"; seed = 202624; factorPop = 1.0; factorDuration = 1.0 },
+    @{ theme = "DS"; cnName = "干旱高地 (DS)"; enName = "The Desolated Wasteland"; seed = 202641; factorPop = 1.0; factorDuration = 1.0 },
+    @{ theme = "FA"; cnName = "深寒苔原 (FA)"; enName = "The Frozen Lake / Tundra"; seed = 202653; factorPop = 1.0; factorDuration = 1.0 },
+    @{ theme = "VO"; cnName = "酸蚀之地 900% (VO)"; enName = "The Caustic Lands (900%)"; seed = 202661; factorPop = 1.5; factorDuration = 0.8 }
 )
 
 $configs = @(
@@ -115,8 +115,8 @@ try {
             $genRes = Invoke-Control 27901 "start_survival_gen" @{
                 seed = $t.seed
                 theme = $t.theme
-                factorPop = 1.0
-                factorDuration = 1.0
+                factorPop = $t.factorPop
+                factorDuration = $t.factorDuration
                 mode = $cfg.mode
                 spawnMode = $cfg.spawnMode
             }

@@ -142,9 +142,11 @@ namespace TABCoopMod.Sync
                 ref rngState);
             RelocateBlockedProps(propEntities, chosenSpots, layerTerrain, layerObjects, playable, gN);
 
-            // 7. Rewrite LayerZombies in a single pass with d_min 3-ring compression, tendency weights, and outer Giants.
+            // 7. Rewrite LayerZombies per-base using vanilla dynamic noise & ZXMapTheme distance thresholds,
+            //    preserving M4 tendency weighting on outer elites and condensed outer Giants.
             RewriteZombieRingsAndBosses(
                 chosenSpots,
+                nestEntities,
                 extraEntities,
                 existingBosses,
                 layerTerrain,
@@ -154,7 +156,8 @@ namespace TABCoopMod.Sync
                 gN,
                 playerCount,
                 mapSeed,
-                spawnMode,
+                factorPop,
+                randomLevelParams,
                 tendency,
                 ref rngState);
 
@@ -1055,6 +1058,7 @@ namespace TABCoopMod.Sync
 
         private static void RewriteZombieRingsAndBosses(
             List<Point> baseSpots,
+            List<DXEntity> nestEntities,
             List<DXEntity> extraEntities,
             List<DXEntity> existingBosses,
             DXGridLayerEnum<ZXMapLayerTerrainType> layerTerrain,
@@ -1064,15 +1068,56 @@ namespace TABCoopMod.Sync
             int gN,
             int playerCount,
             int mapSeed,
-            MultiFactionSpawnMode spawnMode,
+            float factorPop,
+            object randomLevelParams,
             MutationTendency tendency,
             ref ulong rng)
         {
             GetTendencyWeights(tendency, out int wChubby, out int wVenom, out int wHarpy, out float giantMult);
-            double sectorBiasPhase = NextDouble(ref rng) * Math.PI * 2.0;
+            GameBridge.GetMapThemeZombieProfile(
+                randomLevelParams,
+                out double infectedFactor,
+                out double infectedDispersion,
+                out int minWeak,
+                out int minMed,
+                out int minStrong,
+                out int minPowerful);
 
-            int t1ToT2Acc = 0;
-            double t3QuotaAcc = 0.0;
+            // Reconstruct vanilla dynamic noise layer (DXNoyseLayer) and apply the exact vanilla
+            // soft -0.5 SubstractCircle independently to every starter base.
+            var noiseLayer = new DXNoyseLayer(gN);
+            var noiseRng = new DXRandom(unchecked(mapSeed ^ 0x5A4D4231));
+            double z = noiseRng.NextDouble() * 1000.0;
+            double ox = noiseRng.NextDouble() * 1000.0;
+            double oy = noiseRng.NextDouble() * 1000.0;
+            noiseLayer.FillWithNoyse(z, infectedDispersion, infectedDispersion, ox, oy);
+            for (int b = 0; b < baseSpots.Count; b++)
+                noiseLayer.SubstractCircle(baseSpots[b].X, baseSpots[b].Y, minWeak, 0.5);
+
+            // Build Doom Village footprint exclusion mask so zombies never spawn inside village buildings.
+            var villageMask = new bool[gN, gN];
+            for (int i = 0; i < nestEntities.Count; i++)
+            {
+                var ne = nestEntities[i];
+                if (ne == null) continue;
+                Rectangle area = ne.CellArea;
+                int x0 = Math.Max(0, area.Left - 1);
+                int y0 = Math.Max(0, area.Top - 1);
+                int x1 = Math.Min(gN - 1, area.Right + 1);
+                int y1 = Math.Min(gN - 1, area.Bottom + 1);
+                for (int vx = x0; vx <= x1; vx++)
+                    for (int vy = y0; vy <= y1; vy++)
+                        villageMask[vx, vy] = true;
+            }
+
+            double num43 = Math.Max(0.001, infectedFactor * factorPop);
+            double spawnThreshold = 1.0 - num43;
+
+            int minX = Math.Max(4, (int)Math.Ceiling(playable.Left) + 1);
+            int maxX = Math.Min(gN - 5, (int)Math.Floor(playable.Right) - 1);
+            int minY = Math.Max(4, (int)Math.Ceiling(playable.Top) + 1);
+            int maxY = Math.Min(gN - 5, (int)Math.Floor(playable.Bottom) - 1);
+
             int t3Emitted = 0;
             int condensedGiants = 0;
             int maxCondensedGiants = (int)Math.Round((playerCount >= 3 ? 4.0 : 2.5) * giantMult);
@@ -1081,86 +1126,89 @@ namespace TABCoopMod.Sync
             {
                 for (int y = 0; y < gN; y++)
                 {
-                    ZXMapLayerZombies cur = layerZombies[x, y];
-                    if (cur == ZXMapLayerZombies.None) continue;
-
-                    double rawDMin = MinDistanceToBases(x, y, baseSpots);
-                    if (rawDMin < 28.0)
+                    if (x < minX || x > maxX || y < minY || y > maxY)
                     {
                         layerZombies[x, y] = ZXMapLayerZombies.None;
                         continue;
                     }
 
-                    double dMin = rawDMin;
-                    if (spawnMode == MultiFactionSpawnMode.Separated && rawDMin >= 34.0)
+                    var t = layerTerrain[x, y];
+                    var o = layerObjects[x, y];
+                    if ((t != ZXMapLayerTerrainType.Earth && t != ZXMapLayerTerrainType.Grass)
+                        || o == ZXMapLayerObjectType.Mountain
+                        || o == ZXMapLayerObjectType.Tree
+                        || villageMask[x, y])
                     {
-                        double angle = Math.Atan2(y - gN * 0.5, x - gN * 0.5);
-                        dMin += 6.0 * Math.Sin(2.0 * angle + sectorBiasPhase) - 2.0;
-                    }
-
-                    int cellCount = GetLayerZombieCellCount(cur);
-                    bool isT1 = IsLayerZombieT1(cur);
-                    bool isT2 = IsLayerZombieT2(cur);
-                    ulong cellHash = Mix64(((ulong)(uint)x << 32) | (uint)y ^ (ulong)(uint)mapSeed);
-
-                    if (dMin < 48.0)
-                    {
-                        // Ring 1 (28..48): 100% walker-friendly T1 so starting Rangers can clear cleanly.
-                        if (!isT1)
-                        {
-                            layerZombies[x, y] = cellCount >= 3 ? ZXMapLayerZombies.Weak3 : (cellCount == 2 ? ZXMapLayerZombies.Weak2 : ZXMapLayerZombies.Weak1);
-                        }
+                        layerZombies[x, y] = ZXMapLayerZombies.None;
                         continue;
                     }
 
-                    if (dMin < 75.0)
+                    // Vanilla CC Enlarge(4) hard-clear (~6 cells Chebyshev from 5x5 CC center) per base.
+                    bool inCcClear = false;
+                    for (int b = 0; b < baseSpots.Count; b++)
                     {
-                        // Ring 2 (48..75): compress 50% of T1 at 4:1 into T2 (Runners / Medium / Strong DressedA).
-                        if (isT1 && (cellHash & 1UL) == 0UL)
+                        if (Math.Abs(x - baseSpots[b].X) <= 6 && Math.Abs(y - baseSpots[b].Y) <= 6)
                         {
-                            t1ToT2Acc += cellCount;
-                            if (t1ToT2Acc >= 4)
+                            inCcClear = true;
+                            break;
+                        }
+                    }
+                    if (inCcClear)
+                    {
+                        layerZombies[x, y] = ZXMapLayerZombies.None;
+                        continue;
+                    }
+
+                    double nv = noiseLayer[x, y];
+                    if (nv < spawnThreshold)
+                    {
+                        layerZombies[x, y] = ZXMapLayerZombies.None;
+                        continue;
+                    }
+
+                    int num49 = (int)Math.Round(4.0 * (nv - spawnThreshold) / num43);
+                    double dMin = MinDistanceToBases(x, y, baseSpots);
+                    ulong cellHash = Mix64(((ulong)(uint)x << 32) | (uint)y ^ (ulong)(uint)mapSeed);
+                    int num51 = (int)(cellHash % 100UL);
+
+                    if (num51 >= 50 && dMin >= minMed)
+                    {
+                        if (num51 >= 60 && dMin >= minPowerful)
+                        {
+                            t3Emitted++;
+                            if (dMin >= 85.0 && (t3Emitted % 30 == 29) && condensedGiants < maxCondensedGiants)
                             {
-                                t1ToT2Acc -= 4;
-                                int pick = (int)((cellHash >> 8) % 10UL);
-                                layerZombies[x, y] = pick < 4 ? ZXMapLayerZombies.Runners1 : (pick < 8 ? ZXMapLayerZombies.Medium1 : ZXMapLayerZombies.Strong1);
+                                condensedGiants++;
+                                layerZombies[x, y] = ZXMapLayerZombies.None;
                             }
                             else
                             {
-                                layerZombies[x, y] = ZXMapLayerZombies.None;
+                                layerZombies[x, y] = PickTendencyEliteEnum(
+                                    (int)((cellHash >> 12) % 100UL),
+                                    num49 > 2,
+                                    wChubby,
+                                    wVenom,
+                                    wHarpy);
                             }
                         }
-                        continue;
-                    }
-
-                    // Ring 3 (>= 75): compress 70% T1 (9:1) and 40% T2 (3:1) into seed-weighted T3 elites + outer Giants.
-                    int roll10 = (int)((cellHash >> 4) % 10UL);
-                    bool draw = (isT1 && roll10 < 7) || (isT2 && roll10 < 4);
-                    if (!draw)
-                    {
-                        // Keep remaining ~30% T1/T2 as natural filler, and re-weight native Powerful* to tendency.
-                        if (cur == ZXMapLayerZombies.Powerful1 || cur == ZXMapLayerZombies.Powerful2)
+                        else if (num51 >= 40 && dMin >= minStrong)
                         {
-                            layerZombies[x, y] = PickTendencyEliteEnum((int)((cellHash >> 12) % 100UL), cellCount >= 2, wChubby, wVenom, wHarpy);
-                        }
-                        continue;
-                    }
-
-                    t3QuotaAcc += isT1 ? (cellCount / 9.0) : (cellCount / 3.0);
-                    if (t3QuotaAcc >= 1.0)
-                    {
-                        t3QuotaAcc -= 1.0;
-                        t3Emitted++;
-                        if (rawDMin >= 85.0 && (t3Emitted % 30 == 29) && condensedGiants < maxCondensedGiants)
-                        {
-                            condensedGiants++;
-                            layerZombies[x, y] = ZXMapLayerZombies.None;
+                            layerZombies[x, y] = num49 <= 1
+                                ? ZXMapLayerZombies.Strong1
+                                : (num49 == 2 ? ZXMapLayerZombies.Strong2 : ZXMapLayerZombies.Strong3);
                         }
                         else
                         {
-                            bool twoUnits = cellCount >= 3 && (t3Emitted % 3 == 0);
-                            layerZombies[x, y] = PickTendencyEliteEnum((int)((cellHash >> 12) % 100UL), twoUnits, wChubby, wVenom, wHarpy);
+                            layerZombies[x, y] = num49 <= 1
+                                ? ZXMapLayerZombies.Medium1
+                                : (num49 == 2 ? ZXMapLayerZombies.Medium2 : ZXMapLayerZombies.Medium3);
                         }
+                    }
+                    else if (num51 >= 30)
+                    {
+                        layerZombies[x, y] = num49 <= 1
+                            ? ZXMapLayerZombies.Weak1
+                            : (num49 == 2 ? ZXMapLayerZombies.Weak2 : ZXMapLayerZombies.Weak3);
                     }
                     else
                     {
@@ -1169,13 +1217,13 @@ namespace TABCoopMod.Sync
                 }
             }
 
-            // Clamp existing Giants (>=75) and Mutants (>=90) away from starter bases.
+            // Clamp existing Giants (>=70) and Mutants (>=64) away from all starter bases (matching vanilla).
             var placedBossSpots = new List<Point>();
             for (int i = 0; i < existingBosses.Count; i++)
             {
                 var b = existingBosses[i];
                 bool isMutant = GameBridge.TypeZombieMutant != null && GameBridge.TypeZombieMutant.IsInstanceOfType(b);
-                double minReq = isMutant ? 90.0 : 75.0;
+                double minReq = isMutant ? 64.0 : 70.0;
                 if (MinDistanceToBases(b.CellX, b.CellY, baseSpots) < minReq)
                 {
                     Point? spot = FindOuterBossSpot(baseSpots, placedBossSpots, layerTerrain, layerObjects, playable, gN, minReq, i % baseSpots.Count, ref rng);

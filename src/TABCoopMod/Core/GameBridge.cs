@@ -163,6 +163,12 @@ namespace TABCoopMod.Core
         private static PropertyInfo _propMapThemeNumInfectedGiants;
         private static PropertyInfo _propMapThemeNumInfectedMutants;
         private static PropertyInfo _propMapThemeInfectedFactor;
+        private static PropertyInfo _propMapThemeInfectedDispersion;
+        private static PropertyInfo _propMapThemeMinDistWeak;
+        private static PropertyInfo _propMapThemeMinDistMed;
+        private static PropertyInfo _propMapThemeMinDistStrong;
+        private static PropertyInfo _propMapThemeMinDistPowerful;
+        private static PropertyInfo _propRandomParamsThemeType;
         private static PropertyInfo _propLevelExtMapDrawer;
         private static PropertyInfo _propLevelExtLevelEvents;
         private static PropertyInfo _propMapDrawerExtraEntities;
@@ -643,6 +649,7 @@ namespace TABCoopMod.Core
                     _propRandomParamsNCells = AccessTools.Property(_typeZXRandomLevelParams, "NCells");
                     _propRandomParamsFactorDuration = AccessTools.Property(_typeZXRandomLevelParams, "FactorGameDuration");
                     _propRandomParamsFactorZombiePop = AccessTools.Property(_typeZXRandomLevelParams, "FactorZombiePopulation");
+                    _propRandomParamsThemeType = AccessTools.Property(_typeZXRandomLevelParams, "ThemeType");
                 }
                 if (_typeZXMapTheme != null)
                 {
@@ -654,6 +661,11 @@ namespace TABCoopMod.Core
                     _propMapThemeNumInfectedGiants = AccessTools.Property(_typeZXMapTheme, "NumInfectedGiants");
                     _propMapThemeNumInfectedMutants = AccessTools.Property(_typeZXMapTheme, "NumInfectedMutants");
                     _propMapThemeInfectedFactor = AccessTools.Property(_typeZXMapTheme, "InfectedFactor");
+                    _propMapThemeInfectedDispersion = AccessTools.Property(_typeZXMapTheme, "InfectedDispersion");
+                    _propMapThemeMinDistWeak = AccessTools.Property(_typeZXMapTheme, "MinDistanceForWeakInfected");
+                    _propMapThemeMinDistMed = AccessTools.Property(_typeZXMapTheme, "MinDistanceForMediumInfected");
+                    _propMapThemeMinDistStrong = AccessTools.Property(_typeZXMapTheme, "MinDistanceForStrongInfected");
+                    _propMapThemeMinDistPowerful = AccessTools.Property(_typeZXMapTheme, "MinDistanceForPowerfulInfected");
                 }
                 if (_typeZXLevelExtension != null)
                 {
@@ -4839,6 +4851,50 @@ namespace TABCoopMod.Core
                 snap.NumInfectedGiants,
                 snap.NumInfectedMutants,
                 snap.InfectedFactor);
+        }
+
+        public static bool GetMapThemeZombieProfile(
+            object randomParams,
+            out double infectedFactor,
+            out double infectedDispersion,
+            out int minWeak,
+            out int minMed,
+            out int minStrong,
+            out int minPowerful)
+        {
+            infectedFactor = 0.45;
+            infectedDispersion = 0.04;
+            minWeak = 28;
+            minMed = 44;
+            minStrong = 62;
+            minPowerful = 75;
+            try
+            {
+                if (randomParams == null || _propRandomParamsThemeType == null) return false;
+                object themeKey = _propRandomParamsThemeType.GetValue(randomParams);
+                IDictionary themes = GetMapThemesDictionary();
+                if (themeKey == null || themes == null || !themes.Contains(themeKey)) return false;
+                object themeObj = themes[themeKey];
+                if (themeObj == null) return false;
+
+                if (_propMapThemeInfectedFactor != null)
+                    infectedFactor = (double)_propMapThemeInfectedFactor.GetValue(themeObj);
+                if (_propMapThemeInfectedDispersion != null)
+                    infectedDispersion = Convert.ToDouble(_propMapThemeInfectedDispersion.GetValue(themeObj));
+                if (_propMapThemeMinDistWeak != null)
+                    minWeak = (int)_propMapThemeMinDistWeak.GetValue(themeObj);
+                if (_propMapThemeMinDistMed != null)
+                    minMed = (int)_propMapThemeMinDistMed.GetValue(themeObj);
+                if (_propMapThemeMinDistStrong != null)
+                    minStrong = (int)_propMapThemeMinDistStrong.GetValue(themeObj);
+                if (_propMapThemeMinDistPowerful != null)
+                    minPowerful = (int)_propMapThemeMinDistPowerful.GetValue(themeObj);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         public static bool TryGetGeneratedLevelContext(
