@@ -74,7 +74,7 @@ namespace TABCoopMod.Sync
                 ExtraSoldiers = 0,
                 ExtraWorkers = 0,
                 ExtraFood = 0,
-                RoamingDensityScale = balanced ? (n >= 3 ? 0.80 : 0.85) : 1.0,
+                RoamingDensityScale = 1.0,
                 EarlySwarmScale = n >= 3 ? 0.58f : 0.68f,
                 LateSwarmScale = n >= 3 ? 0.98f : 1.08f
             };

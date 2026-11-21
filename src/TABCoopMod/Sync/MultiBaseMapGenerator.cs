@@ -1273,15 +1273,16 @@ namespace TABCoopMod.Sync
                         continue;
                     }
 
-                    bool promoteOuter = (isT1 && drawRoll < 80) || (isT2 && drawRoll < 65);
+                    bool promoteOuter = (isT1 && drawRoll < 70) || (isT2 && drawRoll < 50);
                     if (!promoteOuter)
                     {
                         layerZombies[x, y] = baseCell;
                         continue;
                     }
 
-                    // 1.25x outer BTK input boost so finite-radius noise aggro pulls enough elites simultaneously.
-                    outerBtkBudget += isT1 ? cellCount * 1.25 : cellCount * 2.0;
+                    // Pure BTK-weighted outer promotion on native 1.0x InfectedFactor:
+                    // compress redundant T1/T2 counts into T3 elites without cutting native T3 spawns.
+                    outerBtkBudget += isT1 ? cellCount : cellCount * 1.6;
                     ZXMapLayerZombies singleElite = PickTendencyEliteEnum((int)((cellHash >> 12) % 100UL), false, wChubby, wVenom, wHarpy);
                     double unitCost = (singleElite == ZXMapLayerZombies.Chubbies1) ? 5.0 : 3.0;
 
@@ -1309,14 +1310,14 @@ namespace TABCoopMod.Sync
                 }
             }
 
-            // Pass 3: Replenish low/mid-tier filler in dMin >= minWeak noise-eligible cells
-            // so total entity count stays slightly above Vanilla/pre-promotion while keeping 30Hz smooth.
+            // Pass 3: Ensure total entity count stays proportional to prePromotionCount (>=80%)
+            // without exceeding the 25k 30Hz lockstep ceiling.
             int currentCount = 0;
             for (int x = minX; x <= maxX; x++)
                 for (int y = minY; y <= maxY; y++)
                     currentCount += GetLayerZombieCellCount(layerZombies[x, y]);
 
-            int targetTotal = Math.Min(25000, (int)Math.Round(prePromotionCount * 1.10));
+            int targetTotal = Math.Min(25000, (int)Math.Round(prePromotionCount * 0.85));
             if (currentCount < targetTotal && fillerCandidates.Count > 0)
             {
                 int need = targetTotal - currentCount;
