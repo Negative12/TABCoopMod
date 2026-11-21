@@ -41,25 +41,41 @@
   - 支持在局内胜负结算后全队同步退出并返回大厅。
 - **多人新生存局【联机均衡】预设**：房主可在大厅切换【联机均衡】或【原版】预设，针对多人扩张速度自动调整地图大小、初始兵力与工人数量，并按面积均衡野怪与波次强度。
 
-<details>
-<summary>展开查看：4 场景同种子联机均衡全景对比（Vanilla vs 2P / 3P）</summary>
+---
 
-- **交互式全景对比报告**：[`reports/panorama_comparison.html`](reports/panorama_comparison.html)
-- **定量指标数据**：[`reports/panorama_metrics.json`](reports/panorama_metrics.json)
+## 两种模式交互式全景对比展示（以 900% 剧毒/酸蚀荒原为例）
 
-| 场景 (`Seed`) | 档位 (`NCells` / 可玩宽) | 初始单位与额外工人 | 游荡僵尸总量 | 感染村镇建筑 | 巨人 / 变异体 |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **BR 100% 暗黑荒原** (`202601`) | Vanilla `256` (`148`) | `4R + 1S` (`+0W`) | `5,198` | `7` | `1 / 1` |
-| **BR 100% 暗黑荒原** (`202601`) | **2P `280` (`164`)** / **3P `304` (`178`)** | `6R + 1S` (`+2W`) / `6R + 2S` (`+3W, +1F`) | `9,849` / `11,485` | `7` / `7` | `1/1` / `1/1` |
-| **DS 120% 干旱高地** (`202602`) | Vanilla `256` vs **2P `280`** | `4R + 1S` → `6R + 1S` (`+2W`) | `13,067` → `17,370` | `64` → `55` | `2/6` → `2/8` |
-| **FA 120% 寒冰荒原** (`202603`) | Vanilla `256` vs **3P `304`** | `4R + 1S` → `6R + 2S` (`+3W, +1F`) | `9,769` → `17,448` | `3` → `7` | `0/0` → `0/0` |
-| **VO 900% 剧毒荒原** (`202604`) | Vanilla `256` vs **2P `280`** / **3P `304`** | `6R + 1S` (`+2W`) / `6R + 2S` (`+3W, +1F`) | `15,652` → `22,295` / `25,952` | `81` → `95` / `115` | `6/12` → `6/15` / `9/18` |
+为了直观对比多人扩图与刷怪平衡效果，仓库内置了两套**交互式全景对比报告**（下载仓库或本地打开 HTML 可缩放查看全图与各项统计）：
 
-| Vanilla (`256`) | Co-op 2P (`280`) | Co-op 3P (`304`) |
+- **执政官共控模式（Archon）全景报告**：[`reports/panorama_comparison.html`](reports/panorama_comparison.html) ｜ 指标数据：[`reports/panorama_metrics.json`](reports/panorama_metrics.json)
+- **独立基地模式（Multi-Faction）全景报告**：[`reports/multifaction_m4_panorama_report.html`](reports/multifaction_m4_panorama_report.html) ｜ 指标数据：[`reports/multifaction_m4_panorama_metrics.json`](reports/multifaction_m4_panorama_metrics.json)
+
+### 1. 执政官共控模式 — VO 900% 剧毒荒原（`Seed 202604`，原版 vs 2P / 3P）
+
+| 档位 (`NCells` / 可玩宽) | 初始单位与额外工人 | 游荡僵尸总量 | 感染村镇建筑 | 巨人 / 变异体 |
+| :--- | :---: | :---: | :---: | :---: |
+| **原版 Vanilla** `256` (`148`) | `4R + 1S` (`+0W`) | `15,652` | `81` | `6 / 12` |
+| **执政官 2P** `280` (`164`) | `6R + 1S` (`+2W`) | `22,295` | `95` | `6 / 15` |
+| **执政官 3P** `304` (`178`) | `6R + 2S` (`+3W, +1F`) | `25,952` | `115` | `9 / 18` |
+
+| Vanilla (`256`) | Archon 2P (`280`) | Archon 3P (`304`) |
 | :---: | :---: | :---: |
-| ![BR Vanilla](reports/panoramas/br_100_vanilla.jpg) | ![BR 2P](reports/panoramas/br_100_coop2p.jpg) | ![BR 3P](reports/panoramas/br_100_coop3p.jpg) |
+| ![VO Vanilla](reports/panoramas/vo_900_vanilla.jpg) | ![VO Archon 2P](reports/panoramas/vo_900_coop2p.jpg) | ![VO Archon 3P](reports/panoramas/vo_900_coop3p.jpg) |
 
-</details>
+### 2. 独立基地模式 — VO 900% 酸蚀之地（`Seed 202661`，2P / 3P × 分离 / 聚集出生）
+
+> 地图扩至 `360`（2P）/ `416`（3P），全基地均通过连通性校验、保持 `>=28` 格初始僵尸安全圈与 `>=32` 格感染村镇安全距，前期波次从各玩家外侧独立刷出（`W1=E,W` / `E,W,N` / `E,S,N`）。
+
+| 配置 (`NCells` / 可玩宽) | 出生间距 / 最近城镇 | 初始兵力（全队） | 游荡僵尸总量 | 感染村镇建筑 | 巨人 / 变异体 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **2P 分离出生** `360` (`210`) | `88.1` / `47.6` 格 | `8R + 2S` | `11,880` | `157` | `4 / 4` |
+| **2P 聚集出生** `360` (`210`) | `20.4` / `40.7` 格 | `8R + 2S` | `11,701` | `157` | `4 / 4` |
+| **3P 分离出生** `416` (`242`) | `74.1` / `56.4` 格 | `12R + 3S` | `11,605` | `237` | `7 / 5` |
+| **3P 聚集出生** `416` (`242`) | `18.9` / `41.0` 格 | `12R + 3S` | `11,848` | `237` | `7 / 5` |
+
+| Multi-Faction 2P 分离 (`360`) | Multi-Faction 2P 聚集 (`360`) | Multi-Faction 3P 分离 (`416`) | Multi-Faction 3P 聚集 (`416`) |
+| :---: | :---: | :---: | :---: |
+| ![VO MF 2P Sep](reports/panoramas_mf_m4/vo_mf2p_sep.jpg) | ![VO MF 2P Cls](reports/panoramas_mf_m4/vo_mf2p_cls.jpg) | ![VO MF 3P Sep](reports/panoramas_mf_m4/vo_mf3p_sep.jpg) | ![VO MF 3P Cls](reports/panoramas_mf_m4/vo_mf3p_cls.jpg) |
 
 ---
 
