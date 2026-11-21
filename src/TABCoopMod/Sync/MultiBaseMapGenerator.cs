@@ -1273,21 +1273,22 @@ namespace TABCoopMod.Sync
                         continue;
                     }
 
-                    bool promoteOuter = (isT1 && drawRoll < 60) || (isT2 && drawRoll < 45);
+                    bool promoteOuter = (isT1 && drawRoll < 80) || (isT2 && drawRoll < 65);
                     if (!promoteOuter)
                     {
                         layerZombies[x, y] = baseCell;
                         continue;
                     }
 
-                    outerBtkBudget += isT1 ? cellCount : cellCount * 1.6;
+                    // 1.25x outer BTK input boost so finite-radius noise aggro pulls enough elites simultaneously.
+                    outerBtkBudget += isT1 ? cellCount * 1.25 : cellCount * 2.0;
                     ZXMapLayerZombies singleElite = PickTendencyEliteEnum((int)((cellHash >> 12) % 100UL), false, wChubby, wVenom, wHarpy);
                     double unitCost = (singleElite == ZXMapLayerZombies.Chubbies1) ? 5.0 : 3.0;
 
                     if (outerBtkBudget >= unitCost)
                     {
                         t3Emitted++;
-                        bool twoUnits = num49 >= 3 && (t3Emitted % 3 == 0) && outerBtkBudget >= unitCost * 2.0;
+                        bool twoUnits = num49 >= 2 && (t3Emitted % 2 == 0) && outerBtkBudget >= unitCost * 2.0;
                         outerBtkBudget -= twoUnits ? unitCost * 2.0 : unitCost;
 
                         if (dMin >= 85.0 && (t3Emitted % 28 == 27) && condensedGiants < maxCondensedGiants)
