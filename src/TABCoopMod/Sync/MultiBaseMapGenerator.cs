@@ -143,7 +143,7 @@ namespace TABCoopMod.Sync
             RelocateBlockedProps(propEntities, chosenSpots, layerTerrain, layerObjects, playable, gN);
 
             // 7. Rewrite LayerZombies per-base using vanilla dynamic noise & ZXMapTheme distance thresholds,
-            //    preserving M4 tendency weighting on outer elites and condensed outer Giants.
+            //    then apply BTK-weighted promotion + low/mid-tier filler replenishment.
             RewriteZombieRingsAndBosses(
                 chosenSpots,
                 nestEntities,
@@ -158,6 +158,7 @@ namespace TABCoopMod.Sync
                 mapSeed,
                 factorPop,
                 randomLevelParams,
+                spawnMode,
                 tendency,
                 ref rngState);
 
@@ -1070,6 +1071,7 @@ namespace TABCoopMod.Sync
             int mapSeed,
             float factorPop,
             object randomLevelParams,
+            MultiFactionSpawnMode spawnMode,
             MutationTendency tendency,
             ref ulong rng)
         {
@@ -1118,10 +1120,19 @@ namespace TABCoopMod.Sync
             int minY = Math.Max(4, (int)Math.Ceiling(playable.Top) + 1);
             int maxY = Math.Min(gN - 5, (int)Math.Floor(playable.Bottom) - 1);
 
+            int effOuterStart = spawnMode == MultiFactionSpawnMode.Separated
+                ? Math.Max(minMed + 8, minPowerful - 10)
+                : minPowerful;
+
+            int prePromotionCount = 0;
+            double midPromoBudget = 0.0;
+            double outerBtkBudget = 0.0;
             int t3Emitted = 0;
             int condensedGiants = 0;
             int maxCondensedGiants = (int)Math.Round((playerCount >= 3 ? 4.0 : 2.5) * giantMult);
+            var fillerCandidates = new List<Point>(4096);
 
+            // Pass 1 & 2: Apply per-base vanilla dynamic noise, then BTK-weighted mid/outer promotion.
             for (int x = 0; x < gN; x++)
             {
                 for (int y = 0; y < gN; y++)
@@ -1171,49 +1182,158 @@ namespace TABCoopMod.Sync
                     ulong cellHash = Mix64(((ulong)(uint)x << 32) | (uint)y ^ (ulong)(uint)mapSeed);
                     int num51 = (int)(cellHash % 100UL);
 
+                    ZXMapLayerZombies baseCell = ZXMapLayerZombies.None;
                     if (num51 >= 50 && dMin >= minMed)
                     {
-                        if (num51 >= 60 && dMin >= minPowerful)
+                        if (num51 >= 60 && dMin >= effOuterStart)
                         {
-                            t3Emitted++;
-                            if (dMin >= 85.0 && (t3Emitted % 30 == 29) && condensedGiants < maxCondensedGiants)
-                            {
-                                condensedGiants++;
-                                layerZombies[x, y] = ZXMapLayerZombies.None;
-                            }
-                            else
-                            {
-                                layerZombies[x, y] = PickTendencyEliteEnum(
-                                    (int)((cellHash >> 12) % 100UL),
-                                    num49 > 2,
-                                    wChubby,
-                                    wVenom,
-                                    wHarpy);
-                            }
+                            baseCell = PickTendencyEliteEnum((int)((cellHash >> 12) % 100UL), num49 > 2, wChubby, wVenom, wHarpy);
                         }
                         else if (num51 >= 40 && dMin >= minStrong)
                         {
-                            layerZombies[x, y] = num49 <= 1
+                            baseCell = num49 <= 1
                                 ? ZXMapLayerZombies.Strong1
                                 : (num49 == 2 ? ZXMapLayerZombies.Strong2 : ZXMapLayerZombies.Strong3);
                         }
                         else
                         {
-                            layerZombies[x, y] = num49 <= 1
+                            baseCell = num49 <= 1
                                 ? ZXMapLayerZombies.Medium1
                                 : (num49 == 2 ? ZXMapLayerZombies.Medium2 : ZXMapLayerZombies.Medium3);
                         }
                     }
                     else if (num51 >= 30)
                     {
-                        layerZombies[x, y] = num49 <= 1
+                        baseCell = num49 <= 1
                             ? ZXMapLayerZombies.Weak1
                             : (num49 == 2 ? ZXMapLayerZombies.Weak2 : ZXMapLayerZombies.Weak3);
+                    }
+
+                    prePromotionCount += GetLayerZombieCellCount(baseCell);
+
+                    if (baseCell == ZXMapLayerZombies.None)
+                    {
+                        layerZombies[x, y] = ZXMapLayerZombies.None;
+                        if (dMin >= minWeak)
+                            fillerCandidates.Add(new Point(x, y));
+                        continue;
+                    }
+
+                    // Near ring (< minMed): keep 100% pure vanilla dynamic noise untouched.
+                    if (dMin < minMed)
+                    {
+                        layerZombies[x, y] = baseCell;
+                        continue;
+                    }
+
+                    int cellCount = GetLayerZombieCellCount(baseCell);
+                    bool isT1 = IsLayerZombieT1(baseCell);
+                    bool isT2 = IsLayerZombieT2(baseCell);
+                    int drawRoll = (int)((cellHash >> 4) % 100UL);
+
+                    // Mid ring [minMed .. effOuterStart): promote 40% of T1 at 2.5:1 into Strong (70%) / Medium (30%).
+                    if (dMin < effOuterStart)
+                    {
+                        if (isT1 && drawRoll < 40)
+                        {
+                            midPromoBudget += cellCount;
+                            if (midPromoBudget >= 2.5)
+                            {
+                                midPromoBudget -= 2.5;
+                                layerZombies[x, y] = ((cellHash >> 8) % 10UL) < 7UL
+                                    ? ZXMapLayerZombies.Strong1
+                                    : ZXMapLayerZombies.Medium1;
+                            }
+                            else
+                            {
+                                layerZombies[x, y] = ZXMapLayerZombies.None;
+                                fillerCandidates.Add(new Point(x, y));
+                            }
+                        }
+                        else
+                        {
+                            layerZombies[x, y] = baseCell;
+                        }
+                        continue;
+                    }
+
+                    // Outer ring (>= effOuterStart): BTK-weighted T3 promotion (Chubby=5.0, Venom=3.0, Harpy=3.0).
+                    if (!isT1 && !isT2)
+                    {
+                        t3Emitted++;
+                        if (dMin >= 85.0 && (t3Emitted % 28 == 27) && condensedGiants < maxCondensedGiants)
+                        {
+                            condensedGiants++;
+                            layerZombies[x, y] = ZXMapLayerZombies.None;
+                        }
+                        else
+                        {
+                            layerZombies[x, y] = baseCell;
+                        }
+                        continue;
+                    }
+
+                    bool promoteOuter = (isT1 && drawRoll < 60) || (isT2 && drawRoll < 45);
+                    if (!promoteOuter)
+                    {
+                        layerZombies[x, y] = baseCell;
+                        continue;
+                    }
+
+                    outerBtkBudget += isT1 ? cellCount : cellCount * 1.6;
+                    ZXMapLayerZombies singleElite = PickTendencyEliteEnum((int)((cellHash >> 12) % 100UL), false, wChubby, wVenom, wHarpy);
+                    double unitCost = (singleElite == ZXMapLayerZombies.Chubbies1) ? 5.0 : 3.0;
+
+                    if (outerBtkBudget >= unitCost)
+                    {
+                        t3Emitted++;
+                        bool twoUnits = num49 >= 3 && (t3Emitted % 3 == 0) && outerBtkBudget >= unitCost * 2.0;
+                        outerBtkBudget -= twoUnits ? unitCost * 2.0 : unitCost;
+
+                        if (dMin >= 85.0 && (t3Emitted % 28 == 27) && condensedGiants < maxCondensedGiants)
+                        {
+                            condensedGiants++;
+                            layerZombies[x, y] = ZXMapLayerZombies.None;
+                        }
+                        else
+                        {
+                            layerZombies[x, y] = PickTendencyEliteEnum((int)((cellHash >> 12) % 100UL), twoUnits, wChubby, wVenom, wHarpy);
+                        }
                     }
                     else
                     {
                         layerZombies[x, y] = ZXMapLayerZombies.None;
+                        fillerCandidates.Add(new Point(x, y));
                     }
+                }
+            }
+
+            // Pass 3: Replenish low/mid-tier filler in dMin >= minWeak noise-eligible cells
+            // so total entity count stays slightly above Vanilla/pre-promotion while keeping 30Hz smooth.
+            int currentCount = 0;
+            for (int x = minX; x <= maxX; x++)
+                for (int y = minY; y <= maxY; y++)
+                    currentCount += GetLayerZombieCellCount(layerZombies[x, y]);
+
+            int targetTotal = Math.Min(25000, (int)Math.Round(prePromotionCount * 1.10));
+            if (currentCount < targetTotal && fillerCandidates.Count > 0)
+            {
+                int need = targetTotal - currentCount;
+                int stride = fillerCandidates.Count > need ? Math.Max(1, fillerCandidates.Count / Math.Max(1, need / 2 + 1)) : 1;
+                int startIdx = NextInt(ref rng, fillerCandidates.Count);
+                for (int step = 0; step < fillerCandidates.Count && currentCount < targetTotal; step++)
+                {
+                    int idx = (startIdx + step * stride) % fillerCandidates.Count;
+                    Point pt = fillerCandidates[idx];
+                    if (layerZombies[pt.X, pt.Y] != ZXMapLayerZombies.None) continue;
+
+                    ulong fh = Mix64(((ulong)(uint)pt.X << 32) | (uint)pt.Y ^ (ulong)(uint)mapSeed ^ 0x46494C4CUL);
+                    int r100 = (int)(fh % 100UL);
+                    ZXMapLayerZombies fill = r100 < 50
+                        ? ZXMapLayerZombies.Weak2
+                        : (r100 < 75 ? ZXMapLayerZombies.Runners1 : ZXMapLayerZombies.Medium1);
+                    layerZombies[pt.X, pt.Y] = fill;
+                    currentCount += GetLayerZombieCellCount(fill);
                 }
             }
 

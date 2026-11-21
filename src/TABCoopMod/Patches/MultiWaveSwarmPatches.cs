@@ -708,15 +708,23 @@ namespace TABCoopMod.Patches
 
                 if (actualRemovedEff <= 0) return;
 
-                // 75% at 7:1 into tendency-weighted T3 elites; 25% at 180:1 into 1-3 ZombieMutants
+                // Defense-aware differential condensation for 75% overflow:
+                // Chubby 8:1 (wall tank, survives AoE), Venom 5:1 (ranged AoE over walls), Harpy 7:1 (wall-jumper);
+                // 25% at 180:1 into 1-3 (4 for SwarmHunter) ZombieMutants.
                 var tendency = FactionOwnershipTracker.ActiveMutationTendency;
                 GetTendencyWeights(tendency, out int wChubby, out int wVenom, out int wHarpy);
-                int weightSum = wChubby + wVenom + wHarpy;
+                int weightSum = Math.Max(1, wChubby + wVenom + wHarpy);
 
-                int elitesEff = Math.Max(1, (int)Math.Round(actualRemovedEff * 0.75 / 7.0));
-                int chubbyEff = (int)Math.Round(elitesEff * (wChubby / (double)weightSum));
-                int venomEff = (int)Math.Round(elitesEff * (wVenom / (double)weightSum));
-                int harpyEff = Math.Max(0, elitesEff - chubbyEff - venomEff);
+                double eliteBudget = actualRemovedEff * 0.75;
+                int chubbyEff = Math.Max(0, (int)Math.Round((eliteBudget * (wChubby / (double)weightSum)) / 8.0));
+                int venomEff = Math.Max(0, (int)Math.Round((eliteBudget * (wVenom / (double)weightSum)) / 5.0));
+                int harpyEff = Math.Max(0, (int)Math.Round((eliteBudget * (wHarpy / (double)weightSum)) / 7.0));
+                int elitesEff = chubbyEff + venomEff + harpyEff;
+                if (elitesEff == 0 && eliteBudget > 0)
+                {
+                    venomEff = 1;
+                    elitesEff = 1;
+                }
 
                 AddTemplateEffective(__result, GameBridge.GetEntityTemplateByType(GameBridge.TypeZombieStrongA), chubbyEff, repMult);
                 AddTemplateEffective(__result, GameBridge.GetEntityTemplateByType(GameBridge.TypeZombieVenom), venomEff, repMult);
