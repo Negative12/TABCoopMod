@@ -255,7 +255,8 @@ namespace TABCoopMod.UI
                 string tag = "";
                 if (ws != null)
                 {
-                    if (ws.Phase == WonderPhase.Researching) tag = " [研究中]";
+                    if (ws.Phase == WonderPhase.ResearchFunding && !WonderCrowdfundManager.HasRequiredWorkshopBuilt(k)) tag = " [锁]";
+                    else if (ws.Phase == WonderPhase.Researching) tag = " [研究中]";
                     else if (ws.Phase == WonderPhase.ReadyVoucher) tag = " [就绪]";
                     else if (ws.Phase == WonderPhase.Completed) tag = " [完成]";
                 }
@@ -267,16 +268,35 @@ namespace TABCoopMod.UI
             var st = WonderCrowdfundManager.GetState(SelectedWonder);
             if (st == null) return;
 
+            bool hasReqWorkshop = WonderCrowdfundManager.HasRequiredWorkshopBuilt(SelectedWonder);
+            string reqWsName = WonderCrowdfundManager.GetRequiredWorkshopDisplayNameZh(SelectedWonder);
+
             string phaseTxt;
             Color phaseColor = Color.Gold;
             switch (st.Phase)
             {
                 case WonderPhase.ResearchFunding:
-                    phaseTxt = $"阶段 1/2：联合研究众筹 (全队解锁，倍率 {(2 + WonderCrowdfundManager.PlayerCount - 1) * 0.5:0.0}x)";
+                    if (!hasReqWorkshop)
+                    {
+                        phaseTxt = $"未解锁：需队伍任一玩家建成【{reqWsName}】方可开启研究众筹";
+                        phaseColor = Color.OrangeRed;
+                    }
+                    else
+                    {
+                        phaseTxt = $"阶段 1/2：联合研究众筹 (已满足【{reqWsName}】，倍率 {(2 + WonderCrowdfundManager.PlayerCount - 1) * 0.5:0.0}x)";
+                    }
                     break;
                 case WonderPhase.Researching:
-                    phaseTxt = $"阶段 1/2：联合研究中... {(int)(st.ResearchProgress01 * 100f)}% (剩余 {st.ResearchRemainingSeconds}s，完成后全队解锁)";
-                    phaseColor = Color.DeepSkyBlue;
+                    if (!hasReqWorkshop)
+                    {
+                        phaseTxt = $"研究暂停：队伍缺少【{reqWsName}】，重建后继续 ({(int)(st.ResearchProgress01 * 100f)}%)";
+                        phaseColor = Color.OrangeRed;
+                    }
+                    else
+                    {
+                        phaseTxt = $"阶段 1/2：联合研究中... {(int)(st.ResearchProgress01 * 100f)}% (剩余 {st.ResearchRemainingSeconds}s，完成后全队解锁)";
+                        phaseColor = Color.DeepSkyBlue;
+                    }
                     break;
                 case WonderPhase.BuildFunding:
                     phaseTxt = SelectedWonder == FunctionalWonderType.Spire
@@ -349,9 +369,10 @@ namespace TABCoopMod.UI
                             _wonderProgFillFullRect.Height);
                     }
                     int pctInt = (int)(pct01 * 100f);
-                    SetDynamicText(_wonderProgText,
-                        $"联合研究进度：{pctInt}%   (剩余 {st.ResearchRemainingSeconds} 秒)",
-                        Color.White, null, null);
+                    string progLabel = hasReqWorkshop
+                        ? $"联合研究进度：{pctInt}%   (剩余 {st.ResearchRemainingSeconds} 秒)"
+                        : $"联合研究已暂停（需重建【{reqWsName}】）：{pctInt}%";
+                    SetDynamicText(_wonderProgText, progLabel, hasReqWorkshop ? Color.White : Color.Orange, null, null);
                 }
                 else
                 {
@@ -578,6 +599,13 @@ namespace TABCoopMod.UI
 
         private static void DispatchWonderContribute(ResourceTransferKind res, int amount)
         {
+            var st = WonderCrowdfundManager.GetState(SelectedWonder);
+            if (st != null && st.Phase == WonderPhase.ResearchFunding && !WonderCrowdfundManager.HasRequiredWorkshopBuilt(SelectedWonder))
+            {
+                string wsName = WonderCrowdfundManager.GetRequiredWorkshopDisplayNameZh(SelectedWonder);
+                CommandExecutor.ShowBannerOutsideDet($"需队伍任一玩家建成【{wsName}】后，方可投入该奇观研究", Color.OrangeRed, 2600);
+                return;
+            }
             CommandInterceptor.Dispatch(new NetCommand
             {
                 Type = NetCommandType.WonderContribute,

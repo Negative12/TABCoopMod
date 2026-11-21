@@ -1116,6 +1116,8 @@ namespace TABCoopMod.Testing
                 {
                     ["kind"] = k.ToString(),
                     ["phase"] = st.Phase.ToString(),
+                    ["requiredWorkshop"] = WonderCrowdfundManager.GetRequiredWorkshopDisplayNameEn(k),
+                    ["hasRequiredWorkshop"] = WonderCrowdfundManager.HasRequiredWorkshopBuilt(k),
                     ["researchUnlocked"] = st.ResearchUnlocked,
                     ["researchTicksElapsed"] = st.ResearchTicksElapsed,
                     ["researchTicksTotal"] = st.ResearchTicksTotal,

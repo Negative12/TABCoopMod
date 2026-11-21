@@ -282,6 +282,23 @@ try {
     Grant-ResourcesSynced -PlayerId 1 -Gold 26000 -Wood 400 -Stone 500 -Iron 500 -Oil 300 -ExtraStorage 400 -ExtraWorkers 120
     Grant-ResourcesSynced -PlayerId 2 -Gold 26000 -Wood 400 -Stone 500 -Iron 500 -Oil 300 -ExtraStorage 400 -ExtraWorkers 120
 
+    # Ensure team has at least one completed Foundry before Spire ResearchFunding (required workshop gate)
+    if (-not $spire0.hasRequiredWorkshop) {
+        Invoke-Control 27901 "wonder_contribute" @{ wonder = "Spire"; resource = "Gold"; amount = 500 } | Out-Null
+        Start-Sleep -Milliseconds 600
+        $wsBlocked = (Invoke-Control 27901 "wonder_status").wonders | Where-Object { $_.kind -eq "Spire" } | Select-Object -First 1
+        Assert-True ($wsBlocked.researchContributed.gold -eq 0) "Spire ResearchFunding must be blocked when team lacks a Foundry"
+
+        $placedFoundry = Place-NearCc -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.Foundry" -SizeW 3 -SizeH 3
+        Assert-True ($null -ne $placedFoundry) "Must be able to place Foundry near CC1 to unlock Spire research"
+        Invoke-Control 27901 "set_game_speed" @{ speed = 10.0 } | Out-Null
+        Wait-Until -TimeoutSec 25 -Description "Foundry construction completes and unlocks Spire research" -Condition {
+            $s = (Invoke-Control 27901 "wonder_status").wonders | Where-Object { $_.kind -eq "Spire" } | Select-Object -First 1
+            return $s.hasRequiredWorkshop
+        } | Out-Null
+        Invoke-Control 27901 "set_game_speed" @{ speed = 1.0 } | Out-Null
+    }
+
     # Phase 1: Research Funding split P1 + P2 across all required resources
     foreach ($pair in @(
         @("Gold", $spire0.researchTarget.gold),

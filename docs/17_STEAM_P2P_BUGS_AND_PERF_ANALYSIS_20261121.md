@@ -342,3 +342,7 @@
 - **分离基地 2P 新生存实测**：`CC1` 与 `CC2` 分离出生；主客机开局相机均为舒适的 `42.0 × 23.6`（`aspect=1.778`，客机日志输出 `scale=(106.67,106.67) fixedAR=null`）；客机 P2 在 CC2 旁成功建造 `HunterCottage`（`owner=2`），主机 P1 在 CC1 旁成功建造 `TentHouse`（`owner=1`），各自独立扣费（P1 金币 `1010`、P2 金币 `940`），`trackedOwners` 稳定同步至 `17`，全程 `StateChecksum MATCH`，无 `ID COUNTER DRIFT` / `AsyncStructAlign` / `AsyncEconAlign` / `HARD DESYNC` / `ERROR`。
 - **奇观众筹新档位与研究读条全链路实测**：闪电尖塔研究众筹集齐（`12000G/225S/300I/150O`）后双端同步进入 `WonderPhase.Researching`，进度条实时推进并在倒计时结束后双端同步进入 `BuildFunding`（`researchUnlocked=true`，主客机 `wonderHash=0xED7A3EA7C3E437F7` 完全一致）。
 - **UI 实机截图目视核验**：大厅 4 个原生 `ZXComboBox` 下拉栏、奇观众筹 `500/1000` & `50/100` 按钮、研究读条进度条与单位阵营光环均清晰无遮挡、无渲染毛边。
+
+### 8.3 ����о�����ǰ�ã�v0.2.5 �����ύ��
+- ������������о��ڳ��������һδ�������ӵ���ѽ��ɵĶ�Ӧ��������������Զ����ľ�Ĺ�����WoodWorkshop����������ѧԺ��ʯ�Ĺ�����StoneWorkshop����������������쳧��Foundry����δ����ʱ TryContribute/TryWithdraw �ܾ����о�������ͣ�������ʾ [��] �������ʾ��
+- ʵ�⣨1_Backup ˫��������Զ���ѽ����� P2 �ɳ��� +1000G��������������쳧��˫�����أ�GameBridge 0 missing (verified=236)��Classes OK=105��

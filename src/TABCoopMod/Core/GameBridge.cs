@@ -234,6 +234,9 @@ namespace TABCoopMod.Core
         public static Type TypeTheGreatTelescope { get; private set; }
         public static Type TypeTheAcademy { get; private set; }
         public static Type TypeTheSpire { get; private set; }
+        public static Type TypeWoodWorkshop { get; private set; }
+        public static Type TypeStoneWorkshop { get; private set; }
+        public static Type TypeFoundry { get; private set; }
         public static Type TypeTheCrystalPalace { get; private set; }
         public static Type TypeTheTransmutator { get; private set; }
         public static Type TypeTheVictorious { get; private set; }
@@ -809,6 +812,9 @@ namespace TABCoopMod.Core
                 TypeTheGreatTelescope = GameAssembly.GetType("ZX.Entities.TheGreatTelescope");
                 TypeTheAcademy = GameAssembly.GetType("ZX.Entities.TheAcademy");
                 TypeTheSpire = GameAssembly.GetType("ZX.Entities.TheSpire");
+                TypeWoodWorkshop = GameAssembly.GetType("ZX.Entities.WoodWorkshop");
+                TypeStoneWorkshop = GameAssembly.GetType("ZX.Entities.StoneWorkshop");
+                TypeFoundry = GameAssembly.GetType("ZX.Entities.Foundry");
                 TypeTheCrystalPalace = GameAssembly.GetType("ZX.Entities.TheCrystalPalace");
                 TypeTheTransmutator = GameAssembly.GetType("ZX.Entities.TheTransmutator");
                 TypeTheVictorious = GameAssembly.GetType("ZX.Entities.TheVictorious");
@@ -1075,6 +1081,9 @@ namespace TABCoopMod.Core
                 Check(TypeTheGreatTelescope, "Type ZX.Entities.TheGreatTelescope");
                 Check(TypeTheAcademy, "Type ZX.Entities.TheAcademy");
                 Check(TypeTheSpire, "Type ZX.Entities.TheSpire");
+                Check(TypeWoodWorkshop, "Type ZX.Entities.WoodWorkshop");
+                Check(TypeStoneWorkshop, "Type ZX.Entities.StoneWorkshop");
+                Check(TypeFoundry, "Type ZX.Entities.Foundry");
                 Check(TypeTheCrystalPalace, "Type ZX.Entities.TheCrystalPalace");
                 Check(TypeTheTransmutator, "Type ZX.Entities.TheTransmutator");
                 Check(TypeTheVictorious, "Type ZX.Entities.TheVictorious");

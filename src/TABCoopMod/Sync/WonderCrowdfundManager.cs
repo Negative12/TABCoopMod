@@ -193,6 +193,69 @@ namespace TABCoopMod.Sync
             }
         }
 
+        public static Type GetRequiredWorkshopType(FunctionalWonderType kind)
+        {
+            switch (kind)
+            {
+                case FunctionalWonderType.Telescope: return GameBridge.TypeWoodWorkshop;
+                case FunctionalWonderType.Academy: return GameBridge.TypeStoneWorkshop;
+                case FunctionalWonderType.Spire: return GameBridge.TypeFoundry;
+                default: return null;
+            }
+        }
+
+        public static string GetRequiredWorkshopDisplayNameZh(FunctionalWonderType kind)
+        {
+            switch (kind)
+            {
+                case FunctionalWonderType.Telescope: return "木材工坊";
+                case FunctionalWonderType.Academy: return "石材工坊";
+                case FunctionalWonderType.Spire: return "铸造厂";
+                default: return "工坊";
+            }
+        }
+
+        public static string GetRequiredWorkshopDisplayNameEn(FunctionalWonderType kind)
+        {
+            switch (kind)
+            {
+                case FunctionalWonderType.Telescope: return "Wood Workshop";
+                case FunctionalWonderType.Academy: return "Stone Workshop";
+                case FunctionalWonderType.Spire: return "Foundry";
+                default: return "Workshop";
+            }
+        }
+
+        /// <summary>
+        /// Returns true iff at least one alive, non-exiled player on the team currently owns a completed
+        /// (not under construction) workshop of the vanilla tier required to research <paramref name="kind"/>:
+        /// Telescope -> WoodWorkshop, Academy -> StoneWorkshop, Spire -> Foundry.
+        /// </summary>
+        public static bool HasRequiredWorkshopBuilt(FunctionalWonderType kind)
+        {
+            Type reqType = GetRequiredWorkshopType(kind);
+            var game = DXGame.Current;
+            if (reqType == null || game == null) return false;
+
+            var entities = GameBridge.GetEntitiesList(game);
+            if (entities == null) return false;
+
+            for (int i = 0; i < entities.Count; i++)
+            {
+                var ent = entities[i];
+                if (ent == null || ent.Disposed) continue;
+                if (ent.GetType() != reqType) continue;
+                if (GameBridge.IsBuildingBeingBuilt(ent)) continue;
+                if (!GameBridge.IsPlayerEntity(ent)) continue;
+
+                byte owner = FactionOwnershipTracker.GetOwner(ent.ID);
+                if (owner >= 1 && owner <= 3 && FactionOwnershipTracker.IsExiled(owner))
+                    continue;
+                return true;
+            }
+            return false;
+        }
+
         public static bool TryClassifyEntityType(Type entityType, out FunctionalWonderType kind)
         {
             kind = FunctionalWonderType.Telescope;
@@ -408,6 +471,12 @@ namespace TABCoopMod.Sync
             var st = _wonders[(int)kind];
             if (st == null || !st.IsCurrentPhaseFunding) return 0;
 
+            if (st.Phase == WonderPhase.ResearchFunding && !HasRequiredWorkshopBuilt(kind))
+            {
+                ModLogger.Info($"[WonderCrowdfund] P{pid} contribution to {kind} ResearchFunding blocked: team lacks completed {GetRequiredWorkshopDisplayNameEn(kind)}.");
+                return 0;
+            }
+
             int target = st.CurrentTarget.Get(res);
             int cur = st.CurrentContributed.Get(res);
             int need = target - cur;
@@ -470,6 +539,7 @@ namespace TABCoopMod.Sync
             {
                 var st = _wonders[i];
                 if (st == null || st.Phase != WonderPhase.Researching) continue;
+                if (!HasRequiredWorkshopBuilt(st.Kind)) continue;
 
                 if (st.ResearchTicksTotal <= 0)
                     st.ResearchTicksTotal = DefaultResearchDurationTicks;
