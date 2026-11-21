@@ -225,8 +225,8 @@ namespace TABCoopMod.UI
                     _ringParent = middle;
                 }
 
-                RectangleF camWorld = DXScene.Current != null ? DXScene.Current.CameraArea : RectangleF.Empty;
-                if (!camWorld.IsEmpty) camWorld.Inflate(4f, 4f);
+                RectangleF camScene = DXScene.Current != null ? DXScene.Current.CameraArea : RectangleF.Empty;
+                if (!camScene.IsEmpty) camScene.Inflate(4f, 4f);
 
                 var entities = GameBridge.GetEntitiesList(game);
                 int count = entities != null ? entities.Count : 0;
@@ -245,7 +245,8 @@ namespace TABCoopMod.UI
                     if (owner < 1 || owner > 3) continue;
 
                     PointF pos = ent.Position;
-                    if (!camWorld.IsEmpty && !camWorld.Contains(pos)) continue;
+                    PointF scenePos = DXWorldGrid.ScenePointFromWorldPoint(pos);
+                    if (!camScene.IsEmpty && !camScene.Contains(scenePos)) continue;
 
                     DXObject ring;
                     if (used < _unitRingPool.Count)

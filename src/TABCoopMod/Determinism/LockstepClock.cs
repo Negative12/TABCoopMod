@@ -713,6 +713,7 @@ namespace TABCoopMod.Determinism
             _syncedSceneRandom = new DXRandom(unchecked(_syncedRandomSeed ^ 0x517CC1B7));
             _lastReanchoredSimTick = -1;
             DXRandomCtorPatch.ResetCounter();
+            DeterministicPathfindingPatch.InvalidatePathCache();
         }
 
         /// <summary>
@@ -1016,7 +1017,8 @@ namespace TABCoopMod.Determinism
             var bodies = DXPhysicWorld.Bodies;
             if (bodies == null || bodies.Count == 0) return;
 
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            bool samplePerf = DeterministicSandboxPatches.DiagPerfSamplingActive;
+            long t0 = samplePerf ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
             double scale = scaleInt;
             double invScale = 1.0 / scale;
             int nCells = DXWorldGrid.NCells;
@@ -1038,6 +1040,22 @@ namespace TABCoopMod.Determinism
                     if (ent.PhysicalType != DXBodyType.Dynamic) continue;
                     if ((ent.ID & 0x8000000000000000UL) != 0UL) continue;
                     dynTotal++;
+
+                    // Fast path: after DXPhysicBody.OnNewPositionComputed(), any stationary body whose
+                    // managed Velocity is zero and PositionComputed == LastPositionComputed == ent.Position
+                    // and already lies on the quantization grid needs zero native P/Invoke calls.
+                    PointF managedVel = body.Velocity;
+                    if (managedVel.X == 0f && managedVel.Y == 0f)
+                    {
+                        PointF managedPos = body.PositionComputed;
+                        if (managedPos == body.LastPositionComputed && managedPos == ent.Position && managedPos == ent.LastPosition
+                            && IsFinite(managedPos.X) && IsFinite(managedPos.Y)
+                            && QuantizeScalar(managedPos.X, scale, invScale) == managedPos.X
+                            && QuantizeScalar(managedPos.Y, scale, invScale) == managedPos.Y)
+                        {
+                            continue;
+                        }
+                    }
 
                     PointF rawPhysPos = body.PhysicPosition;
                     bool posValid = IsFinite(rawPhysPos.X) && IsFinite(rawPhysPos.Y);
@@ -1113,9 +1131,12 @@ namespace TABCoopMod.Determinism
                 }
             }
 
-            DeterministicSandboxPatches.DiagPhysQuantTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            DeterministicSandboxPatches.DiagPhysQuantModified += modified;
-            DeterministicSandboxPatches.DiagPhysQuantDynTotal += dynTotal;
+            if (samplePerf)
+            {
+                DeterministicSandboxPatches.DiagPhysQuantTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+                DeterministicSandboxPatches.DiagPhysQuantModified += modified;
+                DeterministicSandboxPatches.DiagPhysQuantDynTotal += dynTotal;
+            }
         }
     }
 
@@ -1133,7 +1154,8 @@ namespace TABCoopMod.Determinism
         {
             if (!LockstepClock.IsDeterministicModeActive)
                 return true;
-            System.Threading.Interlocked.Increment(ref DiagGuidCalls);
+            if (DiagPerfSamplingActive)
+                System.Threading.Interlocked.Increment(ref DiagGuidCalls);
 
             // During (async) save loading or pure-visual VFX particle creation, generated IDs belong
             // to local/transient objects and must never consume the shared synced ID counter.
@@ -1173,7 +1195,8 @@ namespace TABCoopMod.Determinism
         {
             if (!LockstepClock.IsDeterministicModeActive)
                 return true;
-            System.Threading.Interlocked.Increment(ref DiagRngGlobalCalls);
+            if (DiagPerfSamplingActive)
+                System.Threading.Interlocked.Increment(ref DiagRngGlobalCalls);
 
             // DXRandom.Global is [ThreadStatic] and seeded from new Random()/real ticks, so it must
             // never be handed out while the sandbox is active. Only the logic worker and the level-
@@ -1247,13 +1270,17 @@ namespace TABCoopMod.Determinism
         internal static int DiagLastRanTicks { get; private set; }
         private static double _diagLastEntryMs;
 
-        // Detailed deterministic hotspot telemetry (accumulated per 60-tick window)
+        // Detailed deterministic hotspot telemetry (gated by DiagPerfSamplingActive so normal play pays zero overhead;
+        // automatically enables for a 60-tick burst with 30s cooldown whenever slow ticks > 45ms are detected).
+        internal static volatile bool DiagPerfSamplingActive;
+        private static double _diagSlowSampleCooldownUntilMs = -100000.0;
         internal static long DiagTickMovableSyncTicks;
         internal static long DiagTickMovableSyncCalls;
         internal static long DiagTickPullSyncTicks;
         internal static long DiagTickPullSyncCalls;
         internal static long DiagTickPathfindTicks;
         internal static long DiagTickPathfindCalls;
+        internal static long DiagTickPathfindCacheHits;
         internal static long DiagTickHashTicks;
         internal static long DiagTickPostDrainTicks;
         internal static long DiagPhysFor1Ticks;
@@ -1552,7 +1579,8 @@ namespace TABCoopMod.Determinism
                 // regardless of whether Host/Client ran this tick async-overlapped or multi-tick sync.
                 if (inCoop)
                 {
-                    long tDrainStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                    bool samplePerf = DiagPerfSamplingActive;
+                    long tDrainStart = samplePerf ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                     bool prevRendering = __instance.RenderingFrame;
                     bool prevDet = LockstepClock.InDeterministicContext;
                     __instance.RenderingFrame = false;
@@ -1568,11 +1596,13 @@ namespace TABCoopMod.Determinism
                         LockstepClock.InDeterministicContext = prevDet;
                         __instance.RenderingFrame = prevRendering;
                     }
-                    DiagTickPostDrainTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tDrainStart;
+                    if (samplePerf)
+                        DiagTickPostDrainTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tDrainStart;
 
-                    long tHashStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                    long tHashStart = samplePerf ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                     Sync.CoopSessionManager.OnSimulationTickCompleted(__instance.IAIterationInt);
-                    DiagTickHashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tHashStart;
+                    if (samplePerf)
+                        DiagTickHashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tHashStart;
                 }
 
                 DiagTickWindowCount++;
@@ -1597,26 +1627,41 @@ namespace TABCoopMod.Determinism
         private static void LogPerfWindow(DXGame game, int ranThisFrame)
         {
             int tc = DiagTickWindowCount;
-            double movMs = DiagTickMovableSyncTicks * _swTickToMs / tc;
-            double pullMs = DiagTickPullSyncTicks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
-            double pathMs = DiagTickPathfindTicks * _swTickToMs / tc;
-            double hashMs = DiagTickHashTicks * _swTickToMs / tc;
-            double drainMs = DiagTickPostDrainTicks * _swTickToMs / tc;
-            double pFor1Ms = DiagPhysFor1Ticks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
-            double pFor2Ms = DiagPhysFor2Ticks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
-            double pQuantMs = DiagPhysQuantTicks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
-            long pQuantMod = DiagPhysQuantModified / Math.Max(1, DiagPhysStepWindowCount);
-            long pQuantDyn = DiagPhysQuantDynTotal / Math.Max(1, DiagPhysStepWindowCount);
-            if (Testing.TestHarnessConfig.Enabled)
+            bool wasSampling = DiagPerfSamplingActive;
+            double nowMs = DXHelper_Environment.Ticks;
+            if (wasSampling)
             {
+                double movMs = DiagTickMovableSyncTicks * _swTickToMs / tc;
+                double pullMs = DiagTickPullSyncTicks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
+                double pathMs = DiagTickPathfindTicks * _swTickToMs / tc;
+                double hashMs = DiagTickHashTicks * _swTickToMs / tc;
+                double drainMs = DiagTickPostDrainTicks * _swTickToMs / tc;
+                double pFor1Ms = DiagPhysFor1Ticks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
+                double pFor2Ms = DiagPhysFor2Ticks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
+                double pQuantMs = DiagPhysQuantTicks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
+                long pQuantMod = DiagPhysQuantModified / Math.Max(1, DiagPhysStepWindowCount);
+                long pQuantDyn = DiagPhysQuantDynTotal / Math.Max(1, DiagPhysStepWindowCount);
                 ModLogger.Info($"[Perf] tick={game.IAIterationInt} frame={DiagAvgFrameMs:F1}ms logic={DiagAvgTickLogicMs:F1}ms(wait={_diagAsyncWaitMs:F1}ms) phys={DiagAvgPhysicsMs:F1}ms(x{DiagPhysStepWindowCount}/60t) " +
                     $"| movSync={movMs:F2}ms({DiagTickMovableSyncCalls / tc}/t) pullSync={pullMs:F2}ms({DiagTickPullSyncCalls / Math.Max(1, DiagPhysStepWindowCount)}/p) " +
-                    $"physFor1={pFor1Ms:F2}ms physFor2={pFor2Ms:F2}ms quant={pQuantMs:F2}ms({pQuantMod}/{pQuantDyn}) path={pathMs:F2}ms({DiagTickPathfindCalls / tc}/t) coopTick={hashMs:F2}ms drain={drainMs:F2}ms " +
+                    $"physFor1={pFor1Ms:F2}ms physFor2={pFor2Ms:F2}ms quant={pQuantMs:F2}ms({pQuantMod}/{pQuantDyn}) path={pathMs:F2}ms({DiagTickPathfindCalls / tc}/t,hit={DiagTickPathfindCacheHits / tc}/t) coopTick={hashMs:F2}ms drain={drainMs:F2}ms " +
                     $"| calls/t: rngG={DiagRngGlobalCalls / tc} gen={DiagRngGenCalls / tc} ctor={DiagRngCtorCalls / tc} guid={DiagGuidCalls / tc} post={DiagPostWrapCalls / tc} want={DiagLastWantedTicks} ran={ranThisFrame}");
+                if (!Testing.TestHarnessConfig.Enabled)
+                {
+                    DiagPerfSamplingActive = false;
+                    _diagSlowSampleCooldownUntilMs = nowMs + 30000.0;
+                }
+            }
+            else if (Testing.TestHarnessConfig.Enabled)
+            {
+                DiagPerfSamplingActive = true;
+            }
+            else if (DiagAvgTickLogicMs > 45.0 && (nowMs >= _diagSlowSampleCooldownUntilMs || nowMs < _diagSlowSampleCooldownUntilMs - 60000.0))
+            {
+                DiagPerfSamplingActive = true;
             }
             DiagTickMovableSyncTicks = 0; DiagTickMovableSyncCalls = 0;
             DiagTickPullSyncTicks = 0; DiagTickPullSyncCalls = 0;
-            DiagTickPathfindTicks = 0; DiagTickPathfindCalls = 0;
+            DiagTickPathfindTicks = 0; DiagTickPathfindCalls = 0; DiagTickPathfindCacheHits = 0;
             DiagTickHashTicks = 0; DiagTickPostDrainTicks = 0;
             DiagPhysFor1Ticks = 0; DiagPhysFor2Ticks = 0;
             DiagPhysQuantTicks = 0; DiagPhysQuantModified = 0;
@@ -2469,7 +2514,56 @@ namespace TABCoopMod.Determinism
     [HarmonyPatch(typeof(DXWorldGrid))]
     public static class DeterministicPathfindingPatch
     {
+        private struct PathCacheKey : IEquatable<PathCacheKey>
+        {
+            public int CellSize;
+            public int X1, Y1, X2, Y2;
+            public uint Mask;
+            public bool NearPath;
+            public int MaxNodes;
+
+            public bool Equals(PathCacheKey o) =>
+                CellSize == o.CellSize && X1 == o.X1 && Y1 == o.Y1 && X2 == o.X2 && Y2 == o.Y2
+                && Mask == o.Mask && NearPath == o.NearPath && MaxNodes == o.MaxNodes;
+
+            public override bool Equals(object obj) => obj is PathCacheKey o && Equals(o);
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    int h = CellSize;
+                    h = (h * 397) ^ X1;
+                    h = (h * 397) ^ Y1;
+                    h = (h * 397) ^ X2;
+                    h = (h * 397) ^ Y2;
+                    h = (h * 397) ^ (int)Mask;
+                    h = (h * 397) ^ (NearPath ? 1 : 0);
+                    h = (h * 397) ^ MaxNodes;
+                    return h;
+                }
+            }
+        }
+
         private static FieldInfo _movableRequestField;
+        private static int _gridMutationVersion;
+        private static int _cachedGridVersion = -1;
+        private static readonly Dictionary<PathCacheKey, List<Point>> _exactPathCache =
+            new Dictionary<PathCacheKey, List<Point>>(512);
+        private const int MaxExactPathCacheEntries = 2048;
+
+        internal static void InvalidatePathCache()
+        {
+            System.Threading.Interlocked.Increment(ref _gridMutationVersion);
+        }
+
+        [HarmonyPatch(nameof(DXWorldGrid.SetCell), new[] { typeof(int), typeof(int), typeof(uint), typeof(bool) })]
+        [HarmonyPostfix]
+        public static void SetCell_Postfix()
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                System.Threading.Interlocked.Increment(ref _gridMutationVersion);
+        }
 
         [HarmonyPatch(nameof(DXWorldGrid.FindPathConcurrent))]
         [HarmonyPrefix]
@@ -2530,7 +2624,8 @@ namespace TABCoopMod.Determinism
             object userData,
             int? maxNodes)
         {
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            bool samplePerf = DeterministicSandboxPatches.DiagPerfSamplingActive;
+            long t0 = samplePerf ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
             int safeCellSize = cellSize < 1 ? 1 : (cellSize > 3 ? 3 : cellSize);
             var req = new DXWorldGrid.PathFindingRequest(safeCellSize, p1, p2, mask, nearPath, onPathFound, userData, maxNodes, false);
             pfr = req;
@@ -2545,7 +2640,36 @@ namespace TABCoopMod.Determinism
             }
 
             req.Status = DXWorldGrid.PathFindingRequest.TStatus.Computing;
-            req.Path = DXWorldGrid.FindPath(safeCellSize, p1, p2, mask, nearPath, maxNodes);
+            int curVer = System.Threading.Volatile.Read(ref _gridMutationVersion);
+            if (_cachedGridVersion != curVer || _exactPathCache.Count >= MaxExactPathCacheEntries)
+            {
+                _exactPathCache.Clear();
+                _cachedGridVersion = curVer;
+            }
+
+            var key = new PathCacheKey
+            {
+                CellSize = safeCellSize,
+                X1 = p1.X, Y1 = p1.Y,
+                X2 = p2.X, Y2 = p2.Y,
+                Mask = mask,
+                NearPath = nearPath,
+                MaxNodes = maxNodes ?? -1
+            };
+
+            if (_exactPathCache.TryGetValue(key, out List<Point> cachedPath))
+            {
+                req.Path = cachedPath != null ? new List<Point>(cachedPath) : null;
+                if (samplePerf)
+                    System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagTickPathfindCacheHits);
+            }
+            else
+            {
+                List<Point> solved = DXWorldGrid.FindPath(safeCellSize, p1, p2, mask, nearPath, maxNodes);
+                _exactPathCache[key] = solved != null ? new List<Point>(solved) : null;
+                req.Path = solved;
+            }
+
             req.Status = DXWorldGrid.PathFindingRequest.TStatus.Computed;
             onPathFound?.Invoke(req);
             req.Status = DXWorldGrid.PathFindingRequest.TStatus.Finished;
@@ -2554,8 +2678,11 @@ namespace TABCoopMod.Determinism
             if (req.Path == null)
                 pfr = null;
 
-            System.Threading.Interlocked.Add(ref DeterministicSandboxPatches.DiagTickPathfindTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
-            System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagTickPathfindCalls);
+            if (samplePerf)
+            {
+                System.Threading.Interlocked.Add(ref DeterministicSandboxPatches.DiagTickPathfindTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
+                System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagTickPathfindCalls);
+            }
         }
     }
 
@@ -3018,7 +3145,8 @@ namespace TABCoopMod.Determinism
         public static void Prefix(DXComponent __instance)
         {
             if (!LockstepClock.IsDeterministicModeActive || __instance == null) return;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            bool samplePerf = DeterministicSandboxPatches.DiagPerfSamplingActive;
+            long t0 = samplePerf ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
             var game = DXGame.Current;
             if (game == null) return;
 
@@ -3050,8 +3178,11 @@ namespace TABCoopMod.Determinism
                 _fAnimProgress.SetValue(csprite, progress);
             }
 
-            System.Threading.Interlocked.Add(ref DeterministicSandboxPatches.DiagTickMovableSyncTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
-            System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagTickMovableSyncCalls);
+            if (samplePerf)
+            {
+                System.Threading.Interlocked.Add(ref DeterministicSandboxPatches.DiagTickMovableSyncTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
+                System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagTickMovableSyncCalls);
+            }
         }
     }
 
@@ -3069,7 +3200,8 @@ namespace TABCoopMod.Determinism
         public static bool Prefix(DXRandom __instance, ref uint __result)
         {
             if (!LockstepClock.IsDeterministicModeActive) return true;
-            System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagRngGenCalls);
+            if (DeterministicSandboxPatches.DiagPerfSamplingActive)
+                System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagRngGenCalls);
             if (LockstepClock.TryNextEntityBehaviourRandomUInt(out uint entityRand))
             {
                 __result = entityRand;
@@ -3382,7 +3514,8 @@ namespace TABCoopMod.Determinism
                 return true;
 
             Action orig = method;
-            System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagPostWrapCalls);
+            if (DeterministicSandboxPatches.DiagPerfSamplingActive)
+                System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagPostWrapCalls);
 
             // When _TaskLogic runs concurrently with RenderFrame(), defer OnStartFrame/OnFinishFrame/
             // OnSafeLogicAndDrawing callbacks enqueued from the worker thread until WaitForGameLogic
@@ -3530,7 +3663,8 @@ namespace TABCoopMod.Determinism
                 return;
 
             EnsureFastDelegates();
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            bool samplePerf = DeterministicSandboxPatches.DiagPerfSamplingActive;
+            long t0 = samplePerf ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
             int calls = 0;
 
             var curLevel = DXLevel.Current;
@@ -3605,8 +3739,11 @@ namespace TABCoopMod.Determinism
             finally
             {
                 LockstepClock.AllowCSpritePullUpdate = false;
-                DeterministicSandboxPatches.DiagTickPullSyncTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-                DeterministicSandboxPatches.DiagTickPullSyncCalls += calls;
+                if (samplePerf)
+                {
+                    DeterministicSandboxPatches.DiagTickPullSyncTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+                    DeterministicSandboxPatches.DiagTickPullSyncCalls += calls;
+                }
             }
         }
     }

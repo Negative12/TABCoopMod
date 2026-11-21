@@ -87,7 +87,8 @@ namespace TABCoopMod.Determinism
         public static bool Prefix(DXRandom __instance)
         {
             if (!LockstepClock.IsDeterministicModeActive) return true;
-            Interlocked.Increment(ref DeterministicSandboxPatches.DiagRngCtorCalls);
+            if (DeterministicSandboxPatches.DiagPerfSamplingActive)
+                Interlocked.Increment(ref DeterministicSandboxPatches.DiagRngCtorCalls);
 
             EnsureInitGenrand();
             if (_initGenrand == null) return true;

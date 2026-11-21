@@ -77,8 +77,10 @@ namespace TABCoopMod.Patches
             if (!CoopSessionManager.IsMultiFactionActive || __result == null)
                 return;
 
-            byte owner = FactionOwnershipTracker.GetOwner(__0 as DXEntity);
-            if (owner == 0) owner = CommandExecutor.ActiveCommandPlayerId;
+            // Prefer authoritative lockstep command PlayerId first so a missing or fallback
+            // executor owner can never misattribute a newly built structure to another faction.
+            byte owner = CommandExecutor.ActiveCommandPlayerId;
+            if (owner == 0) owner = FactionOwnershipTracker.GetOwner(__0 as DXEntity);
             if (owner != 0)
             {
                 FactionOwnershipTracker.SetOwner(__result.ID, owner);
@@ -289,12 +291,23 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static void Prefix(DXEntity __instance)
         {
-            if (__instance == null || LockstepClock.LoadingLevel)
+            if (__instance == null || __instance.Disposed || LockstepClock.LoadingLevel)
                 return;
-            if (CoopSessionManager.IsMultiFactionActive)
+            if (!CoopSessionManager.IsMultiFactionActive)
+                return;
+
+            // DXEntity.~DXEntity() invokes Dispose() without GC.SuppressFinalize or checking Disposed.
+            // After a snapshot reload, stale pre-reload DXEntity instances share identical IDs with the
+            // live entities; never erase ownership when a different live instance owns this ID.
+            var game = DXGame.Current;
+            if (game != null)
             {
-                FactionOwnershipTracker.RemoveEntity(__instance.ID);
+                var live = game.GetEntityByID(__instance.ID);
+                if (live != null && !object.ReferenceEquals(live, __instance))
+                    return;
             }
+
+            FactionOwnershipTracker.RemoveEntity(__instance.ID);
         }
     }
 

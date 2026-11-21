@@ -265,6 +265,8 @@ namespace TABCoopMod.Sync
                 if (GetOwner(ccs[i].ID) == playerId)
                     return ccs[i];
             }
+            if (CoopSessionManager.IsMultiFactionActive)
+                return null;
             return ccs.Count > 0 ? ccs[0] : null;
         }
 
@@ -582,11 +584,13 @@ namespace TABCoopMod.Sync
             if (myCc == null) return;
 
             GameBridge.SetLevelSysCurrentCommandCenter(myCc);
-            GameBridge.SetCameraWorld(myCc.Position, 24f);
+            float curW = DXScene.Current != null ? DXScene.Current.CameraArea.Width : 0f;
+            float targetW = curW >= 28f ? curW : 42f;
+            GameBridge.SetCameraWorld(myCc.Position, targetW);
             if (selectCc)
                 GameBridge.SelectOnlyEntity(myCc);
 
-            ModLogger.Info($"[FactionOwnership] Centered camera for P{localId} on own CommandCenter ID={myCc.ID} at ({myCc.CellX},{myCc.CellY}).");
+            ModLogger.Info($"[FactionOwnership] Centered camera for P{localId} on own CommandCenter ID={myCc.ID} at ({myCc.CellX},{myCc.CellY}) width={targetW:F1} (prev={curW:F1}).");
         }
 
         /// <summary>

@@ -118,10 +118,18 @@ namespace TABCoopMod.UI
         private static DXButton _btnHostLoadSave;
         private static DXButton _btnHostNewSurvival;
         private static DXButton _btnHostCustomMap;
-        private static CompactLobbyButton _btnBalancePreset;
-        private static CompactLobbyButton _btnGameMode;
-        private static CompactLobbyButton _btnDefeatRule;
-        private static CompactLobbyButton _btnSpawnMode;
+        private static DXTextObject _roomSettingsPanelBg;
+        private static DXTextObject _lblGameMode;
+        private static DXTextObject _lblBalancePreset;
+        private static DXTextObject _lblSpawnMode;
+        private static DXTextObject _lblDefeatRule;
+        private static DXTextComboBox _cmbGameMode;
+        private static DXTextComboBox _cmbBalancePreset;
+        private static DXTextComboBox _cmbSpawnMode;
+        private static DXTextComboBox _cmbDefeatRule;
+        private static bool _suppressComboEvents;
+        private static bool _comboThemeApplied;
+        private static System.Reflection.FieldInfo _comboTextField;
         private static DXButton _btnDisbandRoom;
         private static DXButton _btnClientReady;
         private static DXTextObject _clientHintText;
@@ -388,8 +396,17 @@ namespace TABCoopMod.UI
             CoopSessionManager.LobbyStateChanged += () => { _needsRefresh = true; };
         }
 
+        private static void DismissOpenComboDropdowns()
+        {
+            try { _cmbGameMode?.ListView?.RemoveFromScene(); } catch { }
+            try { _cmbBalancePreset?.ListView?.RemoveFromScene(); } catch { }
+            try { _cmbSpawnMode?.ListView?.RemoveFromScene(); } catch { }
+            try { _cmbDefeatRule?.ListView?.RemoveFromScene(); } catch { }
+        }
+
         private static void CloseLobbyModalOnly(Action onClosed)
         {
+            DismissOpenComboDropdowns();
             if (_window == null)
             {
                 onClosed?.Invoke();
@@ -586,14 +603,15 @@ namespace TABCoopMod.UI
 
             BuildLocalChaosPanel(leftW, bannerY + bannerH + 8f * u, bodyH, u);
 
-            // Right column: Host & Client actions using native ZXButtonSteam size
-            var rightHeader = CreateTextBox(rightX, 0f, rightW, 28f * u, 13.5f * u, FontStyle.Bold, Color.Gold,
+            // Right column: Host & Client actions using native ZXButtonSteam + native ZXComboBox selectors
+            _comboThemeApplied = false;
+            var rightHeader = CreateTextBox(rightX, 0f, rightW, 22f * u, 13.5f * u, FontStyle.Bold, Color.Gold,
                 ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
             rightHeader.Text = "房间操作";
             _roomView.AddObject(rightHeader);
 
-            float ry = 36f * u;
-            float gapY = 5f * u;
+            float ry = 22f * u;
+            float gapY = -2f * u;
 
             _btnInviteSteam = CreateNativeButton("邀请 Steam 好友", rightX, ry, 0, InviteSteamClicked);
             _roomView.AddObject(_btnInviteSteam);
@@ -619,45 +637,94 @@ namespace TABCoopMod.UI
             });
             _roomView.AddObject(_btnHostCustomMap);
 
-            float compactW = _btnHostCustomMap.Width > 40f ? _btnHostCustomMap.Width : rightW;
-            float compactH = 25f * u;
-            ry += _btnHostCustomMap.Height + 2f * u;
-            _btnBalancePreset = CreateCompactButton("新局预设: 联机均衡", rightX, ry, compactW, compactH, 9.5f * u,
-                Color.FromArgb(220, 26, 48, 36), BorderGoldColor, Color.WhiteSmoke, () =>
+            float leaveY = bodyH - _btnInviteSteam.Height + 2f * u;
+            float settingsPadX = 8f * u;
+            float colGap = 10f * u;
+            float colW = (rightW - settingsPadX * 2f - colGap) * 0.5f;
+            float col1X = rightX + settingsPadX;
+            float col2X = col1X + colW + colGap;
+
+            float lblH = 14f * u;
+            float cmbH = 22f * u;
+            float settingsTop = ry + _btnHostCustomMap.Height + 2f * u;
+            float row1LblY = settingsTop + 5f * u;
+            float row1CmbY = row1LblY + lblH + 2f * u;
+            float row2LblY = row1CmbY + cmbH + 5f * u;
+            float row2CmbY = row2LblY + lblH + 2f * u;
+            float settingsH = (row2CmbY + cmbH + 6f * u) - settingsTop;
+
+            _roomSettingsPanelBg = CreateSolidBox(rightX, settingsTop, rightW, settingsH, PanelBgColor, BorderGoldColor, 1f);
+            _roomSettingsPanelBg.Z = -10;
+            _roomView.AddObject(_roomSettingsPanelBg);
+
+            _lblGameMode = CreateTextBox(col1X, row1LblY, colW, lblH, 9f * u, FontStyle.Bold, Color.Khaki,
+                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
+            _lblGameMode.Text = "合作模式";
+            _lblGameMode.Z = 5;
+            _roomView.AddObject(_lblGameMode);
+
+            _cmbGameMode = CreateNativeComboBox(
+                new List<string> { "执政官共控", "独立基地 (M4)" },
+                CoopSessionManager.GameMode == CoopGameMode.MultiFaction ? 1 : 0,
+                col1X, row1CmbY, colW, cmbH, idx =>
                 {
-                    CoopSessionManager.ToggleBalancePreset();
+                    CoopSessionManager.SetGameMode(idx == 1 ? CoopGameMode.MultiFaction : CoopGameMode.Archon);
                     RefreshUI();
                 });
-            _roomView.AddObject(_btnBalancePreset);
+            _cmbGameMode.Z = 10;
+            _roomView.AddObject(_cmbGameMode);
 
-            ry += compactH + 4f * u;
-            _btnGameMode = CreateCompactButton("模式: 执政官共控", rightX, ry, compactW, compactH, 9.5f * u,
-                Color.FromArgb(220, 26, 36, 48), BorderGoldColor, Color.Khaki, () =>
+            _lblBalancePreset = CreateTextBox(col2X, row1LblY, colW, lblH, 9f * u, FontStyle.Bold, Color.Khaki,
+                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
+            _lblBalancePreset.Text = "新局预设";
+            _lblBalancePreset.Z = 5;
+            _roomView.AddObject(_lblBalancePreset);
+
+            _cmbBalancePreset = CreateNativeComboBox(
+                new List<string> { "联机均衡", "原版纯净" },
+                CoopSessionManager.BalancePreset == CoopBalancePreset.Balanced ? 0 : 1,
+                col2X, row1CmbY, colW, cmbH, idx =>
                 {
-                    CoopSessionManager.ToggleGameMode();
+                    CoopSessionManager.SetBalancePreset(idx == 0 ? CoopBalancePreset.Balanced : CoopBalancePreset.Vanilla);
                     RefreshUI();
                 });
-            _roomView.AddObject(_btnGameMode);
+            _cmbBalancePreset.Z = 10;
+            _roomView.AddObject(_cmbBalancePreset);
 
-            ry += compactH + 4f * u;
-            _btnDefeatRule = CreateCompactButton("败北: 流亡交接", rightX, ry, compactW, compactH, 9.5f * u,
-                Color.FromArgb(220, 28, 34, 42), BorderDimColor, Color.Silver, () =>
+            _lblSpawnMode = CreateTextBox(col1X, row2LblY, colW, lblH, 9f * u, FontStyle.Bold, Color.LightCyan,
+                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
+            _lblSpawnMode.Text = "出生布局";
+            _lblSpawnMode.Z = 5;
+            _roomView.AddObject(_lblSpawnMode);
+
+            _cmbSpawnMode = CreateNativeComboBox(
+                new List<string> { "分离分城 (对称)", "聚集联城 (并网)" },
+                CoopSessionManager.SpawnMode == MultiFactionSpawnMode.Clustered ? 1 : 0,
+                col1X, row2CmbY, colW, cmbH, idx =>
                 {
-                    CoopSessionManager.ToggleDefeatRule();
+                    CoopSessionManager.SetSpawnMode(idx == 1 ? MultiFactionSpawnMode.Clustered : MultiFactionSpawnMode.Separated);
                     RefreshUI();
                 });
-            _roomView.AddObject(_btnDefeatRule);
+            _cmbSpawnMode.Z = 10;
+            _roomView.AddObject(_cmbSpawnMode);
 
-            ry += compactH + 4f * u;
-            _btnSpawnMode = CreateCompactButton("出生: 分离分城", rightX, ry, compactW, compactH, 9.5f * u,
-                Color.FromArgb(220, 24, 44, 52), Color.Cyan, Color.WhiteSmoke, () =>
+            _lblDefeatRule = CreateTextBox(col2X, row2LblY, colW, lblH, 9f * u, FontStyle.Bold, Color.LightSkyBlue,
+                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
+            _lblDefeatRule.Text = "败北规则";
+            _lblDefeatRule.Z = 5;
+            _roomView.AddObject(_lblDefeatRule);
+
+            _cmbDefeatRule = CreateNativeComboBox(
+                new List<string> { "流亡交接 (全灭败)", "一损俱损 (单灭败)" },
+                CoopSessionManager.DefeatRule == MultiFactionDefeatRule.AnyBaseLost ? 1 : 0,
+                col2X, row2CmbY, colW, cmbH, idx =>
                 {
-                    CoopSessionManager.ToggleSpawnMode();
+                    CoopSessionManager.SetDefeatRule(idx == 1 ? MultiFactionDefeatRule.AnyBaseLost : MultiFactionDefeatRule.AllBasesLost);
                     RefreshUI();
                 });
-            _roomView.AddObject(_btnSpawnMode);
+            _cmbDefeatRule.Z = 10;
+            _roomView.AddObject(_cmbDefeatRule);
 
-            float leaveY = bodyH - _btnInviteSteam.Height - 4f * u;
             _btnDisbandRoom = CreateNativeButton("解散房间", rightX, leaveY, -120, LeaveOrDisbandClicked);
             _roomView.AddObject(_btnDisbandRoom);
 
@@ -884,10 +951,21 @@ namespace TABCoopMod.UI
             _btnHostLoadSave.Visible = isHost;
             _btnHostNewSurvival.Visible = isHost;
             _btnHostCustomMap.Visible = isHost;
-            _btnBalancePreset.Visible = isHost;
-            _btnGameMode.Visible = isHost;
-            _btnDefeatRule.Visible = isHost && isMultiFaction;
-            _btnSpawnMode.Visible = isHost && isMultiFaction;
+            if (_roomSettingsPanelBg != null) _roomSettingsPanelBg.Visible = isHost;
+            if (_lblGameMode != null) _lblGameMode.Visible = isHost;
+            if (_cmbGameMode != null) _cmbGameMode.Visible = isHost;
+            if (_lblBalancePreset != null) _lblBalancePreset.Visible = isHost;
+            if (_cmbBalancePreset != null) _cmbBalancePreset.Visible = isHost;
+            if (_lblSpawnMode != null) _lblSpawnMode.Visible = isHost && isMultiFaction;
+            if (_cmbSpawnMode != null) _cmbSpawnMode.Visible = isHost && isMultiFaction;
+            if (_lblDefeatRule != null) _lblDefeatRule.Visible = isHost && isMultiFaction;
+            if (_cmbDefeatRule != null) _cmbDefeatRule.Visible = isHost && isMultiFaction;
+            if (!isHost || !isMultiFaction)
+            {
+                try { _cmbSpawnMode?.ListView?.RemoveFromScene(); } catch { }
+                try { _cmbDefeatRule?.ListView?.RemoveFromScene(); } catch { }
+            }
+            if (!isHost) DismissOpenComboDropdowns();
             _btnDisbandRoom.Visible = isHost;
 
             _btnClientReady.Visible = !isHost;
@@ -912,63 +990,55 @@ namespace TABCoopMod.UI
                 _btnHostLoadSave.Enabled = canStart && hasSaves;
                 _btnHostNewSurvival.Enabled = canStart;
                 _btnHostCustomMap.Enabled = canStart;
-                _btnBalancePreset.Enabled = true;
 
                 GameBridge.SetZXButtonSteamHue(_btnHostLoadSave, (canStart && hasSaves) ? -30 : 0);
                 GameBridge.SetZXButtonSteamHue(_btnHostNewSurvival, canStart ? -30 : 0);
                 GameBridge.SetZXButtonSteamHue(_btnHostCustomMap, canStart ? -30 : 0);
-                if (isBalanced)
-                {
-                    SetCompactButtonStyle(_btnBalancePreset, "新局预设: 联机均衡",
-                        Color.FromArgb(220, 24, 56, 42), Color.FromArgb(240, 34, 76, 56),
-                        BorderGoldColor, Color.Gold, Color.WhiteSmoke);
-                }
-                else
-                {
-                    SetCompactButtonStyle(_btnBalancePreset, "新局预设: 原版纯净",
-                        Color.FromArgb(220, 32, 38, 46), Color.FromArgb(235, 48, 56, 68),
-                        BorderDimColor, Color.Silver, Color.Silver);
-                }
 
-                if (isMultiFaction)
+                EnsureComboBoxThemeApplied();
+                _suppressComboEvents = true;
+                try
                 {
-                    SetCompactButtonStyle(_btnGameMode, "模式: 独立基地 (M4)",
-                        Color.FromArgb(220, 26, 68, 48), Color.FromArgb(240, 36, 92, 64),
-                        Color.SpringGreen, Color.LightGreen, Color.White);
+                    if (_cmbGameMode != null)
+                    {
+                        int desired = isMultiFaction ? 1 : 0;
+                        if (_cmbGameMode.SelectedIndex != desired)
+                        {
+                            ResetComboTextSurface(_cmbGameMode);
+                            _cmbGameMode.SelectedIndex = desired;
+                        }
+                    }
+                    if (_cmbBalancePreset != null)
+                    {
+                        int desired = isBalanced ? 0 : 1;
+                        if (_cmbBalancePreset.SelectedIndex != desired)
+                        {
+                            ResetComboTextSurface(_cmbBalancePreset);
+                            _cmbBalancePreset.SelectedIndex = desired;
+                        }
+                    }
+                    if (_cmbSpawnMode != null)
+                    {
+                        int desired = CoopSessionManager.SpawnMode == MultiFactionSpawnMode.Clustered ? 1 : 0;
+                        if (_cmbSpawnMode.SelectedIndex != desired)
+                        {
+                            ResetComboTextSurface(_cmbSpawnMode);
+                            _cmbSpawnMode.SelectedIndex = desired;
+                        }
+                    }
+                    if (_cmbDefeatRule != null)
+                    {
+                        int desired = CoopSessionManager.DefeatRule == MultiFactionDefeatRule.AnyBaseLost ? 1 : 0;
+                        if (_cmbDefeatRule.SelectedIndex != desired)
+                        {
+                            ResetComboTextSurface(_cmbDefeatRule);
+                            _cmbDefeatRule.SelectedIndex = desired;
+                        }
+                    }
                 }
-                else
+                finally
                 {
-                    SetCompactButtonStyle(_btnGameMode, "模式: 执政官共控",
-                        Color.FromArgb(220, 26, 36, 48), Color.FromArgb(240, 38, 54, 72),
-                        BorderGoldColor, Color.Gold, Color.Khaki);
-                }
-
-                bool isAnyLost = CoopSessionManager.DefeatRule == MultiFactionDefeatRule.AnyBaseLost;
-                if (isAnyLost)
-                {
-                    SetCompactButtonStyle(_btnDefeatRule, "败北: 一损俱损 (任意沦陷即败)",
-                        Color.FromArgb(220, 96, 32, 24), Color.FromArgb(240, 128, 42, 32),
-                        Color.OrangeRed, Color.Orange, Color.White);
-                }
-                else
-                {
-                    SetCompactButtonStyle(_btnDefeatRule, "败北: 流亡交接 (全灭才败)",
-                        Color.FromArgb(220, 28, 42, 56), Color.FromArgb(240, 42, 62, 82),
-                        Color.DodgerBlue, Color.LightSkyBlue, Color.WhiteSmoke);
-                }
-
-                bool isClustered = CoopSessionManager.SpawnMode == MultiFactionSpawnMode.Clustered;
-                if (isClustered)
-                {
-                    SetCompactButtonStyle(_btnSpawnMode, "出生: 聚集联城 (18~24格并网)",
-                        Color.FromArgb(220, 48, 46, 22), Color.FromArgb(240, 72, 68, 32),
-                        Color.Gold, Color.Khaki, Color.White);
-                }
-                else
-                {
-                    SetCompactButtonStyle(_btnSpawnMode, "出生: 分离分城 (85~105格对称)",
-                        Color.FromArgb(220, 20, 48, 56), Color.FromArgb(240, 28, 70, 82),
-                        Color.Cyan, Color.LightCyan, Color.WhiteSmoke);
+                    _suppressComboEvents = false;
                 }
             }
             else
@@ -1338,6 +1408,89 @@ namespace TABCoopMod.UI
                 case LobbyRoomPhase.InGame: return "游戏中（支持重连/中途加入）";
                 default: return "就绪";
             }
+        }
+
+        private static void ResetComboTextSurface(DXTextComboBox cb)
+        {
+            if (cb == null) return;
+            try
+            {
+                if (_comboTextField == null)
+                    _comboTextField = HarmonyLib.AccessTools.Field(typeof(DXTextComboBox), "_OText");
+                if (_comboTextField?.GetValue(cb) is DXTextObject txtObj)
+                    ResetTextSurface(txtObj);
+            }
+            catch { }
+        }
+
+        private static void EnsureComboBoxThemeApplied()
+        {
+            if (_comboThemeApplied) return;
+            if (_cmbGameMode == null || _cmbGameMode.Scene == null) return;
+            _comboThemeApplied = true;
+            float u = DXScene.Unit > 0f ? DXScene.Unit : 1f;
+            StyleLobbyComboBox(_cmbGameMode, u);
+            StyleLobbyComboBox(_cmbBalancePreset, u);
+            StyleLobbyComboBox(_cmbSpawnMode, u);
+            StyleLobbyComboBox(_cmbDefeatRule, u);
+        }
+
+        private static void StyleLobbyComboBox(DXTextComboBox cb, float u)
+        {
+            if (cb == null) return;
+            try
+            {
+                var tr = new DXTextRenderer
+                {
+                    Font = new Font("Microsoft YaHei", Math.Max(8f, 9f * u), FontStyle.Bold),
+                    ColorText = Color.WhiteSmoke,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    ColorBackground = Color.Transparent,
+                    MakeTransparent = true,
+                    SizeBottomShadow = SizeF.Empty
+                };
+                cb.ShaderEffect = null;
+                cb.ButtonTextRenderer = tr;
+                cb.ItemTextRenderer = tr;
+                cb.Image = DXImage.FromColor(Color.FromArgb(235, 22, 34, 44));
+                cb.Border = new DXShaderEffect_Border(BorderGoldColor, 1, DXShaderEffect_Border.TBorderUnit.InPixels, DXShaderEffect_Border.TBorderType.Inside);
+                if (cb.ListView != null)
+                {
+                    cb.ListView.ShaderEffect = null;
+                    cb.ListView.Image = DXImage.FromColor(Color.FromArgb(245, 18, 28, 36));
+                    cb.ListView.Border = new DXShaderEffect_Border(BorderGoldColor, 1, DXShaderEffect_Border.TBorderUnit.InPixels, DXShaderEffect_Border.TBorderType.Inside);
+                    cb.ListView.GridRows.DefaultRowHeight = Math.Max(18f, 20f * u);
+                }
+                ResetComboTextSurface(cb);
+            }
+            catch { }
+        }
+
+        private static DXTextComboBox CreateNativeComboBox(
+            List<string> items, int selectedIndex,
+            float x, float y, float w, float h,
+            Action<int> onSelectedChanged)
+        {
+            var cb = GameBridge.CreateZXComboBox(items, selectedIndex);
+            cb.X = x;
+            cb.Y = y;
+            cb.Width = w;
+            cb.Height = h;
+            cb.SelectedIndexChanged += sender =>
+            {
+                ResetComboTextSurface(sender as DXTextComboBox);
+                if (_suppressComboEvents) return;
+                try
+                {
+                    int idx = sender.SelectedIndex;
+                    if (idx >= 0) onSelectedChanged?.Invoke(idx);
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Error("[CoopLobbyWindow] ComboBox selection callback failed", ex);
+                }
+            };
+            return cb;
         }
 
         private static DXButton CreateNativeButton(string text, float x, float y, int hueRotation, Action onClick, bool smallFont = false)

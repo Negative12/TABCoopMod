@@ -297,13 +297,22 @@ try {
         if ($p1Part -gt 0) { Invoke-Control 27901 "wonder_contribute" @{ wonder = "Spire"; resource = $rName; amount = $p1Part } | Out-Null }
         if ($p2Part -gt 0) { Invoke-Control 27902 "wonder_contribute" @{ wonder = "Spire"; resource = $rName; amount = $p2Part } | Out-Null }
     }
-    Wait-Until -TimeoutSec 10 -Description "Spire Research Phase completes -> BuildFunding" -Condition {
+    Wait-Until -TimeoutSec 10 -Description "Spire Research funding completes -> Researching countdown" -Condition {
+        $wsH = Invoke-Control 27901 "wonder_status"
+        $wsC = Invoke-Control 27902 "wonder_status"
+        $sH = $wsH.wonders | Where-Object { $_.kind -eq "Spire" } | Select-Object -First 1
+        $sC = $wsC.wonders | Where-Object { $_.kind -eq "Spire" } | Select-Object -First 1
+        return ($sH.phase -eq "Researching" -and $sC.phase -eq "Researching" -and $sH.researchTicksTotal -gt 0)
+    } | Out-Null
+    Invoke-Control 27901 "set_game_speed" @{ speed = 10.0 } | Out-Null
+    Wait-Until -TimeoutSec 25 -Description "Spire Research countdown completes -> BuildFunding" -Condition {
         $wsH = Invoke-Control 27901 "wonder_status"
         $wsC = Invoke-Control 27902 "wonder_status"
         $sH = $wsH.wonders | Where-Object { $_.kind -eq "Spire" } | Select-Object -First 1
         $sC = $wsC.wonders | Where-Object { $_.kind -eq "Spire" } | Select-Object -First 1
         return ($sH.phase -eq "BuildFunding" -and $sC.phase -eq "BuildFunding" -and $sH.researchUnlocked -and $sC.researchUnlocked)
     } | Out-Null
+    Invoke-Control 27901 "set_game_speed" @{ speed = 1.0 } | Out-Null
 
     # Phase 2: Withdraw verification
     Invoke-Control 27901 "wonder_contribute" @{ wonder = "Spire"; resource = "Gold"; amount = 200 } | Out-Null

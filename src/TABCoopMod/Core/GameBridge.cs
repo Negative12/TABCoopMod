@@ -758,9 +758,27 @@ namespace TABCoopMod.Core
                     _fieldMapLayersEnergyFrontier = AccessTools.Field(_typeZXSystemMapLayers, ObfuscatedSymbols.Field_MapLayers_EnergyFrontier);
                     _fieldMapLayersEnergySources = AccessTools.Field(_typeZXSystemMapLayers, ObfuscatedSymbols.Field_MapLayers_EnergySources);
                     _fieldMapLayersEnergyLastIdx = AccessTools.Field(_typeZXSystemMapLayers, ObfuscatedSymbols.Field_MapLayers_EnergyLastIdx);
+                    _fieldMapLayersEnergyInitDone = AccessTools.Field(_typeZXSystemMapLayers, ObfuscatedSymbols.Field_MapLayers_EnergyInitDone);
+                    _fieldMapLayersEnergyLock = AccessTools.Field(_typeZXSystemMapLayers, ObfuscatedSymbols.Field_MapLayers_EnergyLock);
+                    _propMapLayersNEnergyChanges = AccessTools.Property(_typeZXSystemMapLayers, "NEnergyMapChanges");
+                    _propMapLayersLayerEnergyUpdated = AccessTools.Property(_typeZXSystemMapLayers, "LayerEnergyUpdated");
                     _methodMapLayersRebuildEnergyGrid = AccessTools.Method(_typeZXSystemMapLayers, ObfuscatedSymbols.Method_MapLayers_RebuildEnergyGrid, Type.EmptyTypes);
+                    _methodMapLayersHasPathToAnyCC = AccessTools.Method(_typeZXSystemMapLayers, ObfuscatedSymbols.Method_MapLayers_HasPathToAnyCC, new[] { typeof(Point) });
+                    _methodMapLayersHasPathBetween = AccessTools.Method(_typeZXSystemMapLayers, ObfuscatedSymbols.Method_MapLayers_HasPathBetween, new[] { typeof(Point), typeof(Point) });
                 }
                 TypeCEnergyTransferer = GameAssembly.GetType(ObfuscatedSymbols.Type_CEnergyTransferer);
+                _methodEnergyTransfererUpdateGrid = TypeCEnergyTransferer != null
+                    ? AccessTools.Method(TypeCEnergyTransferer, ObfuscatedSymbols.Method_CEnergyTransferer_UpdateGrid, Type.EmptyTypes)
+                    : null;
+                _fieldBuildingHasEnergyConn = TypeBuilding != null
+                    ? AccessTools.Field(TypeBuilding, ObfuscatedSymbols.Field_Building_HasEnergyConnection)
+                    : null;
+                _methodBuildingRefreshEnergy = TypeBuilding != null
+                    ? AccessTools.Method(TypeBuilding, ObfuscatedSymbols.Method_Building_RefreshEnergy, new[] { typeof(bool) })
+                    : null;
+                _methodLevelSysIsCellPlayableForEnergy = TypeZXSystemGameLevel != null
+                    ? AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_IsCellPlayableForEnergy, new[] { typeof(int), typeof(int) })
+                    : null;
                 TypeCNeutralJoinable = GameAssembly.GetType(ObfuscatedSymbols.Type_CNeutralJoinable);
                 TypeCLife = GameAssembly.GetType(ObfuscatedSymbols.Type_CLife);
                 TypeTrain = GameAssembly.GetType(ObfuscatedSymbols.Type_Train);
@@ -1021,8 +1039,19 @@ namespace TABCoopMod.Core
                 Check(_fieldMapLayersEnergyFrontier, "ZXSystemMapLayers.EnergyFrontier");
                 Check(_fieldMapLayersEnergySources, "ZXSystemMapLayers.EnergySources");
                 Check(_fieldMapLayersEnergyLastIdx, "ZXSystemMapLayers.EnergyLastIdx");
+                Check(_fieldMapLayersEnergyInitDone, "ZXSystemMapLayers.EnergyInitDone");
+                Check(_fieldMapLayersEnergyLock, "ZXSystemMapLayers.EnergyLock");
+                Check(_propMapLayersNEnergyChanges, "ZXSystemMapLayers.NEnergyMapChanges");
+                Check(_propMapLayersLayerEnergyUpdated, "ZXSystemMapLayers.LayerEnergyUpdated");
                 Check(_methodMapLayersRebuildEnergyGrid, "ZXSystemMapLayers.RebuildEnergyGrid");
+                Check(_methodMapLayersHasPathToAnyCC, "ZXSystemMapLayers.HasPathToAnyCC");
+                Check(_methodMapLayersHasPathBetween, "ZXSystemMapLayers.HasPathBetween");
                 Check(TypeCEnergyTransferer, "Type CEnergyTransferer");
+                Check(_methodEnergyTransfererUpdateGrid, "CEnergyTransferer.UpdateGrid");
+                Check(_fieldBuildingHasEnergyConn, "Building.HasEnergyConnection");
+                Check(_methodBuildingRefreshEnergy, "Building.RefreshEnergy");
+                Check(_methodLevelSysIsCellPlayableForEnergy, "ZXSystemGameLevel.IsCellPlayableForEnergy");
+                Check(_typeZXComboBox, "Type ZX.GUI.ZXComboBox");
                 Check(TypeCNeutralJoinable, "Type CNeutralJoinable");
                 Check(TypeCLife, "Type CLife");
                 Check(TypeTrain, "Type ZX.Commands.Train");
@@ -2143,8 +2172,11 @@ namespace TABCoopMod.Core
             DisableCameraIntroAnimation();
 
             RectangleF cur = scene.CameraArea;
-            if (cur.Width <= 0f || cur.Height <= 0f) return false;
-            float aspect = cur.Width / cur.Height;
+            Rectangle screen = DXScene.ScreenArea;
+            float aspect = (screen.Width > 0 && screen.Height > 0)
+                ? (float)screen.Width / screen.Height
+                : ((cur.Width > 0f && cur.Height > 0f) ? cur.Width / cur.Height : 0f);
+            if (aspect <= 0f) return false;
 
             float w = width;
             if (w <= 0f && height > 0f) w = height * aspect;
@@ -2153,10 +2185,11 @@ namespace TABCoopMod.Core
 
             float maxW = Math.Max(15f, 45f * aspect);
             w = Math.Max(15f, Math.Min(w, maxW));
+            float h = w / aspect;
 
             var scenePt = DXWorldGrid.ScenePointFromWorldPoint(worldCenter);
-            scene.SetCameraCenter(scenePt, w);
-            ModLogger.Info($"[GameBridge] Camera world=({worldCenter.X:F1},{worldCenter.Y:F1}) -> scene=({scenePt.X:F1},{scenePt.Y:F1}) width={w:F1}");
+            scene.CameraArea = new RectangleF(scenePt.X - w * 0.5f, scenePt.Y - h * 0.5f, w, h);
+            ModLogger.Info($"[GameBridge] Camera world=({worldCenter.X:F1},{worldCenter.Y:F1}) -> scene=({scenePt.X:F1},{scenePt.Y:F1}) size={w:F1}x{h:F1} aspect={aspect:F3}");
             return true;
         }
 
@@ -2261,11 +2294,15 @@ namespace TABCoopMod.Core
                 bool isLoadSave = gx != null && fIsLoadSave?.GetValue(gx) is bool ls && ls;
 
                 var scene = DXScene.Current;
-                var viewArea = DXScreenParameters.Current?.ViewArea ?? Rectangle.Empty;
+                var sp = DXScreenParameters.Current;
+                var viewArea = sp?.ViewArea ?? Rectangle.Empty;
+                float? fixedAr = sp?.FixedAspectRatio;
                 var cam = scene?.CameraArea ?? RectangleF.Empty;
                 var screen = scene != null ? DXScene.ScreenArea : Rectangle.Empty;
                 float unit = DXScene.Unit;
                 float rootBlur = scene?.RootObject?.Blur ?? -1f;
+                float scaleX = scene?.RootObject?.ScalingX ?? -1f;
+                float scaleY = scene?.RootObject?.ScalingY ?? -1f;
                 int vtime = scene?.VirtualTimeInt ?? -1;
 
                 string clipDesc = "";
@@ -2286,7 +2323,8 @@ namespace TABCoopMod.Core
                     ? $"({hudObj.X:F1},{hudObj.Y:F1},{hudObj.Width:F1}x{hudObj.Height:F1},anim={hudObj.Animation?.Animating}{clipDesc},vis={hudObj.Visible},style={hudObj.State?.AreaStyle})"
                     : "null";
 
-                return $"hud={hudStr} intro={introFlag}(t0={introStart},vt={vtime}) blurAnim={(introBlur != null ? (introBlur.Finished ? "done" : "running") : "null")} rootBlur={rootBlur:F3} isLoadSave={isLoadSave} unit={unit:F3} view={viewArea} screen={screen} cam=({cam.X:F1},{cam.Y:F1},{cam.Width:F1}x{cam.Height:F1})";
+                string fixedArStr = fixedAr.HasValue ? fixedAr.Value.ToString("F3") : "null";
+                return $"hud={hudStr} intro={introFlag}(t0={introStart},vt={vtime}) blurAnim={(introBlur != null ? (introBlur.Finished ? "done" : "running") : "null")} rootBlur={rootBlur:F3} isLoadSave={isLoadSave} unit={unit:F3} view={viewArea} screen={screen} cam=({cam.X:F1},{cam.Y:F1},{cam.Width:F1}x{cam.Height:F1}) scale=({scaleX:F2},{scaleY:F2}) fixedAR={fixedArStr}";
             }
             catch (Exception ex)
             {
@@ -3265,7 +3303,8 @@ namespace TABCoopMod.Core
             int width,
             int height,
             int life,
-            float buildFactor)
+            float buildFactor,
+            byte ownerPlayerId = 0)
         {
             var game = DXGame.Current;
             var proj = DXProject.Current;
@@ -3285,6 +3324,8 @@ namespace TABCoopMod.Core
                     return false;
 
                 ent.ID = hostEntityId;
+                if (Sync.CoopSessionManager.IsMultiFactionActive && ownerPlayerId != 0)
+                    Sync.FactionOwnershipTracker.SetOwner(hostEntityId, ownerPlayerId);
                 if (_propEntityRelation != null)
                     _propEntityRelation.SetValue(ent, Enum.ToObject(_propEntityRelation.PropertyType, 0)); // Friend = 0
                 if (_propEntityTeam != null)
@@ -3517,7 +3558,8 @@ namespace TABCoopMod.Core
             float y,
             int life,
             byte teamRaw,
-            ulong targetId)
+            ulong targetId,
+            byte ownerPlayerId = 0)
         {
             var game = DXGame.Current;
             var proj = DXProject.Current;
@@ -3536,6 +3578,8 @@ namespace TABCoopMod.Core
                 if (ent == null) return false;
 
                 ent.ID = hostEntityId;
+                if (Sync.CoopSessionManager.IsMultiFactionActive && ownerPlayerId != 0)
+                    Sync.FactionOwnershipTracker.SetOwner(hostEntityId, ownerPlayerId);
                 if (_propEntityTeam != null)
                     _propEntityTeam.SetValue(ent, Enum.ToObject(_propEntityTeam.PropertyType, teamRaw));
 
@@ -3919,10 +3963,21 @@ namespace TABCoopMod.Core
         // Lobby Window & MainMenu Reuse Reflection Bridges (Iron Law #3 Safe)
         // ====================================================================
         private static Type _typeZXButtonSteam;
+        private static Type _typeZXComboBox;
         private static Type _typeZXWindowTypeEnum;
         private static Type _typeZXWindowBtnPosEnum;
         private static Type _typeZXWindowAnimEnum;
         private static Type _typeZXFontCatalogFonts;
+        private static FieldInfo _fieldMapLayersEnergyInitDone;
+        private static FieldInfo _fieldMapLayersEnergyLock;
+        private static PropertyInfo _propMapLayersNEnergyChanges;
+        private static PropertyInfo _propMapLayersLayerEnergyUpdated;
+        private static MethodInfo _methodMapLayersHasPathToAnyCC;
+        private static MethodInfo _methodMapLayersHasPathBetween;
+        private static MethodInfo _methodEnergyTransfererUpdateGrid;
+        private static FieldInfo _fieldBuildingHasEnergyConn;
+        private static MethodInfo _methodBuildingRefreshEnergy;
+        private static MethodInfo _methodLevelSysIsCellPlayableForEnergy;
         private static PropertyInfo _windowContentProp;
         private static PropertyInfo _windowTitleProp;
         private static MethodInfo _windowShowMethod;
@@ -3946,6 +4001,7 @@ namespace TABCoopMod.Core
             EnsureMayorMeta();
 
             _typeZXButtonSteam = GameAssembly?.GetType("ZX.GUI.ZXButtonSteam");
+            _typeZXComboBox = GameAssembly?.GetType("ZX.GUI.ZXComboBox");
             if (_typeZXButtonSteam != null)
             {
                 _btnSteamTextProp = AccessTools.Property(_typeZXButtonSteam, "Text");
@@ -4243,6 +4299,34 @@ namespace TABCoopMod.Core
             if (window == null || _windowShowMethod == null || _typeZXWindowAnimEnum == null) return;
             object anim = Enum.ToObject(_typeZXWindowAnimEnum, animType);
             _windowShowMethod.Invoke(window, new object[] { onShown, anim });
+        }
+
+        public static DXTextComboBox CreateZXComboBox(List<string> items, int selectedIndex = 0)
+        {
+            EnsureLobbyUiMeta();
+            DXTextComboBox cb = null;
+            if (_typeZXComboBox != null)
+            {
+                try
+                {
+                    cb = Activator.CreateInstance(
+                        _typeZXComboBox,
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+                        null,
+                        null,
+                        null) as DXTextComboBox;
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[GameBridge] CreateZXComboBox reflection failed: {ex.Message}");
+                }
+            }
+            if (cb == null)
+                cb = new DXTextComboBox();
+            cb.Items = items ?? new List<string>();
+            if (cb.Items.Count > 0)
+                cb.SelectedIndex = Math.Max(0, Math.Min(selectedIndex, cb.Items.Count - 1));
+            return cb;
         }
 
         public static DXButton CreateZXButtonSteam(string text, DXKeys key = DXKeys.None, int hueRotation = 0, bool smallFont = false)
@@ -5762,6 +5846,91 @@ namespace TABCoopMod.Core
             var ml = GetMapLayersInstance();
             if (ml == null || _methodMapLayersRebuildEnergyGrid == null) return;
             try { _methodMapLayersRebuildEnergyGrid.Invoke(ml, null); } catch { }
+        }
+
+        public static uint[,] GetMapLayersEnergyGrid(object mapLayers)
+        {
+            if (mapLayers == null || _fieldMapLayersEnergyGrid == null) return null;
+            try { return _fieldMapLayersEnergyGrid.GetValue(mapLayers) as uint[,]; } catch { return null; }
+        }
+
+        public static bool GetMapLayersEnergyInitDone(object mapLayers)
+        {
+            if (mapLayers == null || _fieldMapLayersEnergyInitDone == null) return false;
+            try { return (bool)_fieldMapLayersEnergyInitDone.GetValue(mapLayers); } catch { return false; }
+        }
+
+        public static void SetMapLayersEnergyInitDone(object mapLayers, bool value)
+        {
+            if (mapLayers == null || _fieldMapLayersEnergyInitDone == null) return;
+            try { _fieldMapLayersEnergyInitDone.SetValue(mapLayers, value); } catch { }
+        }
+
+        public static DXSimpleLock GetMapLayersEnergyLock(object mapLayers)
+        {
+            if (mapLayers == null || _fieldMapLayersEnergyLock == null) return null;
+            try { return _fieldMapLayersEnergyLock.GetValue(mapLayers) as DXSimpleLock; } catch { return null; }
+        }
+
+        public static void NotifyMapLayersEnergyChanged(object mapLayers, bool isPreview)
+        {
+            if (mapLayers == null) return;
+            try
+            {
+                if (!isPreview && _propMapLayersNEnergyChanges != null)
+                {
+                    uint cur = Convert.ToUInt32(_propMapLayersNEnergyChanges.GetValue(mapLayers));
+                    _propMapLayersNEnergyChanges.SetValue(mapLayers, cur + 1u);
+                }
+                _propMapLayersLayerEnergyUpdated?.SetValue(mapLayers, true);
+            }
+            catch { }
+        }
+
+        public static bool InvokeMapLayersHasPathToAnyCC(object mapLayers, Point cell)
+        {
+            if (mapLayers == null || _methodMapLayersHasPathToAnyCC == null) return true;
+            try { return (bool)_methodMapLayersHasPathToAnyCC.Invoke(mapLayers, new object[] { cell }); }
+            catch { return true; }
+        }
+
+        public static bool InvokeMapLayersHasPathBetween(object mapLayers, Point a, Point b)
+        {
+            if (mapLayers == null || _methodMapLayersHasPathBetween == null) return false;
+            try { return (bool)_methodMapLayersHasPathBetween.Invoke(mapLayers, new object[] { a, b }); }
+            catch { return false; }
+        }
+
+        public static bool InvokeLevelSysIsCellPlayableForEnergy(int x, int y)
+        {
+            var ls = LevelSystemInstance;
+            if (ls == null || _methodLevelSysIsCellPlayableForEnergy == null) return true;
+            try { return (bool)_methodLevelSysIsCellPlayableForEnergy.Invoke(ls, new object[] { x, y }); }
+            catch { return true; }
+        }
+
+        public static void InvokeCEnergyTransfererUpdateGrid(object component)
+        {
+            if (component == null || _methodEnergyTransfererUpdateGrid == null) return;
+            try { _methodEnergyTransfererUpdateGrid.Invoke(component, null); } catch { }
+        }
+
+        public static void SetBuildingHasEnergyConnection(object building, bool value)
+        {
+            if (building == null || _fieldBuildingHasEnergyConn == null) return;
+            try { _fieldBuildingHasEnergyConn.SetValue(building, value); } catch { }
+        }
+
+        public static void InvokeBuildingRefreshEnergy(object building, bool force)
+        {
+            if (building == null || _methodBuildingRefreshEnergy == null) return;
+            try { _methodBuildingRefreshEnergy.Invoke(building, new object[] { force }); } catch { }
+        }
+
+        public static void InvokeStructureUpdateEnabled(object structure)
+        {
+            if (structure == null || _methodStructureUpdateEnabled == null) return;
+            try { _methodStructureUpdateEnabled.Invoke(structure, null); } catch { }
         }
 
         public static int GetEntityEnergyTransferRadius(DXEntity entity)

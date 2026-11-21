@@ -20,7 +20,8 @@ namespace TABCoopMod.Sync
         BuildFunding = 1,
         ReadyVoucher = 2,
         Building = 3,
-        Completed = 4
+        Completed = 4,
+        Researching = 5
     }
 
     /// <summary>
@@ -75,11 +76,30 @@ namespace TABCoopMod.Sync
             }
         }
 
+        /// <summary>
+        /// Fixed deterministic simulation-tick duration for Wonder tech research once ResearchFunding reaches 100%.
+        /// 1350 ticks = 45 seconds at 30 Hz IA simulation speed.
+        /// </summary>
+        public const int DefaultResearchDurationTicks = 1350;
+
+        public static int GetResearchDurationTicks()
+        {
+            if (Testing.TestHarnessConfig.ControlPort > 0)
+            {
+                string raw = Environment.GetEnvironmentVariable("TABCOOP_WONDER_RESEARCH_TICKS");
+                if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out int custom) && custom >= 10 && custom <= 10000)
+                    return custom;
+            }
+            return DefaultResearchDurationTicks;
+        }
+
         public sealed class WonderState
         {
             public FunctionalWonderType Kind;
             public WonderPhase Phase;
             public bool ResearchUnlocked;
+            public int ResearchTicksElapsed;
+            public int ResearchTicksTotal;
             public CostBundle ResearchTarget;
             public CostBundle ResearchContributed;
             public CostBundle BuildTarget;
@@ -93,13 +113,33 @@ namespace TABCoopMod.Sync
                 Phase == WonderPhase.ResearchFunding || Phase == WonderPhase.BuildFunding;
 
             public CostBundle CurrentTarget =>
-                Phase == WonderPhase.ResearchFunding ? ResearchTarget : BuildTarget;
+                (Phase == WonderPhase.ResearchFunding || Phase == WonderPhase.Researching) ? ResearchTarget : BuildTarget;
 
             public CostBundle CurrentContributed =>
-                Phase == WonderPhase.ResearchFunding ? ResearchContributed : BuildContributed;
+                (Phase == WonderPhase.ResearchFunding || Phase == WonderPhase.Researching) ? ResearchContributed : BuildContributed;
 
             public CostBundle[] CurrentPlayerContrib =>
-                Phase == WonderPhase.ResearchFunding ? PlayerResearchContrib : PlayerBuildContrib;
+                (Phase == WonderPhase.ResearchFunding || Phase == WonderPhase.Researching) ? PlayerResearchContrib : PlayerBuildContrib;
+
+            public float ResearchProgress01
+            {
+                get
+                {
+                    if (ResearchUnlocked) return 1f;
+                    if (Phase != WonderPhase.Researching || ResearchTicksTotal <= 0) return 0f;
+                    float p = (float)ResearchTicksElapsed / ResearchTicksTotal;
+                    return p < 0f ? 0f : (p > 1f ? 1f : p);
+                }
+            }
+
+            public int ResearchRemainingSeconds
+            {
+                get
+                {
+                    if (Phase != WonderPhase.Researching || ResearchTicksTotal <= ResearchTicksElapsed) return 0;
+                    return (int)Math.Ceiling((ResearchTicksTotal - ResearchTicksElapsed) / 30.0);
+                }
+            }
 
             public bool IsFundingComplete
             {
@@ -401,7 +441,11 @@ namespace TABCoopMod.Sync
             {
                 if (st.Phase == WonderPhase.ResearchFunding)
                 {
-                    CompleteResearchPhase(st);
+                    int duration = GetResearchDurationTicks();
+                    st.Phase = WonderPhase.Researching;
+                    st.ResearchTicksElapsed = 0;
+                    st.ResearchTicksTotal = duration;
+                    ModLogger.Info($"[WonderCrowdfund] {kind} research crowdfunding COMPLETE! Phase -> Researching ({duration} ticks / {Math.Max(1, duration / 30)}s).");
                 }
                 else if (st.Phase == WonderPhase.BuildFunding)
                 {
@@ -413,9 +457,39 @@ namespace TABCoopMod.Sync
             return actual;
         }
 
+        /// <summary>
+        /// Advances deterministic simulation-tick research countdowns for all Wonders currently in
+        /// <see cref="WonderPhase.Researching"/>. Must be invoked strictly once per completed sim tick
+        /// prior to StateHasher epoch hashing so all peers transition identically.
+        /// </summary>
+        public static void TickResearchProgress()
+        {
+            if (!IsInitialized || !CoopSessionManager.IsMultiFactionActive) return;
+
+            for (int i = 0; i < 3; i++)
+            {
+                var st = _wonders[i];
+                if (st == null || st.Phase != WonderPhase.Researching) continue;
+
+                if (st.ResearchTicksTotal <= 0)
+                    st.ResearchTicksTotal = DefaultResearchDurationTicks;
+
+                st.ResearchTicksElapsed++;
+                if (st.ResearchTicksElapsed >= st.ResearchTicksTotal)
+                {
+                    CompleteResearchPhase(st);
+                    string wName = GetDisplayName(st.Kind);
+                    CommandExecutor.ShowBannerOutsideDet(
+                        $"{wName}: Shared Research Complete! Build crowdfunding open.",
+                        System.Drawing.Color.Gold, 3500);
+                }
+            }
+        }
+
         private static void CompleteResearchPhase(WonderState st)
         {
             st.ResearchUnlocked = true;
+            st.ResearchTicksElapsed = st.ResearchTicksTotal;
             st.Phase = WonderPhase.BuildFunding;
 
             var techType = GameBridge.FindCommandTypeByName(GetTechTypeName(st.Kind));
@@ -604,6 +678,8 @@ namespace TABCoopMod.Sync
                 var st = _wonders[i];
                 w.Write((byte)st.Phase);
                 w.Write(st.ResearchUnlocked);
+                w.Write(st.ResearchTicksElapsed);
+                w.Write(st.ResearchTicksTotal);
                 w.Write(st.BuilderPlayerId);
                 w.Write(st.BuildingEntityId);
                 WriteBundle(w, st.ResearchTarget);
@@ -633,6 +709,8 @@ namespace TABCoopMod.Sync
                 var st = new WonderState { Kind = (FunctionalWonderType)i };
                 st.Phase = (WonderPhase)r.ReadByte();
                 st.ResearchUnlocked = r.ReadBoolean();
+                st.ResearchTicksElapsed = r.ReadInt32();
+                st.ResearchTicksTotal = r.ReadInt32();
                 st.BuilderPlayerId = r.ReadByte();
                 st.BuildingEntityId = r.ReadUInt64();
                 st.ResearchTarget = ReadBundle(r);
@@ -676,6 +754,8 @@ namespace TABCoopMod.Sync
                 if (st == null) continue;
                 h = Mix(h, (ulong)st.Phase);
                 h = Mix(h, st.ResearchUnlocked ? 1UL : 0UL);
+                h = Mix(h, (uint)st.ResearchTicksElapsed);
+                h = Mix(h, (uint)st.ResearchTicksTotal);
                 h = Mix(h, st.BuilderPlayerId);
                 h = Mix(h, st.BuildingEntityId);
                 h = MixBundle(h, st.ResearchContributed);

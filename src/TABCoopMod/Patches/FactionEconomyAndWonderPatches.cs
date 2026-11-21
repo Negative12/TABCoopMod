@@ -45,9 +45,9 @@ namespace TABCoopMod.Patches
             if (!__result || _inRecalcAll || !CoopSessionManager.IsMultiFactionActive || !FactionContextManager.IsInitialized)
                 return;
 
-            if (FactionContextManager.ContextDepth > 0)
-                return;
-
+            // Even inside PushContext (ContextDepth > 0), never let vanilla ZXLevelState.#=zBpC6By32LAqv()
+            // run a global full-map sum over the pushed player's ledger. RecalculateAllFactions() flushes
+            // the currently pushed owner, recalculates all factions independently, and restores the pushed owner.
             GameBridge.SetLevelStateNeedsRecalculate(false);
             _inRecalcAll = true;
             try
@@ -616,8 +616,8 @@ namespace TABCoopMod.Patches
             if (!WonderCrowdfundManager.TryClassifyEntityType(__2, out var fKind))
                 return;
 
-            byte placerPid = FactionOwnershipTracker.GetOwner(__0 as DXEntity);
-            if (placerPid == 0) placerPid = CommandExecutor.ActiveCommandPlayerId;
+            byte placerPid = CommandExecutor.ActiveCommandPlayerId;
+            if (placerPid == 0) placerPid = FactionOwnershipTracker.GetOwner(__0 as DXEntity);
             if (placerPid == 0) placerPid = FactionOwnershipTracker.LocalPlayerId;
 
             if (fKind == FunctionalWonderType.Telescope)

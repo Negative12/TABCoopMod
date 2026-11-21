@@ -93,13 +93,17 @@ namespace TABCoopMod.Determinism
                     __2(__0, __1);
                     return false;
                 }
-                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                bool samplePerf = DeterministicSandboxPatches.DiagPerfSamplingActive;
+                long t0 = samplePerf ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                 __2(__0, __1);
-                long dt = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-                if (LockstepClock.InPhysicsReadback)
-                    DeterministicSandboxPatches.DiagPhysFor2Ticks += dt;
-                else
-                    DeterministicSandboxPatches.DiagPhysFor1Ticks += dt;
+                if (samplePerf)
+                {
+                    long dt = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+                    if (LockstepClock.InPhysicsReadback)
+                        DeterministicSandboxPatches.DiagPhysFor2Ticks += dt;
+                    else
+                        DeterministicSandboxPatches.DiagPhysFor1Ticks += dt;
+                }
                 return false;
             }
         }

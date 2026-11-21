@@ -338,9 +338,20 @@ namespace TABCoopMod.Commands
                             if (actual > 0 && prevPhase != newPhase)
                             {
                                 string wName = TABCoopMod.Sync.WonderCrowdfundManager.GetDisplayName(wKind);
-                                string msg = newPhase == TABCoopMod.Sync.WonderPhase.BuildFunding
-                                    ? $"{wName}: Shared Research Complete! Build crowdfunding open."
-                                    : $"{wName}: Build Crowdfunding Complete! Ready to place (0 cost).";
+                                string msg;
+                                if (newPhase == TABCoopMod.Sync.WonderPhase.Researching)
+                                {
+                                    int secs = Math.Max(1, TABCoopMod.Sync.WonderCrowdfundManager.GetResearchDurationTicks() / 30);
+                                    msg = $"{wName}: Research funds complete! Researching ({secs}s)...";
+                                }
+                                else if (newPhase == TABCoopMod.Sync.WonderPhase.BuildFunding)
+                                {
+                                    msg = $"{wName}: Shared Research Complete! Build crowdfunding open.";
+                                }
+                                else
+                                {
+                                    msg = $"{wName}: Build Crowdfunding Complete! Ready to place (0 cost).";
+                                }
                                 ShowBannerOutsideDet(msg, Color.Gold, 3500);
                             }
                         }
@@ -570,7 +581,7 @@ namespace TABCoopMod.Commands
             }
         }
 
-        private static void ShowBannerOutsideDet(string message, Color color, int durationMs)
+        internal static void ShowBannerOutsideDet(string message, Color color, int durationMs)
         {
             bool prevDet = LockstepClock.InDeterministicContext;
             LockstepClock.InDeterministicContext = false;

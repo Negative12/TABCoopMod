@@ -323,6 +323,7 @@ namespace TABCoopMod.Sync
             public byte Height;
             public int Life;
             public float BuildFactor;
+            public byte OwnerPlayerId;
         }
 
         private struct DynamicTargetSample
@@ -339,6 +340,7 @@ namespace TABCoopMod.Sync
             public ulong TemplateId;
             public byte TeamRaw;
             public ulong TargetEntityId;
+            public byte OwnerPlayerId;
         }
 
         private struct DynamicSpawnSample
@@ -350,6 +352,7 @@ namespace TABCoopMod.Sync
             public int Life;
             public byte TeamRaw;
             public ulong TargetEntityId;
+            public byte OwnerPlayerId;
         }
 
         private struct ProdQueueFixItem
@@ -1263,14 +1266,26 @@ namespace TABCoopMod.Sync
                 _awaitingClientSnapshotAck = false;
                 _awaitingClientAckStartTicks = -1.0;
 
-                _pendingBroadcastSavBytes = savBytes;
-                _pendingBroadcastChkText = chkText;
-                _pendingBroadcastSeed = syncSeed;
-                _pendingBroadcastIdCounter = idCounter;
+                if (!IsLocalLoopbackSession)
+                {
+                    // Steam P2P (distinct machines / disks): broadcast the snapshot chunks immediately BEFORE
+                    // Host starts its own symmetric reload so Host and Client load in parallel (~2x faster resync).
+                    _pendingBroadcastSavBytes = null;
+                    _pendingBroadcastChkText = null;
+                    BroadcastSnapshotChunksToClients(savBytes, chkText, syncSeed, idCounter);
+                    ModLogger.InfoImmediate($"[CoopSessionManager] Parallel Steam P2P reload: broadcasted snapshot ({savBytes.Length:N0} bytes) before starting Host reload of {savPath}...");
+                }
+                else
+                {
+                    // Local loopback shares the same Saves directory (coop_host_snapshot.zxsav), so Host reloads
+                    // first before streaming to avoid same-disk file-lock collisions.
+                    _pendingBroadcastSavBytes = savBytes;
+                    _pendingBroadcastChkText = chkText;
+                    _pendingBroadcastSeed = syncSeed;
+                    _pendingBroadcastIdCounter = idCounter;
+                    ModLogger.Info($"[CoopSessionManager] Host starting symmetric reload of {savPath} ({savBytes.Length:N0} bytes) before broadcasting...");
+                }
 
-                // Host reloads the exact coop_host_snapshot.zxsav first before streaming it to peers.
-                // This avoids writing a second save file (coop_host_self.zxsav) and avoids loopback file lock collisions.
-                ModLogger.Info($"[CoopSessionManager] Host starting symmetric reload of {savPath} ({savBytes.Length:N0} bytes) before broadcasting...");
                 LockstepClock.EnableDeterministicSandbox(syncSeed);
                 LockstepClock.RequestPostLoadCalibration(syncSeed, idCounter);
                 if (DXGame.Current != null && DXGame.Current.Paused) DXGame.Current.Paused = false;
@@ -1296,6 +1311,36 @@ namespace TABCoopMod.Sync
                 {
                     LockstepClock.SetSessionPause(true);
                 }
+            }
+        }
+
+        private static void BroadcastSnapshotChunksToClients(byte[] savBytes, string chkText, int syncSeed, long idCounter)
+        {
+            if (savBytes == null || Transport == null || !Transport.IsHost) return;
+            int totalChunks = (savBytes.Length + ChunkSizeBytes - 1) / ChunkSizeBytes;
+            _awaitingClientSnapshotAck = true;
+            _awaitingClientAckStartTicks = DXHelper_Environment.Ticks;
+            ModLogger.InfoImmediate($"[CoopSessionManager] Broadcasting Snapshot ({savBytes.Length:N0} bytes in {totalChunks} chunks, seed={syncSeed}, idCounter={idCounter})...");
+            GameBridge.ShowTopBanner("Waiting for Client to finish loading...", Color.Cyan, 4000);
+            Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.SnapshotBegin, w =>
+            {
+                w.Write(savBytes.Length);
+                w.Write(totalChunks);
+                w.Write(chkText ?? string.Empty);
+                w.Write(syncSeed);
+                w.Write(idCounter);
+            });
+            for (int i = 0; i < totalChunks; i++)
+            {
+                int offset = i * ChunkSizeBytes;
+                int len = Math.Min(ChunkSizeBytes, savBytes.Length - offset);
+                int chunkIndex = i;
+                Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.SnapshotChunk, w =>
+                {
+                    w.Write(chunkIndex);
+                    w.Write(len);
+                    w.Write(savBytes, offset, len);
+                });
             }
         }
 
@@ -1746,33 +1791,12 @@ namespace TABCoopMod.Sync
                     {
                         string chkText = _pendingBroadcastChkText ?? string.Empty;
                         _pendingBroadcastChkText = null;
-                        int syncSeed = _pendingBroadcastSeed;
-                        long idCounter = _pendingBroadcastIdCounter;
-                        int totalChunks = (savBytes.Length + ChunkSizeBytes - 1) / ChunkSizeBytes;
-                        _awaitingClientSnapshotAck = true;
+                        BroadcastSnapshotChunksToClients(savBytes, chkText, _pendingBroadcastSeed, _pendingBroadcastIdCounter);
+                    }
+                    else if (_awaitingClientSnapshotAck)
+                    {
+                        // Refresh timeout start after Host finishes its own parallel reload so Client gets the full ack window.
                         _awaitingClientAckStartTicks = DXHelper_Environment.Ticks;
-                        ModLogger.InfoImmediate($"[CoopSessionManager] Broadcasting Snapshot ({savBytes.Length:N0} bytes in {totalChunks} chunks, seed={syncSeed}, idCounter={idCounter})...");
-                        GameBridge.ShowTopBanner("Waiting for Client to finish loading...", Color.Cyan, 4000);
-                        Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.SnapshotBegin, w =>
-                        {
-                            w.Write(savBytes.Length);
-                            w.Write(totalChunks);
-                            w.Write(chkText);
-                            w.Write(syncSeed);
-                            w.Write(idCounter);
-                        });
-                        for (int i = 0; i < totalChunks; i++)
-                        {
-                            int offset = i * ChunkSizeBytes;
-                            int len = Math.Min(ChunkSizeBytes, savBytes.Length - offset);
-                            int chunkIndex = i;
-                            Transport.Broadcast(SendChannel.ReliableOrdered, PacketType.SnapshotChunk, w =>
-                            {
-                                w.Write(chunkIndex);
-                                w.Write(len);
-                                w.Write(savBytes, offset, len);
-                            });
-                        }
                     }
                     TryCompleteHostSyncBarrier();
                     return;
@@ -1798,7 +1822,7 @@ namespace TABCoopMod.Sync
             {
                 w.Write(clientTick);
             });
-            ModLogger.Info($"[CoopSessionManager] Client finished loading snapshot at tick={clientTick}; sent SnapshotLoadedAck and waiting for SessionStart.");
+            ModLogger.Info($"[CoopSessionManager] Client finished loading snapshot at tick={clientTick}; sent SnapshotLoadedAck and waiting for SessionStart. {GameBridge.GetHudDiagSummary()}");
         }
 
         /// <summary>Records the snapshot seed so the post-load calibration uses the Host's seed.</summary>
@@ -2103,7 +2127,11 @@ namespace TABCoopMod.Sync
                 EmitHostTurns(completedTick);
 
             if (completedTick > 0)
+            {
+                if (IsMultiFactionActive)
+                    WonderCrowdfundManager.TickResearchProgress();
                 RunEpochHashAndChecksum(completedTick);
+            }
         }
 
         private static void FlushOutgoingClientCommands()
@@ -2406,6 +2434,23 @@ namespace TABCoopMod.Sync
                 return;
             if (!TryGetSlowestClientLagTicks(out int maxLagTicks))
                 return;
+
+            // During heavy final-wave slow ticks (DiagAvgTickLogicMs > 30ms), avoid the abrupt 9t hard-stop
+            // stutter by smoothly ramping paceMultiplier up to 2.5x and raising the hard-hold ceiling to 15t.
+            bool slowTickRegime = DeterministicSandboxPatches.DiagAvgTickLogicMs > 30.0;
+            if (slowTickRegime)
+            {
+                if (maxLagTicks >= 15)
+                {
+                    maxTicks = 0;
+                }
+                else if (maxLagTicks >= 4)
+                {
+                    maxTicks = 1;
+                    paceMultiplier = Math.Min(2.5, 1.15 + (maxLagTicks - 4) * 0.13);
+                }
+                return;
+            }
 
             if (maxLagTicks >= HostBackpressureHoldLagTicks)
             {
@@ -2892,8 +2937,11 @@ namespace TABCoopMod.Sync
 
                     // After host-authoritative snapping (<= MaxAsyncNudgeCells) a residual this wide means
                     // many units are on entirely different paths; only that, sustained, warrants a reload.
-                    bool widePosDrift = rmsDelta >= 2.5f && drifted5 >= 25;
-                    bool significantPosExceed = exceededThreshold && (drifted5 >= 5 || drifted1 >= 15);
+                    // Require at least 40 units drifted >0.5 cells (and >1% of compared units in huge swarms)
+                    // so a single stuck outlier unit (e.g. 1 Sniper) cannot blow up RMS and trigger a 35s reload.
+                    int minWideDrifted5 = Math.Max(40, comparedCount / 100);
+                    bool widePosDrift = rmsDelta >= 2.5f && drifted5 >= minWideDrifted5;
+                    bool significantPosExceed = exceededThreshold && (drifted5 >= 10 || drifted1 >= 25);
                     bool countsAsPosExceed = IsStrictMode ? (significantPosExceed || widePosDrift) : widePosDrift;
                     if (countsAsPosExceed)
                         _consecutivePosExceeded++;
@@ -3428,12 +3476,14 @@ namespace TABCoopMod.Sync
                     bool needStructMeta = (entityDiff || resvDiff) && !IsStrictMode;
                     bool needSpawnMeta = (entityDiff || _lastClientMissingOnClient > 0) && !IsStrictMode;
                     bool needAnySync = posDiff || lifeDiff || entityDiff || needEcon || needProd || resvDiff || aggroDiff;
-                    if (needAnySync && (now - _lastPosSyncSentTicks >= AsyncPosAlignCooldownMs))
+                    double effectivePosCooldownMs = host.EntityCount > 8000 ? AsyncPosAlignCooldownMs * 2.5 : AsyncPosAlignCooldownMs;
+                    double effectiveSoftCooldownMs = host.EntityCount > 8000 ? AsyncSoftPosAlignCooldownMs * 2.5 : AsyncSoftPosAlignCooldownMs;
+                    if (needAnySync && (now - _lastPosSyncSentTicks >= effectivePosCooldownMs))
                     {
                         _lastPosSyncSentTicks = now;
                         bool applyLife = EnableAsyncPosAlign || !IsStrictMode;
                         bool applyPos = applyLife && (posDiff || aggroDiff || entityDiff)
-                            && (now - _lastFullPosAlignSentTicks >= AsyncSoftPosAlignCooldownMs);
+                            && (now - _lastFullPosAlignSentTicks >= effectiveSoftCooldownMs);
                         if (applyPos)
                             _lastFullPosAlignSentTicks = now;
                         bool needTargetMeta = (EnableAsyncPosAlign || !IsStrictMode) && (applyPos || aggroDiff);
@@ -3613,16 +3663,27 @@ namespace TABCoopMod.Sync
                 float maxCoord = nCells > 1 ? nCells - 0.5f : 10000f;
 
                 // Phase 2A: Resource deltas (same-tick diff preserved across transit)
+                // Note: StateHasher hashes P1's authoritative ledger in Multi-Faction mode, so Client must
+                // push P1's context before applying deltas (never overwrite Client's resting P2/P3 ledger!).
                 if (item.ApplyEconCorrection && game != null
                     && (item.DeltaGold != 0 || item.DeltaWood != 0 || item.DeltaStone != 0 || item.DeltaIron != 0 || item.DeltaOil != 0))
                 {
-                    if (item.DeltaGold != 0) GameBridge.AddLevelResourceDelta("Gold", item.DeltaGold);
-                    if (item.DeltaWood != 0) GameBridge.AddLevelResourceDelta("Wood", item.DeltaWood);
-                    if (item.DeltaStone != 0) GameBridge.AddLevelResourceDelta("Stone", item.DeltaStone);
-                    if (item.DeltaIron != 0) GameBridge.AddLevelResourceDelta("Iron", item.DeltaIron);
-                    if (item.DeltaOil != 0) GameBridge.AddLevelResourceDelta("Oil", item.DeltaOil);
+                    bool pushedP1 = IsMultiFactionActive && FactionContextManager.IsInitialized;
+                    if (pushedP1) FactionContextManager.PushContext(1);
+                    try
+                    {
+                        if (item.DeltaGold != 0) GameBridge.AddLevelResourceDelta("Gold", item.DeltaGold);
+                        if (item.DeltaWood != 0) GameBridge.AddLevelResourceDelta("Wood", item.DeltaWood);
+                        if (item.DeltaStone != 0) GameBridge.AddLevelResourceDelta("Stone", item.DeltaStone);
+                        if (item.DeltaIron != 0) GameBridge.AddLevelResourceDelta("Iron", item.DeltaIron);
+                        if (item.DeltaOil != 0) GameBridge.AddLevelResourceDelta("Oil", item.DeltaOil);
+                    }
+                    finally
+                    {
+                        if (pushedP1) FactionContextManager.PopContext();
+                    }
                     ModLogger.Info(
-                        $"[AsyncEconAlign] Tick={item.Tick} applied deltas: Gold={item.DeltaGold:+#;-#;0} Wood={item.DeltaWood:+#;-#;0} Stone={item.DeltaStone:+#;-#;0} Iron={item.DeltaIron:+#;-#;0} Oil={item.DeltaOil:+#;-#;0}");
+                        $"[AsyncEconAlign] Tick={item.Tick} applied deltas{(pushedP1 ? " (P1)" : "")}: Gold={item.DeltaGold:+#;-#;0} Wood={item.DeltaWood:+#;-#;0} Stone={item.DeltaStone:+#;-#;0} Iron={item.DeltaIron:+#;-#;0} Oil={item.DeltaOil:+#;-#;0}");
                 }
 
                 // Phase 2B: Production queue alignment (guarded against stale transit overwrites)
@@ -3665,7 +3726,7 @@ namespace TABCoopMod.Sync
                     {
                         var sb = item.StructBuilds[i];
                         if (game.GetEntityByID(sb.Id) != null) continue;
-                        if (GameBridge.PlaceSyncedStructure(sb.Id, sb.TemplateId, sb.CellX, sb.CellY, sb.Width, sb.Height, sb.Life, sb.BuildFactor))
+                        if (GameBridge.PlaceSyncedStructure(sb.Id, sb.TemplateId, sb.CellX, sb.CellY, sb.Width, sb.Height, sb.Life, sb.BuildFactor, sb.OwnerPlayerId))
                             structBuilt++;
                     }
                 }
@@ -3680,7 +3741,7 @@ namespace TABCoopMod.Sync
                     {
                         var ds = item.DynamicSpawns[i];
                         if (game.GetEntityByID(ds.Id) != null) continue;
-                        if (GameBridge.SpawnSyncedDynamicEntity(ds.Id, ds.TemplateId, ds.X, ds.Y, ds.Life, ds.TeamRaw, ds.TargetEntityId))
+                        if (GameBridge.SpawnSyncedDynamicEntity(ds.Id, ds.TemplateId, ds.X, ds.Y, ds.Life, ds.TeamRaw, ds.TargetEntityId, ds.OwnerPlayerId))
                             dynSpawned++;
                     }
                     if (dynSpawned > 0)
@@ -3996,7 +4057,8 @@ namespace TABCoopMod.Sync
                                     Width = w,
                                     Height = h,
                                     Life = s.Life,
-                                    BuildFactor = bf
+                                    BuildFactor = bf,
+                                    OwnerPlayerId = IsMultiFactionActive ? FactionOwnershipTracker.GetOwner(s.Id) : (byte)0
                                 });
                             }
                         }
@@ -4027,7 +4089,8 @@ namespace TABCoopMod.Sync
                                     Id = s.Id,
                                     TemplateId = dTplId,
                                     TeamRaw = teamRaw,
-                                    TargetEntityId = dTgtId
+                                    TargetEntityId = dTgtId,
+                                    OwnerPlayerId = IsMultiFactionActive ? FactionOwnershipTracker.GetOwner(s.Id) : (byte)0
                                 });
                             }
                         }
@@ -4110,6 +4173,7 @@ namespace TABCoopMod.Sync
                                 bw.Write(sm.Height);
                                 bw.Write(sm.Life);
                                 bw.Write(sm.BuildFactor);
+                                bw.Write(sm.OwnerPlayerId);
                             }
                         }
                         if (hasTargetMeta)
@@ -4134,6 +4198,7 @@ namespace TABCoopMod.Sync
                                 bw.Write(dsm.TemplateId);
                                 bw.Write(dsm.TeamRaw);
                                 bw.Write(dsm.TargetEntityId);
+                                bw.Write(dsm.OwnerPlayerId);
                             }
                         }
                         bw.Flush();
@@ -4329,7 +4394,8 @@ namespace TABCoopMod.Sync
                                     Width = br.ReadByte(),
                                     Height = br.ReadByte(),
                                     Life = br.ReadInt32(),
-                                    BuildFactor = br.ReadSingle()
+                                    BuildFactor = br.ReadSingle(),
+                                    OwnerPlayerId = br.ReadByte()
                                 });
                             }
                         }
@@ -4360,7 +4426,8 @@ namespace TABCoopMod.Sync
                                     Id = br.ReadUInt64(),
                                     TemplateId = br.ReadUInt64(),
                                     TeamRaw = br.ReadByte(),
-                                    TargetEntityId = br.ReadUInt64()
+                                    TargetEntityId = br.ReadUInt64(),
+                                    OwnerPlayerId = br.ReadByte()
                                 });
                             }
                         }
@@ -4560,7 +4627,8 @@ namespace TABCoopMod.Sync
                                 Y = hs.Y,
                                 Life = hs.Life,
                                 TeamRaw = dsm.TeamRaw,
-                                TargetEntityId = dsm.TargetEntityId
+                                TargetEntityId = dsm.TargetEntityId,
+                                OwnerPlayerId = dsm.OwnerPlayerId
                             });
                         }
                         if (pendingSpawns.Count > 0 && pendingSpawns.Count <= 32)

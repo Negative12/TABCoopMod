@@ -45,6 +45,10 @@ namespace TABCoopMod.UI
         private static DXTextObject _wonderPhaseLabel;
         private static readonly DXTextObject[] _wonderResLabels = new DXTextObject[5];
         private static DXTextObject _btnWithdrawAll;
+        private static DXTextObject _wonderProgBg;
+        private static DXTextObject _wonderProgFill;
+        private static DXTextObject _wonderProgText;
+        private static RectangleF _wonderProgFillFullRect;
 
         private static double _lastRefreshTicks = -1000.0;
         private static DXObject _attachedParent;
@@ -133,16 +137,27 @@ namespace TABCoopMod.UI
                 {
                     _badgeBtn.Visible = true;
                     bool anyReady = false;
+                    bool anyResearching = false;
+                    int bestResearchPct = 0;
                     for (int i = 0; i < 3; i++)
                     {
-                        if (WonderCrowdfundManager.GetState((FunctionalWonderType)i)?.Phase == WonderPhase.ReadyVoucher)
+                        var ws = WonderCrowdfundManager.GetState((FunctionalWonderType)i);
+                        if (ws == null) continue;
+                        if (ws.Phase == WonderPhase.ReadyVoucher)
                             anyReady = true;
+                        else if (ws.Phase == WonderPhase.Researching)
+                        {
+                            anyResearching = true;
+                            int pct = (int)(ws.ResearchProgress01 * 100f);
+                            if (pct > bestResearchPct) bestResearchPct = pct;
+                        }
                     }
-                    SetDynamicText(_badgeBtn,
-                        anyReady ? "[F7] 盟友/奇观 (就绪!)" : "[F7] 盟友贸易 & 奇观",
-                        anyReady ? Color.LimeGreen : Color.Gold,
-                        anyReady ? Color.LimeGreen : BorderGold,
-                        BgDark);
+                    string badgeText = anyReady
+                        ? "[F7] 盟友/奇观 (就绪!)"
+                        : (anyResearching ? $"[F7] 奇观研究中 ({bestResearchPct}%)" : "[F7] 盟友贸易 & 奇观");
+                    Color badgeFg = anyReady ? Color.LimeGreen : (anyResearching ? Color.DeepSkyBlue : Color.Gold);
+                    Color badgeBorder = anyReady ? Color.LimeGreen : (anyResearching ? Color.DeepSkyBlue : BorderGold);
+                    SetDynamicText(_badgeBtn, badgeText, badgeFg, badgeBorder, BgDark);
                 }
 
                 for (int i = 0; i < _allPanelWidgets.Count; i++)
@@ -237,7 +252,13 @@ namespace TABCoopMod.UI
                 var k = (FunctionalWonderType)i;
                 var ws = WonderCrowdfundManager.GetState(k);
                 string shortName = i == 0 ? "1.观星者望远镜" : (i == 1 ? "2.不朽者学院" : "3.闪电尖塔");
-                string tag = ws != null ? (ws.Phase == WonderPhase.ReadyVoucher ? " [就绪]" : (ws.Phase == WonderPhase.Completed ? " [完成]" : "")) : "";
+                string tag = "";
+                if (ws != null)
+                {
+                    if (ws.Phase == WonderPhase.Researching) tag = " [研究中]";
+                    else if (ws.Phase == WonderPhase.ReadyVoucher) tag = " [就绪]";
+                    else if (ws.Phase == WonderPhase.Completed) tag = " [完成]";
+                }
                 SetDynamicText(_wonderSubTabs[i], shortName + tag,
                     SelectedWonder == k ? Color.Gold : Color.WhiteSmoke,
                     SelectedWonder == k ? BorderGold : BorderDim, BgBtn);
@@ -247,10 +268,15 @@ namespace TABCoopMod.UI
             if (st == null) return;
 
             string phaseTxt;
+            Color phaseColor = Color.Gold;
             switch (st.Phase)
             {
                 case WonderPhase.ResearchFunding:
                     phaseTxt = $"阶段 1/2：联合研究众筹 (全队解锁，倍率 {(2 + WonderCrowdfundManager.PlayerCount - 1) * 0.5:0.0}x)";
+                    break;
+                case WonderPhase.Researching:
+                    phaseTxt = $"阶段 1/2：联合研究中... {(int)(st.ResearchProgress01 * 100f)}% (剩余 {st.ResearchRemainingSeconds}s，完成后全队解锁)";
+                    phaseColor = Color.DeepSkyBlue;
                     break;
                 case WonderPhase.BuildFunding:
                     phaseTxt = SelectedWonder == FunctionalWonderType.Spire
@@ -259,17 +285,17 @@ namespace TABCoopMod.UI
                     break;
                 case WonderPhase.ReadyVoucher:
                     phaseTxt = "已集齐建造款！任一玩家放置该奇观即可免资源动工 (0成本凭证)";
+                    phaseColor = Color.LimeGreen;
                     break;
                 case WonderPhase.Building:
                     phaseTxt = $"施工中 (由 P{st.BuilderPlayerId} 承建，取消按出资比例退回)";
                     break;
                 default:
                     phaseTxt = "全局已完成！全队共享该奇观加成";
+                    phaseColor = Color.LightGreen;
                     break;
             }
-            SetDynamicText(_wonderPhaseLabel, phaseTxt,
-                st.Phase == WonderPhase.ReadyVoucher ? Color.LimeGreen : Color.Gold,
-                BorderDim, BgRow);
+            SetDynamicText(_wonderPhaseLabel, phaseTxt, phaseColor, BorderDim, BgRow);
 
             ResourceTransferKind[] kinds =
             {
@@ -301,6 +327,35 @@ namespace TABCoopMod.UI
                     SetDynamicText(_btnWithdrawAll,
                         st.Phase == WonderPhase.ResearchFunding ? "撤回我当前阶段研究出资" : "撤回我当前阶段建造出资",
                         Color.Orange, BorderDim, Color.FromArgb(236, 72, 32, 32));
+                }
+            }
+
+            bool showProg = IsOpen && ActiveTab == 1 && st.Phase == WonderPhase.Researching;
+            if (_wonderProgBg != null) _wonderProgBg.Visible = showProg;
+            if (_wonderProgText != null) _wonderProgText.Visible = showProg;
+            if (_wonderProgFill != null)
+            {
+                if (showProg)
+                {
+                    float pct01 = st.ResearchProgress01;
+                    float fillW = _wonderProgFillFullRect.Width * pct01;
+                    _wonderProgFill.Visible = fillW >= 2f;
+                    if (fillW >= 2f)
+                    {
+                        _wonderProgFill.State.Area = new RectangleF(
+                            _wonderProgFillFullRect.X,
+                            _wonderProgFillFullRect.Y,
+                            fillW,
+                            _wonderProgFillFullRect.Height);
+                    }
+                    int pctInt = (int)(pct01 * 100f);
+                    SetDynamicText(_wonderProgText,
+                        $"联合研究进度：{pctInt}%   (剩余 {st.ResearchRemainingSeconds} 秒)",
+                        Color.White, null, null);
+                }
+                else
+                {
+                    _wonderProgFill.Visible = false;
                 }
             }
         }
@@ -384,29 +439,58 @@ namespace TABCoopMod.UI
             _wonderPhaseLabel = AddPanelWidget(grid, _wonderWidgets, MakeTextBox(px + 12f * u, ty + 34f * u, pw - 24f * u, 28f * u, 9f * u, FontStyle.Bold, Color.Gold,
                 ContentAlignment.MiddleLeft, BgRow, BorderDim, 1f, ZBase + 15));
 
-            int[] cAmounts = { 100, 500 };
+            int[] goldAmounts = { 500, 1000 };
+            int[] resourceAmounts = { 50, 100 };
             for (int row = 0; row < 5; row++)
             {
                 var rKind = rKinds[row];
+                int[] rowAmounts = rKind == ResourceTransferKind.Gold ? goldAmounts : resourceAmounts;
                 float ry = ty + 68f * u + row * 40f * u;
-                _wonderResLabels[row] = AddPanelWidget(grid, _wonderWidgets, MakeTextBox(px + 12f * u, ry, 260f * u, 34f * u, 9.5f * u, FontStyle.Bold, Color.WhiteSmoke,
+                _wonderResLabels[row] = AddPanelWidget(grid, _wonderWidgets, MakeTextBox(px + 12f * u, ry, 240f * u, 34f * u, 9.5f * u, FontStyle.Bold, Color.WhiteSmoke,
                     ContentAlignment.MiddleLeft, BgRow, BorderDim, 1f, ZBase + 15));
 
+                float btnX = px + 258f * u;
                 for (int b = 0; b < 2; b++)
                 {
-                    int amt = cAmounts[b];
+                    int amt = rowAmounts[b];
+                    float btnW = b == 0 ? 78f * u : 88f * u;
                     AddPanelWidget(grid, _wonderWidgets, MakeClickableBox(
-                        px + 278f * u + b * 74f * u, ry + 3f * u, 68f * u, 28f * u, 9f * u, BgBtn, BorderDim, Color.Gold,
+                        btnX, ry + 3f * u, btnW, 28f * u, 9f * u, BgBtn, BorderDim, Color.Gold,
                         $"投+{amt}", () => DispatchWonderContribute(rKind, amt), ZBase + 20));
+                    btnX += btnW + 6f * u;
                 }
                 AddPanelWidget(grid, _wonderWidgets, MakeClickableBox(
-                    px + 428f * u, ry + 3f * u, 84f * u, 28f * u, 9f * u, BgBtn, BorderDim, Color.LightGreen,
+                    btnX, ry + 3f * u, pw - (btnX - px) - 12f * u, 28f * u, 9f * u, BgBtn, BorderDim, Color.LightGreen,
                     "投满", () => DispatchWonderContribute(rKind, 100000), ZBase + 20));
             }
 
             _btnWithdrawAll = AddPanelWidget(grid, _wonderWidgets, MakeClickableBox(
                 px + 12f * u, ty + 276f * u, pw - 24f * u, 30f * u, 9.5f * u, Color.FromArgb(236, 72, 32, 32), BorderDim, Color.Orange,
                 "撤回我当前阶段出资", DispatchWonderWithdrawAll, ZBase + 20));
+
+            float progX = px + 12f * u;
+            float progW = pw - 24f * u;
+            float textY = ty + 268f * u;
+            float textH = 22f * u;
+            float barY = ty + 294f * u;
+            float barH = 14f * u;
+
+            _wonderProgText = AddPanelWidget(grid, _wonderWidgets, MakeTextBox(
+                progX, textY, progW, textH, 9.5f * u, FontStyle.Bold, Color.White,
+                ContentAlignment.MiddleCenter, BgRow, BorderDim, 1f, ZBase + 20));
+            _wonderProgText.Text = "联合研究进度：0%   (剩余 45 秒)";
+
+            _wonderProgBg = AddPanelWidget(grid, _wonderWidgets, MakeTextBox(
+                progX, barY, progW, barH, 8f, FontStyle.Regular, Color.Transparent,
+                ContentAlignment.MiddleCenter, Color.FromArgb(245, 14, 24, 34), Color.DeepSkyBlue, 1.5f, ZBase + 16));
+            _wonderProgBg.Text = " ";
+
+            _wonderProgFillFullRect = new RectangleF(progX + 2f * u, barY + 2f * u, progW - 4f * u, barH - 4f * u);
+            _wonderProgFill = AddPanelWidget(grid, _wonderWidgets, MakeTextBox(
+                _wonderProgFillFullRect.X, _wonderProgFillFullRect.Y, _wonderProgFillFullRect.Width, _wonderProgFillFullRect.Height,
+                8f, FontStyle.Regular, Color.Transparent,
+                ContentAlignment.MiddleCenter, Color.FromArgb(255, 42, 168, 224), Color.Transparent, 0f, ZBase + 18));
+            _wonderProgFill.Text = " ";
         }
 
         private const int ZBase = 2147483580;

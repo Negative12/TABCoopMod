@@ -303,11 +303,22 @@ namespace TABCoopMod.Core
         // 19. Phase 4 M1 Multi-Faction Mode Symbols
         // ====================================================================
         public const string Method_MapLayers_RebuildEnergyGrid     = "#=zK$nELVArHhqXXa$0lA==";
+        public const string Method_MapLayers_InitEnergyConnectivity = "#=z9ok_i231SPp6b3Ux7A==";
+        public const string Method_MapLayers_UpdateEnergyCells     = "#=zMxZdonzH58cOsMui6Q==";
+        public const string Method_MapLayers_HasPathToAnyCC        = "#=zs1C_pLjYHbdEceIG1y8dYemfTA9s";
+        public const string Method_MapLayers_HasPathBetween        = "#=z3gBRVDQqtvENQXOHNg==";
         public const string Field_MapLayers_EnergyGrid             = "#=zVXTH1ahoIxQNg$omKQ==";
         public const string Field_MapLayers_EnergyFrontier         = "#=zwfOTOoiNSnzaMdxGOw==";
         public const string Field_MapLayers_EnergySources          = "#=zzdYbmlOsMh5Qdai_1wg_GcVnp1uyXUY2Jg==";
         public const string Field_MapLayers_EnergyLastIdx          = "#=zI1XwqvydMOklwONBSr1AZauxHESdsKz87A==";
+        public const string Field_MapLayers_EnergyInitDone         = "#=z6CNMVnZljsdxmXV9CUnk0EGQyUQH$u7hZA==";
+        public const string Field_MapLayers_EnergyLock             = "#=zEj$Wpr4DFANo4O0eAQ==";
         public const string Type_CEnergyTransferer                 = "ZX.Components.CEnergyTransferer";
+        public const string Method_CEnergyTransferer_CheckDisconnected = "#=zeJrYi6vVVMO8Q25qqH7ixNY=";
+        public const string Method_CEnergyTransferer_UpdateGrid    = "#=zB_XAZFXeOC5f5keLMg==";
+        public const string Field_Building_HasEnergyConnection     = "#=zPWtiBZDTAwpyLcsK2w==";
+        public const string Method_Building_RefreshEnergy          = "#=zDGe0WvyHfDUGJ1AUiA==";
+        public const string Method_LevelSys_IsCellPlayableForEnergy = "#=z9OggxN$iWkcVshXOAQ==";
         public const string Field_ZXLevelState_CachedCC            = "#=zWcIPez8Xawjo";
         public const string Method_ZXLevelState_RefreshCCCell      = "#=z1lX7NrLe$yjs";
         public const string Field_LevelSys_CurrentCC               = "#=zWcIPez8Xawjo";
