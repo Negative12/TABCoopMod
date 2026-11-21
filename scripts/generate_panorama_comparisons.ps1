@@ -67,32 +67,32 @@ $psi.EnvironmentVariables.Remove("TABCOOP_TEST")
 $scenarios = @(
     @{
         id = "br_100"
-        title = "BR 100% Standard Survival"
-        subtitle = "Seed 202601 | Pop 1.0x | Duration 1.0x | Vanilla (256) vs 2P (280) vs 3P (304)"
+        title = "BR Max Difficulty Survival"
+        subtitle = "Seed 202601 | Pop 1.5x | Duration 0.8x | Vanilla (256) vs 2P (280) vs 3P (304)"
         seed = 202601
         theme = "BR"
-        factorPop = 1.0
-        factorDuration = 1.0
+        factorPop = 1.5
+        factorDuration = 0.8
         modes = @("vanilla", "coop2p", "coop3p")
     },
     @{
         id = "ds_120"
-        title = "DS 120% Arid Highlands"
-        subtitle = "Seed 202602 | Pop 1.2x | Duration 1.0x | Vanilla (256) vs 2P (280)"
+        title = "DS Max Difficulty Arid Highlands"
+        subtitle = "Seed 202602 | Pop 1.5x | Duration 0.8x | Vanilla (256) vs 2P (280)"
         seed = 202602
         theme = "DS"
-        factorPop = 1.2
-        factorDuration = 1.0
+        factorPop = 1.5
+        factorDuration = 0.8
         modes = @("vanilla", "coop2p")
     },
     @{
         id = "fa_120"
-        title = "FA 120% Frozen Tundra"
-        subtitle = "Seed 202603 | Pop 1.2x | Duration 1.0x | Vanilla (256) vs 3P (304)"
+        title = "FA Max Difficulty Frozen Tundra"
+        subtitle = "Seed 202603 | Pop 1.5x | Duration 0.8x | Vanilla (256) vs 3P (304)"
         seed = 202603
         theme = "FA"
-        factorPop = 1.2
-        factorDuration = 1.0
+        factorPop = 1.5
+        factorDuration = 0.8
         modes = @("vanilla", "coop3p")
     },
     @{

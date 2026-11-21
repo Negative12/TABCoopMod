@@ -1,12 +1,12 @@
 ﻿[
     {
         "id":  "br_100",
-        "subtitle":  "Seed 202601 | Pop 1.0x | Duration 1.0x | Vanilla (256) vs 2P (280) vs 3P (304)",
-        "title":  "BR 100% Standard Survival",
-        "factorDuration":  1,
+        "subtitle":  "Seed 202601 | Pop 1.5x | Duration 0.8x | Vanilla (256) vs 2P (280) vs 3P (304)",
+        "title":  "BR Max Difficulty Survival",
+        "factorDuration":  0.8,
         "variants":  [
                          {
-                             "sizeKB":  508,
+                             "sizeKB":  556.4,
                              "metrics":  {
                                              "survivalNCells":  256,
                                              "gridNCells":  256,
@@ -15,11 +15,38 @@
                                              "seed":  -1337994273,
                                              "ccExtraWorkers":  0,
                                              "ccExtraFood":  0,
+                                             "commandCenterCount":  1,
+                                             "commandCenters":  [
+                                                                    {
+                                                                        "index":  1,
+                                                                        "x":  129,
+                                                                        "y":  127,
+                                                                        "normX":  0.5039,
+                                                                        "normY":  0.4961,
+                                                                        "distToCc1":  0,
+                                                                        "minOtherCcDist":  0,
+                                                                        "trees16":  45,
+                                                                        "grass16":  266,
+                                                                        "water16":  0,
+                                                                        "stone24":  18,
+                                                                        "iron48":  74,
+                                                                        "gold30":  0,
+                                                                        "oil48":  2,
+                                                                        "nearestZombieDist":  23.7,
+                                                                        "nearestDoomDist":  45.3
+                                                                    }
+                                                                ],
                                              "rangers":  4,
                                              "soldiers":  1,
-                                             "zombiesTotal":  5198,
-                                             "giants":  1,
-                                             "mutants":  1,
+                                             "zombiesTotal":  11541,
+                                             "weakZombies":  4790,
+                                             "mediumZombies":  2201,
+                                             "strongZombies":  3865,
+                                             "chubbyZombies":  242,
+                                             "venomZombies":  196,
+                                             "harpyZombies":  241,
+                                             "giants":  3,
+                                             "mutants":  3,
                                              "doomVillages":  7,
                                              "oilSources":  15,
                                              "pickables":  21,
@@ -27,13 +54,17 @@
                                              "terrainGoldCells":  148,
                                              "terrainStoneCells":  369,
                                              "terrainIronCells":  158,
-                                             "levelEventsCount":  6
+                                             "levelEventsCount":  6,
+                                             "spawnMode":  "Separated",
+                                             "mutationTendency":  "Balanced",
+                                             "allCcsConnected":  true,
+                                             "cc1DistFromCenter":  1.4
                                          },
                              "mode":  "vanilla",
                              "image":  "panoramas/br_100_vanilla.jpg"
                          },
                          {
-                             "sizeKB":  539.5,
+                             "sizeKB":  587.7,
                              "metrics":  {
                                              "survivalNCells":  280,
                                              "gridNCells":  512,
@@ -42,11 +73,38 @@
                                              "seed":  -1337994273,
                                              "ccExtraWorkers":  2,
                                              "ccExtraFood":  0,
+                                             "commandCenterCount":  1,
+                                             "commandCenters":  [
+                                                                    {
+                                                                        "index":  1,
+                                                                        "x":  254,
+                                                                        "y":  266,
+                                                                        "normX":  0.4961,
+                                                                        "normY":  0.5195,
+                                                                        "distToCc1":  0,
+                                                                        "minOtherCcDist":  0,
+                                                                        "trees16":  137,
+                                                                        "grass16":  498,
+                                                                        "water16":  0,
+                                                                        "stone24":  23,
+                                                                        "iron48":  62,
+                                                                        "gold30":  0,
+                                                                        "oil48":  2,
+                                                                        "nearestZombieDist":  26.8,
+                                                                        "nearestDoomDist":  66.7
+                                                                    }
+                                                                ],
                                              "rangers":  6,
                                              "soldiers":  1,
-                                             "zombiesTotal":  9849,
-                                             "giants":  1,
-                                             "mutants":  1,
+                                             "zombiesTotal":  18323,
+                                             "weakZombies":  8068,
+                                             "mediumZombies":  2459,
+                                             "strongZombies":  5631,
+                                             "chubbyZombies":  735,
+                                             "venomZombies":  729,
+                                             "harpyZombies":  695,
+                                             "giants":  3,
+                                             "mutants":  3,
                                              "doomVillages":  7,
                                              "oilSources":  14,
                                              "pickables":  21,
@@ -54,13 +112,17 @@
                                              "terrainGoldCells":  111,
                                              "terrainStoneCells":  605,
                                              "terrainIronCells":  290,
-                                             "levelEventsCount":  6
+                                             "levelEventsCount":  6,
+                                             "spawnMode":  "Separated",
+                                             "mutationTendency":  "Balanced",
+                                             "allCcsConnected":  true,
+                                             "cc1DistFromCenter":  10.2
                                          },
                              "mode":  "coop2p",
                              "image":  "panoramas/br_100_coop2p.jpg"
                          },
                          {
-                             "sizeKB":  546.8,
+                             "sizeKB":  606.1,
                              "metrics":  {
                                              "survivalNCells":  304,
                                              "gridNCells":  512,
@@ -69,11 +131,38 @@
                                              "seed":  -1337994273,
                                              "ccExtraWorkers":  3,
                                              "ccExtraFood":  1,
+                                             "commandCenterCount":  1,
+                                             "commandCenters":  [
+                                                                    {
+                                                                        "index":  1,
+                                                                        "x":  254,
+                                                                        "y":  266,
+                                                                        "normX":  0.4961,
+                                                                        "normY":  0.5195,
+                                                                        "distToCc1":  0,
+                                                                        "minOtherCcDist":  0,
+                                                                        "trees16":  137,
+                                                                        "grass16":  498,
+                                                                        "water16":  0,
+                                                                        "stone24":  23,
+                                                                        "iron48":  30,
+                                                                        "gold30":  0,
+                                                                        "oil48":  3,
+                                                                        "nearestZombieDist":  26.9,
+                                                                        "nearestDoomDist":  71.6
+                                                                    }
+                                                                ],
                                              "rangers":  6,
                                              "soldiers":  2,
-                                             "zombiesTotal":  11485,
-                                             "giants":  1,
-                                             "mutants":  1,
+                                             "zombiesTotal":  21909,
+                                             "weakZombies":  9028,
+                                             "mediumZombies":  2676,
+                                             "strongZombies":  6873,
+                                             "chubbyZombies":  1094,
+                                             "venomZombies":  1129,
+                                             "harpyZombies":  1103,
+                                             "giants":  3,
+                                             "mutants":  3,
                                              "doomVillages":  7,
                                              "oilSources":  16,
                                              "pickables":  31,
@@ -81,7 +170,11 @@
                                              "terrainGoldCells":  186,
                                              "terrainStoneCells":  685,
                                              "terrainIronCells":  315,
-                                             "levelEventsCount":  6
+                                             "levelEventsCount":  6,
+                                             "spawnMode":  "Separated",
+                                             "mutationTendency":  "Balanced",
+                                             "allCcsConnected":  true,
+                                             "cc1DistFromCenter":  10.2
                                          },
                              "mode":  "coop3p",
                              "image":  "panoramas/br_100_coop3p.jpg"
@@ -89,16 +182,16 @@
                      ],
         "theme":  "BR",
         "seed":  202601,
-        "factorPop":  1
+        "factorPop":  1.5
     },
     {
         "id":  "ds_120",
-        "subtitle":  "Seed 202602 | Pop 1.2x | Duration 1.0x | Vanilla (256) vs 2P (280)",
-        "title":  "DS 120% Arid Highlands",
-        "factorDuration":  1,
+        "subtitle":  "Seed 202602 | Pop 1.5x | Duration 0.8x | Vanilla (256) vs 2P (280)",
+        "title":  "DS Max Difficulty Arid Highlands",
+        "factorDuration":  0.8,
         "variants":  [
                          {
-                             "sizeKB":  924.3,
+                             "sizeKB":  998.3,
                              "metrics":  {
                                              "survivalNCells":  256,
                                              "gridNCells":  256,
@@ -107,11 +200,38 @@
                                              "seed":  202602,
                                              "ccExtraWorkers":  0,
                                              "ccExtraFood":  0,
+                                             "commandCenterCount":  1,
+                                             "commandCenters":  [
+                                                                    {
+                                                                        "index":  1,
+                                                                        "x":  123,
+                                                                        "y":  123,
+                                                                        "normX":  0.4805,
+                                                                        "normY":  0.4805,
+                                                                        "distToCc1":  0,
+                                                                        "minOtherCcDist":  0,
+                                                                        "trees16":  108,
+                                                                        "grass16":  187,
+                                                                        "water16":  4,
+                                                                        "stone24":  54,
+                                                                        "iron48":  92,
+                                                                        "gold30":  0,
+                                                                        "oil48":  4,
+                                                                        "nearestZombieDist":  18.4,
+                                                                        "nearestDoomDist":  32.3
+                                                                    }
+                                                                ],
                                              "rangers":  4,
                                              "soldiers":  1,
-                                             "zombiesTotal":  13067,
-                                             "giants":  2,
-                                             "mutants":  6,
+                                             "zombiesTotal":  17880,
+                                             "weakZombies":  7413,
+                                             "mediumZombies":  3553,
+                                             "strongZombies":  4985,
+                                             "chubbyZombies":  625,
+                                             "venomZombies":  632,
+                                             "harpyZombies":  660,
+                                             "giants":  3,
+                                             "mutants":  9,
                                              "doomVillages":  64,
                                              "oilSources":  18,
                                              "pickables":  30,
@@ -119,13 +239,17 @@
                                              "terrainGoldCells":  84,
                                              "terrainStoneCells":  417,
                                              "terrainIronCells":  318,
-                                             "levelEventsCount":  6
+                                             "levelEventsCount":  6,
+                                             "spawnMode":  "Separated",
+                                             "mutationTendency":  "Balanced",
+                                             "allCcsConnected":  true,
+                                             "cc1DistFromCenter":  7.1
                                          },
                              "mode":  "vanilla",
                              "image":  "panoramas/ds_120_vanilla.jpg"
                          },
                          {
-                             "sizeKB":  964.1,
+                             "sizeKB":  1059.8,
                              "metrics":  {
                                              "survivalNCells":  280,
                                              "gridNCells":  512,
@@ -134,11 +258,38 @@
                                              "seed":  202602,
                                              "ccExtraWorkers":  2,
                                              "ccExtraFood":  0,
+                                             "commandCenterCount":  1,
+                                             "commandCenters":  [
+                                                                    {
+                                                                        "index":  1,
+                                                                        "x":  258,
+                                                                        "y":  255,
+                                                                        "normX":  0.5039,
+                                                                        "normY":  0.498,
+                                                                        "distToCc1":  0,
+                                                                        "minOtherCcDist":  0,
+                                                                        "trees16":  87,
+                                                                        "grass16":  93,
+                                                                        "water16":  9,
+                                                                        "stone24":  20,
+                                                                        "iron48":  108,
+                                                                        "gold30":  0,
+                                                                        "oil48":  4,
+                                                                        "nearestZombieDist":  18.4,
+                                                                        "nearestDoomDist":  33.5
+                                                                    }
+                                                                ],
                                              "rangers":  6,
                                              "soldiers":  1,
-                                             "zombiesTotal":  17370,
-                                             "giants":  2,
-                                             "mutants":  8,
+                                             "zombiesTotal":  23714,
+                                             "weakZombies":  10360,
+                                             "mediumZombies":  2810,
+                                             "strongZombies":  6366,
+                                             "chubbyZombies":  1406,
+                                             "venomZombies":  1356,
+                                             "harpyZombies":  1401,
+                                             "giants":  3,
+                                             "mutants":  12,
                                              "doomVillages":  55,
                                              "oilSources":  19,
                                              "pickables":  31,
@@ -146,7 +297,11 @@
                                              "terrainGoldCells":  79,
                                              "terrainStoneCells":  602,
                                              "terrainIronCells":  373,
-                                             "levelEventsCount":  6
+                                             "levelEventsCount":  6,
+                                             "spawnMode":  "Separated",
+                                             "mutationTendency":  "Balanced",
+                                             "allCcsConnected":  true,
+                                             "cc1DistFromCenter":  2.2
                                          },
                              "mode":  "coop2p",
                              "image":  "panoramas/ds_120_coop2p.jpg"
@@ -154,16 +309,16 @@
                      ],
         "theme":  "DS",
         "seed":  202602,
-        "factorPop":  1.2
+        "factorPop":  1.5
     },
     {
         "id":  "fa_120",
-        "subtitle":  "Seed 202603 | Pop 1.2x | Duration 1.0x | Vanilla (256) vs 3P (304)",
-        "title":  "FA 120% Frozen Tundra",
-        "factorDuration":  1,
+        "subtitle":  "Seed 202603 | Pop 1.5x | Duration 0.8x | Vanilla (256) vs 3P (304)",
+        "title":  "FA Max Difficulty Frozen Tundra",
+        "factorDuration":  0.8,
         "variants":  [
                          {
-                             "sizeKB":  693,
+                             "sizeKB":  729.8,
                              "metrics":  {
                                              "survivalNCells":  256,
                                              "gridNCells":  256,
@@ -172,9 +327,36 @@
                                              "seed":  202603,
                                              "ccExtraWorkers":  0,
                                              "ccExtraFood":  0,
+                                             "commandCenterCount":  1,
+                                             "commandCenters":  [
+                                                                    {
+                                                                        "index":  1,
+                                                                        "x":  129,
+                                                                        "y":  127,
+                                                                        "normX":  0.5039,
+                                                                        "normY":  0.4961,
+                                                                        "distToCc1":  0,
+                                                                        "minOtherCcDist":  0,
+                                                                        "trees16":  61,
+                                                                        "grass16":  531,
+                                                                        "water16":  53,
+                                                                        "stone24":  18,
+                                                                        "iron48":  22,
+                                                                        "gold30":  0,
+                                                                        "oil48":  3,
+                                                                        "nearestZombieDist":  29,
+                                                                        "nearestDoomDist":  62.1
+                                                                    }
+                                                                ],
                                              "rangers":  4,
                                              "soldiers":  1,
-                                             "zombiesTotal":  9769,
+                                             "zombiesTotal":  14153,
+                                             "weakZombies":  6403,
+                                             "mediumZombies":  3424,
+                                             "strongZombies":  4326,
+                                             "chubbyZombies":  0,
+                                             "venomZombies":  0,
+                                             "harpyZombies":  0,
                                              "giants":  0,
                                              "mutants":  0,
                                              "doomVillages":  3,
@@ -184,13 +366,17 @@
                                              "terrainGoldCells":  91,
                                              "terrainStoneCells":  223,
                                              "terrainIronCells":  119,
-                                             "levelEventsCount":  6
+                                             "levelEventsCount":  6,
+                                             "spawnMode":  "Separated",
+                                             "mutationTendency":  "Balanced",
+                                             "allCcsConnected":  true,
+                                             "cc1DistFromCenter":  1.4
                                          },
                              "mode":  "vanilla",
                              "image":  "panoramas/fa_120_vanilla.jpg"
                          },
                          {
-                             "sizeKB":  760.5,
+                             "sizeKB":  801,
                              "metrics":  {
                                              "survivalNCells":  304,
                                              "gridNCells":  512,
@@ -199,9 +385,36 @@
                                              "seed":  202603,
                                              "ccExtraWorkers":  3,
                                              "ccExtraFood":  1,
+                                             "commandCenterCount":  1,
+                                             "commandCenters":  [
+                                                                    {
+                                                                        "index":  1,
+                                                                        "x":  256,
+                                                                        "y":  256,
+                                                                        "normX":  0.5,
+                                                                        "normY":  0.5,
+                                                                        "distToCc1":  0,
+                                                                        "minOtherCcDist":  0,
+                                                                        "trees16":  22,
+                                                                        "grass16":  456,
+                                                                        "water16":  0,
+                                                                        "stone24":  39,
+                                                                        "iron48":  43,
+                                                                        "gold30":  0,
+                                                                        "oil48":  2,
+                                                                        "nearestZombieDist":  24,
+                                                                        "nearestDoomDist":  44.6
+                                                                    }
+                                                                ],
                                              "rangers":  6,
                                              "soldiers":  2,
-                                             "zombiesTotal":  17448,
+                                             "zombiesTotal":  23698,
+                                             "weakZombies":  10304,
+                                             "mediumZombies":  3410,
+                                             "strongZombies":  9984,
+                                             "chubbyZombies":  0,
+                                             "venomZombies":  0,
+                                             "harpyZombies":  0,
                                              "giants":  0,
                                              "mutants":  0,
                                              "doomVillages":  7,
@@ -211,7 +424,11 @@
                                              "terrainGoldCells":  113,
                                              "terrainStoneCells":  449,
                                              "terrainIronCells":  235,
-                                             "levelEventsCount":  6
+                                             "levelEventsCount":  6,
+                                             "spawnMode":  "Separated",
+                                             "mutationTendency":  "Balanced",
+                                             "allCcsConnected":  true,
+                                             "cc1DistFromCenter":  0
                                          },
                              "mode":  "coop3p",
                              "image":  "panoramas/fa_120_coop3p.jpg"
@@ -219,7 +436,7 @@
                      ],
         "theme":  "FA",
         "seed":  202603,
-        "factorPop":  1.2
+        "factorPop":  1.5
     },
     {
         "id":  "vo_900",
@@ -228,7 +445,7 @@
         "factorDuration":  0.8,
         "variants":  [
                          {
-                             "sizeKB":  754.4,
+                             "sizeKB":  754.6,
                              "metrics":  {
                                              "survivalNCells":  256,
                                              "gridNCells":  256,
@@ -237,9 +454,36 @@
                                              "seed":  202604,
                                              "ccExtraWorkers":  0,
                                              "ccExtraFood":  0,
+                                             "commandCenterCount":  1,
+                                             "commandCenters":  [
+                                                                    {
+                                                                        "index":  1,
+                                                                        "x":  128,
+                                                                        "y":  134,
+                                                                        "normX":  0.5,
+                                                                        "normY":  0.5234,
+                                                                        "distToCc1":  0,
+                                                                        "minOtherCcDist":  0,
+                                                                        "trees16":  39,
+                                                                        "grass16":  495,
+                                                                        "water16":  15,
+                                                                        "stone24":  10,
+                                                                        "iron48":  18,
+                                                                        "gold30":  19,
+                                                                        "oil48":  4,
+                                                                        "nearestZombieDist":  18.4,
+                                                                        "nearestDoomDist":  27.2
+                                                                    }
+                                                                ],
                                              "rangers":  4,
                                              "soldiers":  1,
                                              "zombiesTotal":  15652,
+                                             "weakZombies":  6326,
+                                             "mediumZombies":  1921,
+                                             "strongZombies":  4468,
+                                             "chubbyZombies":  1010,
+                                             "venomZombies":  966,
+                                             "harpyZombies":  943,
                                              "giants":  6,
                                              "mutants":  12,
                                              "doomVillages":  81,
@@ -249,13 +493,17 @@
                                              "terrainGoldCells":  177,
                                              "terrainStoneCells":  200,
                                              "terrainIronCells":  83,
-                                             "levelEventsCount":  6
+                                             "levelEventsCount":  6,
+                                             "spawnMode":  "Separated",
+                                             "mutationTendency":  "Balanced",
+                                             "allCcsConnected":  true,
+                                             "cc1DistFromCenter":  6
                                          },
                              "mode":  "vanilla",
                              "image":  "panoramas/vo_900_vanilla.jpg"
                          },
                          {
-                             "sizeKB":  788.1,
+                             "sizeKB":  787.1,
                              "metrics":  {
                                              "survivalNCells":  280,
                                              "gridNCells":  512,
@@ -264,9 +512,36 @@
                                              "seed":  202604,
                                              "ccExtraWorkers":  2,
                                              "ccExtraFood":  0,
+                                             "commandCenterCount":  1,
+                                             "commandCenters":  [
+                                                                    {
+                                                                        "index":  1,
+                                                                        "x":  260,
+                                                                        "y":  256,
+                                                                        "normX":  0.5078,
+                                                                        "normY":  0.5,
+                                                                        "distToCc1":  0,
+                                                                        "minOtherCcDist":  0,
+                                                                        "trees16":  165,
+                                                                        "grass16":  712,
+                                                                        "water16":  0,
+                                                                        "stone24":  24,
+                                                                        "iron48":  25,
+                                                                        "gold30":  6,
+                                                                        "oil48":  0,
+                                                                        "nearestZombieDist":  17.5,
+                                                                        "nearestDoomDist":  35.5
+                                                                    }
+                                                                ],
                                              "rangers":  6,
                                              "soldiers":  1,
                                              "zombiesTotal":  22295,
+                                             "weakZombies":  8831,
+                                             "mediumZombies":  2286,
+                                             "strongZombies":  6015,
+                                             "chubbyZombies":  1782,
+                                             "venomZombies":  1719,
+                                             "harpyZombies":  1641,
                                              "giants":  6,
                                              "mutants":  15,
                                              "doomVillages":  95,
@@ -276,13 +551,17 @@
                                              "terrainGoldCells":  268,
                                              "terrainStoneCells":  355,
                                              "terrainIronCells":  169,
-                                             "levelEventsCount":  6
+                                             "levelEventsCount":  6,
+                                             "spawnMode":  "Separated",
+                                             "mutationTendency":  "Balanced",
+                                             "allCcsConnected":  true,
+                                             "cc1DistFromCenter":  4
                                          },
                              "mode":  "coop2p",
                              "image":  "panoramas/vo_900_coop2p.jpg"
                          },
                          {
-                             "sizeKB":  810.2,
+                             "sizeKB":  809.6,
                              "metrics":  {
                                              "survivalNCells":  304,
                                              "gridNCells":  512,
@@ -291,9 +570,36 @@
                                              "seed":  202604,
                                              "ccExtraWorkers":  3,
                                              "ccExtraFood":  1,
+                                             "commandCenterCount":  1,
+                                             "commandCenters":  [
+                                                                    {
+                                                                        "index":  1,
+                                                                        "x":  260,
+                                                                        "y":  256,
+                                                                        "normX":  0.5078,
+                                                                        "normY":  0.5,
+                                                                        "distToCc1":  0,
+                                                                        "minOtherCcDist":  0,
+                                                                        "trees16":  165,
+                                                                        "grass16":  712,
+                                                                        "water16":  0,
+                                                                        "stone24":  4,
+                                                                        "iron48":  33,
+                                                                        "gold30":  4,
+                                                                        "oil48":  2,
+                                                                        "nearestZombieDist":  16.6,
+                                                                        "nearestDoomDist":  39.8
+                                                                    }
+                                                                ],
                                              "rangers":  6,
                                              "soldiers":  2,
                                              "zombiesTotal":  25952,
+                                             "weakZombies":  10273,
+                                             "mediumZombies":  2044,
+                                             "strongZombies":  6632,
+                                             "chubbyZombies":  2278,
+                                             "venomZombies":  2352,
+                                             "harpyZombies":  2346,
                                              "giants":  9,
                                              "mutants":  18,
                                              "doomVillages":  115,
@@ -303,7 +609,11 @@
                                              "terrainGoldCells":  313,
                                              "terrainStoneCells":  289,
                                              "terrainIronCells":  174,
-                                             "levelEventsCount":  6
+                                             "levelEventsCount":  6,
+                                             "spawnMode":  "Separated",
+                                             "mutationTendency":  "Balanced",
+                                             "allCcsConnected":  true,
+                                             "cc1DistFromCenter":  4
                                          },
                              "mode":  "coop3p",
                              "image":  "panoramas/vo_900_coop3p.jpg"
