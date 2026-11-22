@@ -187,6 +187,8 @@ namespace TABCoopMod.Patches
             {
                 FactionOwnershipTracker.SetOwner(__instance.ID, owner);
             }
+            if (GameBridge.IsCommandCenter(__instance))
+                GameBridge.InvalidateCommandCenterCache();
         }
     }
 
@@ -308,6 +310,8 @@ namespace TABCoopMod.Patches
             }
 
             FactionOwnershipTracker.RemoveEntity(__instance.ID);
+            if (GameBridge.IsCommandCenter(__instance))
+                GameBridge.InvalidateCommandCenterCache();
         }
     }
 
@@ -334,6 +338,7 @@ namespace TABCoopMod.Patches
             if (!GameBridge.IsCommandCenter(__0))
                 return;
 
+            GameBridge.InvalidateCommandCenterCache();
             FactionOwnershipTracker.HandleCommandCenterDestroyed(__0);
         }
     }
@@ -430,6 +435,61 @@ namespace TABCoopMod.Patches
     public static class Patch_ZXBehaviour_RoamingMultiBaseClamp
     {
         private static PropertyInfo _propCellsAwayCC;
+        private static Func<object, int> _fastGetCellsAwayCC;
+        private static bool _cellsAwayCompiled;
+
+        private static int GetCellsAwayCCFast(object owner)
+        {
+            if (owner == null) return 0;
+            if (_propCellsAwayCC == null)
+                _propCellsAwayCC = owner.GetType().GetProperty("CellsAwayCommandCenterWhenRoaming", BindingFlags.Public | BindingFlags.Instance);
+            if (_propCellsAwayCC == null) return 0;
+
+            if (!_cellsAwayCompiled)
+            {
+                _cellsAwayCompiled = true;
+                try
+                {
+                    var getter = _propCellsAwayCC.GetGetMethod(true);
+                    var declType = _propCellsAwayCC.DeclaringType;
+                    if (getter != null && declType != null)
+                    {
+                        var dm = new System.Reflection.Emit.DynamicMethod(
+                            "TABCoop_GetCellsAwayCC",
+                            typeof(int),
+                            new[] { typeof(object) },
+                            typeof(Patch_ZXBehaviour_RoamingMultiBaseClamp).Module,
+                            skipVisibility: true);
+                        var il = dm.GetILGenerator();
+                        var lblBad = il.DefineLabel();
+                        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
+                        il.Emit(System.Reflection.Emit.OpCodes.Isinst, declType);
+                        il.Emit(System.Reflection.Emit.OpCodes.Dup);
+                        il.Emit(System.Reflection.Emit.OpCodes.Brfalse_S, lblBad);
+                        il.Emit(System.Reflection.Emit.OpCodes.Callvirt, getter);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ret);
+                        il.MarkLabel(lblBad);
+                        il.Emit(System.Reflection.Emit.OpCodes.Pop);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ldc_I4_M1);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ret);
+                        _fastGetCellsAwayCC = (Func<object, int>)dm.CreateDelegate(typeof(Func<object, int>));
+                    }
+                }
+                catch
+                {
+                    _fastGetCellsAwayCC = null;
+                }
+            }
+
+            if (_fastGetCellsAwayCC != null)
+            {
+                int val = _fastGetCellsAwayCC(owner);
+                return val >= 0 ? val : 0;
+            }
+            if (!_propCellsAwayCC.DeclaringType.IsInstanceOfType(owner))
+                return 0;
+            return Convert.ToInt32(_propCellsAwayCC.GetValue(owner));
+        }
 
         public static MethodBase TargetMethod()
         {
@@ -454,15 +514,10 @@ namespace TABCoopMod.Patches
             DXEntity owner = GameBridge.GetBDataOwner(__0);
             if (owner == null) return;
 
-            if (_propCellsAwayCC == null)
-                _propCellsAwayCC = owner.GetType().GetProperty("CellsAwayCommandCenterWhenRoaming", BindingFlags.Public | BindingFlags.Instance);
-            if (_propCellsAwayCC == null || !_propCellsAwayCC.DeclaringType.IsInstanceOfType(owner))
-                return;
-
-            int minCells = Convert.ToInt32(_propCellsAwayCC.GetValue(owner));
+            int minCells = GetCellsAwayCCFast(owner);
             if (minCells <= 0) return;
 
-            var ccs = GameBridge.GetAllCommandCenters(aliveOnly: true);
+            var ccs = GameBridge.GetAliveCommandCentersCached();
             if (ccs.Count <= 1) return;
 
             Point targetCell = Point.Truncate(targetPos.Value);

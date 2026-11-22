@@ -74,6 +74,9 @@ function Start-TabInstance {
 Get-Process *TheyAreBillions* -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 600
 
+# Clean up leftover save from prior M4 runs so "Confirm Overwrite?" dialog never blocks confirm_modal.
+Get-ChildItem -Path $savesDir -Filter "tabcoop_m4_cluster*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
 foreach ($sub in @("m4_host", "m4_client", "m4_audit")) {
     $logFile = Join-Path $GameDir "TABCoopMod.$sub.log"
     if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
@@ -158,12 +161,12 @@ try {
     Assert-True ($zDistMin -ge 27.5 -or $zDistMin -lt 0) "No zombies inside 28-cell safe ring (got min=$zDistMin)"
     Assert-True ($hMetrics.doomVillages -ge 2) "2P M4 DoomVillages floor is 2 (got $($hMetrics.doomVillages))"
 
-    # Test synchronized P2 movement in Clustered match
+    # Test synchronized P2 group movement (>=4 units exercises PrewarmUniquePathsParallel) in Clustered match
     $p2Rangers = (Invoke-Control 27902 "list_entities" @{ typeContains = "Ranger"; onlyPlayer = $true }).entities | Where-Object { $_.owner -eq 2 }
     Assert-True ($p2Rangers.Count -ge 4) "Client P2 must own >= 4 starter Rangers"
     $r1 = $p2Rangers[0]
-    $r2 = $p2Rangers[1]
-    Invoke-Control 27902 "move_units" @{ ids = @($r1.id, $r2.id); x = ($r1.x + 3.0); y = ($r1.y + 2.0) } | Out-Null
+    $p2MoveIds = @($p2Rangers | Select-Object -First 4 | ForEach-Object { $_.id })
+    Invoke-Control 27902 "move_units" @{ ids = $p2MoveIds; x = ($r1.x + 3.0); y = ($r1.y + 2.0) } | Out-Null
     Start-Sleep -Milliseconds 1200
 
     Invoke-Control 27901 "screenshot" @{ tag = "01_m4_clustered_host" } | Out-Null

@@ -1,8 +1,8 @@
 param(
     [string]$GameDir = "",
-    [string]$SaveName = "1_Backup",
+    [string]$SaveName = "new_survival",
     [int]$BootTimeoutSec = 45,
-    [int]$LoadTimeoutSec = 60
+    [int]$LoadTimeoutSec = 90
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,58 +53,138 @@ function Assert-True {
     if (-not $Cond) { throw "ASSERT FAILED: $Message" }
 }
 
-function Grant-ResourcesSynced {
-    param([int]$PlayerId, [int]$Gold = 0, [int]$Wood = 0, [int]$Stone = 0, [int]$Iron = 0, [int]$Oil = 0, [int]$ExtraStorage = 0, [int]$ExtraWorkers = 0)
+function Pause-Synced {
+    param([int]$TimeoutSec = 15, [string]$Reason = "Paused on Host & Client")
     Invoke-Control 27901 "set_paused" @{ paused = $true } | Out-Null
-    Start-Sleep -Milliseconds 350
-    Invoke-Control 27901 "test_grant_resources" @{ playerId = $PlayerId; gold = $Gold; wood = $Wood; stone = $Stone; iron = $Iron; oil = $Oil; extraStorage = $ExtraStorage; extraWorkers = $ExtraWorkers } | Out-Null
-    Invoke-Control 27902 "test_grant_resources" @{ playerId = $PlayerId; gold = $Gold; wood = $Wood; stone = $Stone; iron = $Iron; oil = $Oil; extraStorage = $ExtraStorage; extraWorkers = $ExtraWorkers } | Out-Null
+    Wait-Until -TimeoutSec $TimeoutSec -Description $Reason -Condition {
+        $h = Invoke-Control 27901 "game_state"
+        $c = Invoke-Control 27902 "game_state"
+        return ($h.paused -and $c.paused)
+    } | Out-Null
+}
+
+function Resume-Synced {
+    param([int]$TimeoutSec = 15, [string]$Reason = "Resumed on Host & Client")
     Invoke-Control 27901 "set_paused" @{ paused = $false } | Out-Null
-    Wait-Until -TimeoutSec 10 -Description "Resumed after synchronized resource grant" -Condition {
+    Wait-Until -TimeoutSec $TimeoutSec -Description $Reason -Condition {
         $h = Invoke-Control 27901 "game_state"
         $c = Invoke-Control 27902 "game_state"
         return ((-not $h.paused) -and (-not $c.paused))
     } | Out-Null
 }
 
+function Grant-ResourcesSynced {
+    param([int]$PlayerId, [int]$Gold = 0, [int]$Wood = 0, [int]$Stone = 0, [int]$Iron = 0, [int]$Oil = 0, [int]$ExtraStorage = 0, [int]$ExtraWorkers = 0, [int]$ExtraColonists = 0)
+    Pause-Synced -Reason "Paused before synchronized resource grant for P$PlayerId"
+    Invoke-Control 27901 "test_grant_resources" @{ playerId = $PlayerId; gold = $Gold; wood = $Wood; stone = $Stone; iron = $Iron; oil = $Oil; extraStorage = $ExtraStorage; extraWorkers = $ExtraWorkers; extraColonists = $ExtraColonists } | Out-Null
+    Invoke-Control 27902 "test_grant_resources" @{ playerId = $PlayerId; gold = $Gold; wood = $Wood; stone = $Stone; iron = $Iron; oil = $Oil; extraStorage = $ExtraStorage; extraWorkers = $ExtraWorkers; extraColonists = $ExtraColonists } | Out-Null
+    Resume-Synced -Reason "Resumed after synchronized resource grant for P$PlayerId"
+}
+
 function Place-NearCc {
-    param([int]$Port, [uint64]$BuilderId, [int]$Cx, [int]$Cy, [string]$BuildingType, [int]$SizeW, [int]$SizeH)
-    $before = (Invoke-Control $Port "list_entities" @{ typeContains = ($BuildingType -replace "^ZX\.Entities\.", ""); onlyPlayer = $true; limit = 100 }).entities.Count
+    param([int]$Port, [uint64]$BuilderId, [int]$Cx, [int]$Cy, [string]$BuildingType, [int]$SizeW, [int]$SizeH, [int]$WaitMs = 3500)
+    $shortType = $BuildingType -replace "^ZX\.Entities\.", ""
+    $beforeList = (Invoke-Control $Port "list_entities" @{ typeContains = $shortType; onlyPlayer = $true; limit = 100 }).entities
+    $beforeIds = @{}
+    foreach ($be in $beforeList) { $beforeIds[$be.id] = $true }
     $spot = Invoke-Control $Port "find_build_spot" @{ buildingType = $BuildingType; cx = $Cx; cy = $Cy; sizeW = $SizeW; sizeH = $SizeH; maxRadius = 28 }
     if ($spot -and $spot.found) {
-        Write-Host "      [Place-NearCc] Spot found for $BuildingType at ($($spot.x), $($spot.y))"
-        Invoke-Control $Port "place_building" @{ buildingType = $BuildingType; builderId = $BuilderId; x = $spot.x; y = $spot.y; sizeW = $SizeW; sizeH = $SizeH } | Out-Null
-        Start-Sleep -Milliseconds 900
-        $after = (Invoke-Control $Port "list_entities" @{ typeContains = ($BuildingType -replace "^ZX\.Entities\.", ""); onlyPlayer = $true; limit = 100 }).entities
-        if ($after.Count -gt $before) {
-            return $after
+        $useW = if ($spot.PSObject.Properties["sizeW"]) { [int]$spot.sizeW } else { $SizeW }
+        $useH = if ($spot.PSObject.Properties["sizeH"]) { [int]$spot.sizeH } else { $SizeH }
+        Write-Host "      [Place-NearCc] Spot found for $BuildingType (${useW}x${useH}) at ($($spot.x), $($spot.y))"
+        Invoke-Control $Port "place_building" @{ buildingType = $BuildingType; builderId = $BuilderId; x = $spot.x; y = $spot.y; sizeW = $useW; sizeH = $useH } | Out-Null
+        $waitSw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($waitSw.Elapsed.TotalMilliseconds -lt $WaitMs) {
+            Start-Sleep -Milliseconds 250
+            $after = (Invoke-Control $Port "list_entities" @{ typeContains = $shortType; onlyPlayer = $true; limit = 100 }).entities
+            if ($after.Count -gt $beforeList.Count) {
+                $newEnt = $after | Where-Object { -not $beforeIds.ContainsKey($_.id) } | Select-Object -First 1
+                return $newEnt
+            }
         }
     } else {
         Write-Host "      [Place-NearCc] find_build_spot returned found=false for $BuildingType around ($Cx,$Cy)"
         return $null
     }
-    $offsets = @()
-    foreach ($d in @(4, -4, 6, -6, 8, -8, 10, -10, 12, -12)) {
-        $offsets += ,@($d, 0)
-        $offsets += ,@(0, $d)
-        $offsets += ,@($d, $d)
-        $offsets += ,@($d, -$d)
-    }
-    foreach ($off in $offsets) {
-        $bx = $Cx + $off[0]
-        $by = $Cy + $off[1]
-        Invoke-Control $Port "place_building" @{ buildingType = $BuildingType; builderId = $BuilderId; x = $bx; y = $by; sizeW = $SizeW; sizeH = $SizeH } | Out-Null
-        Start-Sleep -Milliseconds 650
-        $after = (Invoke-Control $Port "list_entities" @{ typeContains = ($BuildingType -replace "^ZX\.Entities\.", ""); onlyPlayer = $true; limit = 100 }).entities
-        if ($after.Count -gt $before) {
-            return $after
-        }
-    }
     return $null
+}
+
+function Place-NearCcAutoColonists {
+    param([int]$Port, [uint64]$BuilderId, [int]$Cx, [int]$Cy, [string]$BuildingType, [int]$SizeW, [int]$SizeH, [int]$ColonistBoost = 600)
+    $placed = Place-NearCc -Port $Port -BuilderId $BuilderId -Cx $Cx -Cy $Cy -BuildingType $BuildingType -SizeW $SizeW -SizeH $SizeH
+    if ($null -ne $placed) { return $placed }
+    # Retry inside a 60-tick safe window with temporary Colonists if MinColonistsRequisite blocked placement.
+    Wait-Until -TimeoutSec 10 -IntervalMs 100 -Description "Align just past tick % 60 before temporary $ColonistBoost colonists for $BuildingType" -Condition {
+        $gs = Invoke-Control 27901 "game_state"
+        $rem = [int]$gs.tick % 60
+        return ($rem -ge 2 -and $rem -le 12)
+    } | Out-Null
+    $targetPid = if ($Port -eq 27902) { 2 } else { 1 }
+    Grant-ResourcesSynced -PlayerId $targetPid -ExtraColonists $ColonistBoost
+    $placed = Place-NearCc -Port $Port -BuilderId $BuilderId -Cx $Cx -Cy $Cy -BuildingType $BuildingType -SizeW $SizeW -SizeH $SizeH -WaitMs 1400
+    Grant-ResourcesSynced -PlayerId $targetPid -ExtraColonists (-$ColonistBoost)
+    return $placed
+}
+
+function Ensure-BuildingCompleted {
+    param([int]$Port, [uint64]$BuilderId, [int]$Cx, [int]$Cy, [string]$BuildingType, [int]$SizeW = 3, [int]$SizeH = 3)
+    $shortType = $BuildingType -replace "^ZX\.Entities\.", ""
+    $existing = (Invoke-Control $Port "list_entities" @{ typeContains = $shortType; onlyPlayer = $true; limit = 100 }).entities | Where-Object { $_.owner -eq 1 } | Select-Object -First 1
+    if ($null -eq $existing) {
+        $existing = Place-NearCcAutoColonists -Port $Port -BuilderId $BuilderId -Cx $Cx -Cy $Cy -BuildingType $BuildingType -SizeW $SizeW -SizeH $SizeH
+        if ($null -eq $existing) { return $null }
+    }
+    $targetId = $existing.id
+    Invoke-Control 27901 "set_game_speed" @{ speed = 12.0 } | Out-Null
+    $script:ebPoll = 0
+    Wait-Until -TimeoutSec 200 -Description "$shortType ($targetId) construction completes" -Condition {
+        $script:ebPoll++
+        $gsNow = Invoke-Control 27901 "game_state"
+        if ($gsNow.paused -and -not $gsNow.levelEnded) {
+            Invoke-Control 27901 "set_paused" @{ paused = $false } | Out-Null
+            Invoke-Control 27901 "set_game_speed" @{ speed = 12.0 } | Out-Null
+        }
+        if (($script:ebPoll % 8) -eq 1) {
+            $csNow = Invoke-Control 27902 "game_state"
+            Write-Host ("      [Build $shortType] tH={0}(spd={1},frame={2}ms,logic={3}ms,phys={4}ms) tC={5}(frame={6}ms,logic={7}ms)" -f $gsNow.tick, $gsNow.gameSpeed, $gsNow.avgFrameMs, $gsNow.avgLogicMs, $gsNow.avgPhysMs, $csNow.tick, $csNow.avgFrameMs, $csNow.avgLogicMs)
+        }
+        $eNow = (Invoke-Control $Port "list_entities" @{ typeContains = $shortType; onlyPlayer = $true; limit = 100 }).entities | Where-Object { $_.id -eq $targetId } | Select-Object -First 1
+        return ($null -ne $eNow -and $eNow.enabled)
+    } | Out-Null
+    Invoke-Control 27901 "set_game_speed" @{ speed = 1.0 } | Out-Null
+    return $existing
+}
+
+function Research-TechOnBuilding {
+    param([uint64]$BuildingId, [string]$TechCommandName)
+    $fsPre = Invoke-Control 27901 "faction_state"
+    $prevTechs = [int](($fsPre.players | Where-Object { $_.playerId -eq 1 }).onlyOneCmdCount)
+    Write-Host "      Researching $TechCommandName on building $BuildingId (prevTechs=$prevTechs)..."
+    Invoke-Control 27901 "issue_command" @{ type = 1; playerId = 1; commandName = $TechCommandName; ids = @($BuildingId) } | Out-Null
+    Invoke-Control 27901 "set_game_speed" @{ speed = 12.0 } | Out-Null
+    $script:rtPoll = 0
+    Wait-Until -TimeoutSec 200 -Description "Tech $TechCommandName completes" -Condition {
+        $script:rtPoll++
+        $gsNow = Invoke-Control 27901 "game_state"
+        if ($gsNow.paused -and -not $gsNow.levelEnded) {
+            Invoke-Control 27901 "set_paused" @{ paused = $false } | Out-Null
+            Invoke-Control 27901 "set_game_speed" @{ speed = 12.0 } | Out-Null
+        }
+        if (($script:rtPoll % 8) -eq 1) {
+            Write-Host ("      [Tech $TechCommandName] tH={0}(spd={1},frame={2}ms,logic={3}ms)" -f $gsNow.tick, $gsNow.gameSpeed, $gsNow.avgFrameMs, $gsNow.avgLogicMs)
+        }
+        $fsNow = Invoke-Control 27901 "faction_state"
+        $nowTechs = [int](($fsNow.players | Where-Object { $_.playerId -eq 1 }).onlyOneCmdCount)
+        return ($nowTechs -gt $prevTechs)
+    } | Out-Null
+    Invoke-Control 27901 "set_game_speed" @{ speed = 1.0 } | Out-Null
 }
 
 Get-Process *TheyAreBillions* -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 600
+
+$savesDir = Join-Path $env:USERPROFILE "Documents\My Games\They Are Billions\Saves"
+Get-ChildItem -Path $savesDir -Filter "tabcoop_m23_test*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
 $shotRoot = Join-Path (Get-Location) "tabcoop_shots"
 foreach ($sub in @("mf23_host", "mf23_client")) {
@@ -159,10 +239,31 @@ try {
     } | Out-Null
     Invoke-Control 27902 "lobby_action" @{ action = "toggle_ready" } | Out-Null
     Wait-Until -TimeoutSec 10 -Description "Host canStart" -Condition { (Invoke-Control 27901 "lobby_state").canStart } | Out-Null
-    Invoke-Control 27901 "lobby_action" @{ action = "load_save"; save = $SaveName } | Out-Null
+    if ($SaveName -eq "new_survival") {
+        Invoke-Control 27901 "lobby_action" @{ action = "open_new_survival" } | Out-Null
+        Wait-Until -TimeoutSec 10 -Description "Save name InputBox open" -Condition {
+            $s = Invoke-Control 27901 "lobby_state"
+            return ($s.anyModalOpen -and -not $s.lobbyWindowOpen -and $s.modalHasEditBox)
+        } | Out-Null
+        $c1 = Invoke-Control 27901 "lobby_action" @{ action = "confirm_modal"; inputText = "tabcoop_m23_test" }
+        Assert-True ($c1.ok) "Failed to confirm save name modal"
+        Wait-Until -TimeoutSec 10 -Description "New Survival config window open" -Condition {
+            $s = Try-Control 27901 "lobby_state"
+            return ($s -and $s.anyModalOpen -and -not $s.lobbyWindowOpen -and -not $s.modalHasEditBox)
+        } | Out-Null
+        Start-Sleep -Milliseconds 150
+        $c2 = Invoke-Control 27901 "lobby_action" @{ action = "confirm_modal" }
+        Assert-True ($c2.ok) "Failed to start New Survival"
+    } else {
+        Invoke-Control 27901 "lobby_action" @{ action = "load_save"; save = $SaveName } | Out-Null
+    }
     Wait-Until -TimeoutSec $LoadTimeoutSec -IntervalMs 500 -Description "Both in synced level" -Condition {
         $h = Try-Control 27901 "lobby_state"
         $c = Try-Control 27902 "lobby_state"
+        if ($SaveName -eq "new_survival") {
+            if ($h -and -not $h.inLevel) { Try-Control 27901 "lobby_action" @{ action = "kick_fade" } | Out-Null }
+            if ($c -and -not $c.inLevel) { Try-Control 27902 "lobby_action" @{ action = "kick_fade" } | Out-Null }
+        }
         return ($h -and $c -and $h.inLevel -and -not $h.loading -and $c.inLevel -and -not $c.loading)
     } | Out-Null
     Start-Sleep -Milliseconds 1200
@@ -185,9 +286,16 @@ try {
 
     $placedTent = Place-NearCc -Port 27902 -BuilderId $cc2.id -Cx ([Math]::Floor($cc2.x)) -Cy ([Math]::Floor($cc2.y)) -BuildingType "ZX.Entities.TentHouse" -SizeW 2 -SizeH 2
     Assert-True ($null -ne $placedTent) "P2 must be able to place TentHouse near CC2"
-    Start-Sleep -Milliseconds 1000
-    $fs1H = Invoke-Control 27901 "faction_state"
-    $fs1C = Invoke-Control 27902 "faction_state"
+    Pause-Synced -Reason "Paused after P2 TentHouse before economyHash check"
+    $syncPair = Wait-Until -TimeoutSec 10 -Description "Host & Client converge on identical paused tick & economyHash after P2 TentHouse" -Condition {
+        $h = Invoke-Control 27901 "faction_state"
+        $c = Invoke-Control 27902 "faction_state"
+        if ($h.economyHash -eq $c.economyHash) { return @{ h = $h; c = $c } }
+        return $null
+    }
+    $fs1H = $syncPair.h
+    $fs1C = $syncPair.c
+    Resume-Synced -Reason "Resumed after P2 TentHouse economyHash check"
     $p1AfterTent = $fs1H.players | Where-Object { $_.playerId -eq 1 } | Select-Object -First 1
     $p2AfterTent = $fs1H.players | Where-Object { $_.playerId -eq 2 } | Select-Object -First 1
     Assert-True ($p2AfterTent.gold -lt $p2Before.gold -or $p2AfterTent.wood -lt $p2Before.wood) "P2 TentHouse build must deduct from P2 ledger"
@@ -195,11 +303,13 @@ try {
     Assert-True ($fs1H.economyHash -eq $fs1C.economyHash) "EconomyHash must remain identical after P2 build ($($fs1H.economyHash) vs $($fs1C.economyHash))"
 
     Write-Host "[4/7] Verifying Market gate, 20% fee transfer, and CoopMayor_ZeroTransferFee (0% fee)..."
-    # Raise storage cap cleanly below overflow so +80 / +100 additions are never cap-clamped
-    Grant-ResourcesSynced -PlayerId 1 -Gold 500 -Wood 50 -Stone 50 -Iron 50 -Oil 20 -ExtraStorage 450
-    Grant-ResourcesSynced -PlayerId 2 -Gold 500 -Wood 50 -Stone 50 -Iron 50 -Oil 20 -ExtraStorage 450
+    # Raise storage/workers cleanly below overflow so +80 / +100 additions are never cap-clamped;
+    # keep Colonists < 30 here so Survival Mayor modals don't auto-pop before CoopMayor_ZeroTransferFee is tested.
+    Grant-ResourcesSynced -PlayerId 1 -Gold 6000 -Wood 300 -Stone 200 -Iron 200 -Oil 100 -ExtraStorage 450 -ExtraWorkers 120
+    Grant-ResourcesSynced -PlayerId 2 -Gold 2000 -Wood 200 -Stone 50 -Iron 50 -Oil 20 -ExtraStorage 450 -ExtraWorkers 60
 
     $fsMkt = Invoke-Control 27901 "faction_state"
+    $wwEnt = $null
     if (-not $fsMkt.hasAnyAliveMarket) {
         # Before any Market: transfer must be rejected cleanly
         $p2PreReject = ($fsMkt.players | Where-Object { $_.playerId -eq 2 }).wood
@@ -210,9 +320,18 @@ try {
         Assert-True ($p2PostReject -ge $p2PreReject) "Transfer before any Market exists must be rejected"
 
         $placedMarket = Place-NearCc -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.Market" -SizeW 3 -SizeH 3
+        if ($null -eq $placedMarket) {
+            # In New Survival, unlock TechMarket via WoodWorkshop after adding MillWood + TeslaTower room
+            $null = Ensure-BuildingCompleted -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.MillWood" -SizeW 2 -SizeH 2
+            $null = Ensure-BuildingCompleted -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.EnergyWoodTower" -SizeW 1 -SizeH 1
+            $wwEnt = Ensure-BuildingCompleted -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.WoodWorkshop" -SizeW 3 -SizeH 3
+            Assert-True ($null -ne $wwEnt) "Must be able to build WoodWorkshop near CC1"
+            Research-TechOnBuilding -BuildingId ([uint64]$wwEnt.id) -TechCommandName "ZX.Commands.TechMarket"
+            $placedMarket = Place-NearCcAutoColonists -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.Market" -SizeW 3 -SizeH 3 -ColonistBoost 250
+        }
         Assert-True ($null -ne $placedMarket) "Must be able to place Market near CC1"
-        Invoke-Control 27901 "set_game_speed" @{ speed = 10.0 } | Out-Null
-        Wait-Until -TimeoutSec 20 -Description "P1 Market construction completes and unlocks team transfer" -Condition {
+        Invoke-Control 27901 "set_game_speed" @{ speed = 12.0 } | Out-Null
+        Wait-Until -TimeoutSec 150 -Description "P1 Market construction completes and unlocks team transfer" -Condition {
             $fs = Invoke-Control 27901 "faction_state"
             return $fs.hasAnyAliveMarket
         } | Out-Null
@@ -227,12 +346,11 @@ try {
     Assert-True ($p1Mkt.nMarkets -ge 1 -and $p2Mkt.nMarkets -eq 0) "Only P1 owns a Market (P1=$($p1Mkt.nMarkets), P2=$($p2Mkt.nMarkets)), yet P2 can transfer"
 
     # P2 transfers 100 Gold -> P1 at 20% fee (P1 receives exact +80!)
-    Invoke-Control 27901 "set_paused" @{ paused = $true } | Out-Null
-    Start-Sleep -Milliseconds 300
+    Pause-Synced -Reason "Paused before 20% fee Gold transfer snapshot"
     $preT1 = Invoke-Control 27901 "faction_state"
     $g1Pre = ($preT1.players | Where-Object { $_.playerId -eq 1 }).gold
     $g2Pre = ($preT1.players | Where-Object { $_.playerId -eq 2 }).gold
-    Invoke-Control 27901 "set_paused" @{ paused = $false } | Out-Null
+    Resume-Synced -Reason "Resumed before 20% fee Gold transfer"
     Invoke-Control 27902 "transfer_resource" @{ toPlayer = 1; resource = "Gold"; amount = 100 } | Out-Null
     Wait-Until -TimeoutSec 10 -Description "20% fee transfer settles on both Host & Client" -Condition {
         $fs = Invoke-Control 27901 "faction_state"
@@ -253,12 +371,11 @@ try {
         $c = Invoke-Control 27902 "faction_state"
         return ($h.zeroTransferFeeActive -and $c.zeroTransferFeeActive)
     } | Out-Null
-    Invoke-Control 27901 "set_paused" @{ paused = $true } | Out-Null
-    Start-Sleep -Milliseconds 300
+    Pause-Synced -Reason "Paused before 0% fee Wood transfer snapshot"
     $preT2 = Invoke-Control 27901 "faction_state"
     $w1Pre = ($preT2.players | Where-Object { $_.playerId -eq 1 }).wood
     $w2Pre = ($preT2.players | Where-Object { $_.playerId -eq 2 }).wood
-    Invoke-Control 27901 "set_paused" @{ paused = $false } | Out-Null
+    Resume-Synced -Reason "Resumed before 0% fee Wood transfer"
     Invoke-Control 27902 "transfer_resource" @{ toPlayer = 1; resource = "Wood"; amount = 50 } | Out-Null
     Wait-Until -TimeoutSec 10 -Description "0% fee Wood transfer settles cleanly" -Condition {
         $fs = Invoke-Control 27901 "faction_state"
@@ -289,10 +406,57 @@ try {
         $wsBlocked = (Invoke-Control 27901 "wonder_status").wonders | Where-Object { $_.kind -eq "Spire" } | Select-Object -First 1
         Assert-True ($wsBlocked.researchContributed.gold -eq 0) "Spire ResearchFunding must be blocked when team lacks a Foundry"
 
+        $fsPreFoundry = Invoke-Control 27901 "faction_state"
+        $p1PreFoundry = $fsPreFoundry.players | Where-Object { $_.playerId -eq 1 } | Select-Object -First 1
+        $freeEnergy1 = [int]$p1PreFoundry.energySupply - [int]$p1PreFoundry.energyNeeded
+        $millAttempt = 0
+        while ($freeEnergy1 -lt 90 -and $millAttempt -lt 5) {
+            $millAttempt++
+            Write-Host "      P1 free energy=$freeEnergy1 (<90); building MillWood #$millAttempt near CC1 before Foundry..."
+            $placedMill = Place-NearCc -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.MillWood" -SizeW 2 -SizeH 2
+            Assert-True ($null -ne $placedMill) "Must be able to place MillWood #$millAttempt near CC1 for Foundry energy"
+            $supplyBeforeMill = [int]$p1PreFoundry.energySupply
+            Invoke-Control 27901 "set_game_speed" @{ speed = 12.0 } | Out-Null
+            Wait-Until -TimeoutSec 90 -Description "MillWood #$millAttempt completes and raises energySupply" -Condition {
+                $gsNow = Invoke-Control 27901 "game_state"
+                if ($gsNow.paused -and -not $gsNow.levelEnded) {
+                    Invoke-Control 27901 "set_paused" @{ paused = $false } | Out-Null
+                    Invoke-Control 27901 "set_game_speed" @{ speed = 12.0 } | Out-Null
+                }
+                $fsNow = Invoke-Control 27901 "faction_state"
+                $p1Now = $fsNow.players | Where-Object { $_.playerId -eq 1 } | Select-Object -First 1
+                $supNow = [int]$p1Now.energySupply
+                $feNow = $supNow - [int]$p1Now.energyNeeded
+                return ($supNow -gt $supplyBeforeMill -or $feNow -ge 90)
+            } | Out-Null
+            Invoke-Control 27901 "set_game_speed" @{ speed = 1.0 } | Out-Null
+            $fsPreFoundry = Invoke-Control 27901 "faction_state"
+            $p1PreFoundry = $fsPreFoundry.players | Where-Object { $_.playerId -eq 1 } | Select-Object -First 1
+            $freeEnergy1 = [int]$p1PreFoundry.energySupply - [int]$p1PreFoundry.energyNeeded
+            Write-Host "      After MillWood #${millAttempt}: supply=$($p1PreFoundry.energySupply), needed=$($p1PreFoundry.energyNeeded), free=$freeEnergy1"
+        }
+        Assert-True ($freeEnergy1 -ge 90) "P1 free energy must be >= 90 before StoneWorkshop/Foundry (got $freeEnergy1)"
+
         $placedFoundry = Place-NearCc -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.Foundry" -SizeW 3 -SizeH 3
+        if ($null -eq $placedFoundry) {
+            if ($null -eq $wwEnt) {
+                $wwEnt = Ensure-BuildingCompleted -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.WoodWorkshop" -SizeW 3 -SizeH 3
+                Assert-True ($null -ne $wwEnt) "Must have WoodWorkshop to research StoneWorkshop"
+            }
+            $swExisting = (Invoke-Control 27901 "list_entities" @{ typeContains = "StoneWorkshop"; onlyPlayer = $true; limit = 20 }).entities | Where-Object { $_.owner -eq 1 } | Select-Object -First 1
+            if ($null -eq $swExisting) {
+                Research-TechOnBuilding -BuildingId ([uint64]$wwEnt.id) -TechCommandName "ZX.Commands.TechStoneWorkshop"
+                $swExisting = Ensure-BuildingCompleted -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.StoneWorkshop" -SizeW 3 -SizeH 3
+            } else {
+                $swExisting = Ensure-BuildingCompleted -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.StoneWorkshop" -SizeW 3 -SizeH 3
+            }
+            Assert-True ($null -ne $swExisting) "Must be able to build StoneWorkshop near CC1"
+            Research-TechOnBuilding -BuildingId ([uint64]$swExisting.id) -TechCommandName "ZX.Commands.TechFoundry"
+            $placedFoundry = Place-NearCc -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.Foundry" -SizeW 3 -SizeH 3
+        }
         Assert-True ($null -ne $placedFoundry) "Must be able to place Foundry near CC1 to unlock Spire research"
-        Invoke-Control 27901 "set_game_speed" @{ speed = 10.0 } | Out-Null
-        Wait-Until -TimeoutSec 25 -Description "Foundry construction completes and unlocks Spire research" -Condition {
+        Invoke-Control 27901 "set_game_speed" @{ speed = 12.0 } | Out-Null
+        Wait-Until -TimeoutSec 180 -Description "Foundry construction completes and unlocks Spire research" -Condition {
             $s = (Invoke-Control 27901 "wonder_status").wonders | Where-Object { $_.kind -eq "Spire" } | Select-Object -First 1
             return $s.hasRequiredWorkshop
         } | Out-Null
@@ -322,7 +486,7 @@ try {
         return ($sH.phase -eq "Researching" -and $sC.phase -eq "Researching" -and $sH.researchTicksTotal -gt 0)
     } | Out-Null
     Invoke-Control 27901 "set_game_speed" @{ speed = 10.0 } | Out-Null
-    Wait-Until -TimeoutSec 25 -Description "Spire Research countdown completes -> BuildFunding" -Condition {
+    Wait-Until -TimeoutSec 180 -Description "Spire Research countdown completes -> BuildFunding" -Condition {
         $wsH = Invoke-Control 27901 "wonder_status"
         $wsC = Invoke-Control 27902 "wonder_status"
         $sH = $wsH.wonders | Where-Object { $_.kind -eq "Spire" } | Select-Object -First 1
@@ -379,11 +543,11 @@ try {
     $fsBeforeSpirePlace = Invoke-Control 27901 "faction_state"
     $g1BeforeSpire = ($fsBeforeSpirePlace.players | Where-Object { $_.playerId -eq 1 }).gold
     $spireBuilderPid = 1
-    $placedSpire = Place-NearCc -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.TheSpire" -SizeW 3 -SizeH 3
+    $placedSpire = Place-NearCcAutoColonists -Port 27901 -BuilderId $cc1.id -Cx ([Math]::Floor($cc1.x)) -Cy ([Math]::Floor($cc1.y)) -BuildingType "ZX.Entities.TheSpire" -SizeW 3 -SizeH 3
     if ($null -eq $placedSpire) {
         Write-Host "      CC1 area lacked open Spire footprint; placing TheSpire via P2 near CC2..."
         $spireBuilderPid = 2
-        $placedSpire = Place-NearCc -Port 27902 -BuilderId $cc2.id -Cx ([Math]::Floor($cc2.x)) -Cy ([Math]::Floor($cc2.y)) -BuildingType "ZX.Entities.TheSpire" -SizeW 3 -SizeH 3
+        $placedSpire = Place-NearCcAutoColonists -Port 27902 -BuilderId $cc2.id -Cx ([Math]::Floor($cc2.x)) -Cy ([Math]::Floor($cc2.y)) -BuildingType "ZX.Entities.TheSpire" -SizeW 3 -SizeH 3
     }
     Assert-True ($null -ne $placedSpire) "P1 or P2 must be able to place TheSpire with ReadyVoucher"
 
@@ -433,7 +597,7 @@ try {
     Invoke-Control 27902 "screenshot" @{ tag = "04_client_spire_rings" } | Out-Null
     $hgEnd = Invoke-Control 27901 "game_state"
     $cgEnd = Invoke-Control 27902 "game_state"
-    Write-Host ("      End Tick: Host=({0}, hash={1}) Client=({2}, hash={3})" -f $hgEnd.simTick, $hgEnd.fullHash, $cgEnd.simTick, $cgEnd.fullHash)
+    Write-Host ("      End Tick: Host=({0}, hash={1}) Client=({2}, hash={3})" -f $hgEnd.tick, $hgEnd.fullHash, $cgEnd.tick, $cgEnd.fullHash)
 
     Write-Host "[7/7] ALL M2 + M3 MULTI-FACTION ASSERTIONS PASSED!"
 }
@@ -441,6 +605,7 @@ finally {
     if ($hostProc -and -not $hostProc.HasExited) { try { $hostProc.Kill() } catch {} }
     if ($clientProc -and -not $clientProc.HasExited) { try { $clientProc.Kill() } catch {} }
     Get-Process *TheyAreBillions* -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-ChildItem -Path $savesDir -Filter "tabcoop_m23_test*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
     foreach ($logName in @("TABCoopMod.mf23_host.log", "TABCoopMod.mf23_client.log")) {
         $p = Join-Path $GameDir $logName

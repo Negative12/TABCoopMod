@@ -251,6 +251,10 @@ namespace TABCoopMod.Sync
             public string Summary;
             public List<OwnedUnitPosSample> OwnedUnits;
             public long SyncedIdCounter;
+            public bool HasFullDetail = true;
+            public bool DetailRequested;
+            public double DetailRequestedAtMs;
+            public ulong DetailMixHash;
         }
 
         private struct UnitOwnershipEntry
@@ -437,10 +441,148 @@ namespace TABCoopMod.Sync
         private static readonly Dictionary<int, PosSyncReceiveBuffer> _posSyncIncoming =
             new Dictionary<int, PosSyncReceiveBuffer>();
 
+        private const byte SessionStartProtoFlag_CompactBinary = 1 << 0;
+        private static bool _useCompactWireProtocol;
+        private static PointF _lastSentCursorWorldPos = new PointF(-9999f, -9999f);
+        private static RectangleF _lastSentCamArea = RectangleF.Empty;
+        private static double _lastCursorCamPacketMs = -100000.0;
+
+        private sealed class ClientEpochDetailEntry
+        {
+            public StateHasher.LevelStateSnapshotDigest Digest;
+            public List<OwnedUnitPosSample> OwnedUnits;
+        }
+
+        private struct DriftBaselineEntry
+        {
+            public float X;
+            public float Y;
+            public int Life;
+        }
+
+        private sealed class HostPendingBaseline
+        {
+            public byte PeerId;
+            public int Tick;
+            public int Seq;
+            public Dictionary<ulong, DriftBaselineEntry> Samples;
+        }
+
+        private static readonly Dictionary<int, ClientEpochDetailEntry> _clientEpochDetails = new Dictionary<int, ClientEpochDetailEntry>();
+        private static readonly Queue<int> _clientEpochDetailOrder = new Queue<int>();
+        private static readonly object _driftBaselineLock = new object();
+        private static readonly Dictionary<byte, (int Seq, Dictionary<ulong, DriftBaselineEntry> Samples)> _hostAckedBaselineByPeer =
+            new Dictionary<byte, (int, Dictionary<ulong, DriftBaselineEntry>)>();
+        private static readonly Dictionary<int, HostPendingBaseline> _hostPendingBaselinesBySeq =
+            new Dictionary<int, HostPendingBaseline>();
+        private static int _clientPrevDriftSeq;
+        private static Dictionary<ulong, StateHasher.EntityPosSample> _clientPrevDriftSamples;
+
+        private static ushort QuantizeCursorCoord(float value)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value)) return 0;
+            int scaled = (int)Math.Round((value + 128.0) * 32.0, MidpointRounding.ToEven);
+            if (scaled < 0) return 0;
+            if (scaled > 65535) return 65535;
+            return (ushort)scaled;
+        }
+
+        private static float DequantizeCursorCoord(ushort q)
+        {
+            return (q / 32.0f) - 128.0f;
+        }
+
+        private static string FormatDigestSummary(in StateHasher.LevelStateSnapshotDigest d)
+        {
+            return $"Pos={d.PosChecksum:X16} Coarse={d.CoarsePosChecksum:X16} Life={d.LifeChecksum:X16} " +
+                   $"Aggro={d.ZombieAggroChecksum:X16}({d.AggroZombieCount}) Proj={d.ProjectileChecksum:X16} " +
+                   $"Prod={d.ProductionChecksum:X16} Resv={d.ReservationChecksum:X16} " +
+                   $"(entities={d.EntityCount} proj={d.ProjectileCount} queued={d.QueuedOrderCount} " +
+                   $"res={d.Gold}/{d.Wood}/{d.Stone}/{d.Iron}/{d.Oil} time={d.GameTimeMs})";
+        }
+
+        private static ulong ComputeDetailMixHash(in StateHasher.LevelStateSnapshotDigest d, List<OwnedUnitPosSample> ownedUnits)
+        {
+            ulong h = 14695981039346656037UL;
+            h = (h ^ unchecked((ulong)d.ZombieAggroChecksum)) * 1099511628211UL;
+            h = (h ^ unchecked((ulong)d.ProjectileChecksum)) * 1099511628211UL;
+            h = (h ^ unchecked((ulong)d.ProductionChecksum)) * 1099511628211UL;
+            h = (h ^ unchecked((ulong)d.ReservationChecksum)) * 1099511628211UL;
+            h = (h ^ (uint)d.Gold) * 1099511628211UL;
+            h = (h ^ (uint)d.Wood) * 1099511628211UL;
+            h = (h ^ (uint)d.Stone) * 1099511628211UL;
+            h = (h ^ (uint)d.Iron) * 1099511628211UL;
+            h = (h ^ (uint)d.Oil) * 1099511628211UL;
+            if (d.PosBuckets != null)
+                for (int i = 0; i < d.PosBuckets.Length; i++) h = (h ^ d.PosBuckets[i]) * 1099511628211UL;
+            if (d.LifeBuckets != null)
+                for (int i = 0; i < d.LifeBuckets.Length; i++) h = (h ^ d.LifeBuckets[i]) * 1099511628211UL;
+            if (d.EntityBuckets != null)
+                for (int i = 0; i < d.EntityBuckets.Length; i++) h = (h ^ d.EntityBuckets[i]) * 1099511628211UL;
+            if (ownedUnits != null)
+                for (int i = 0; i < ownedUnits.Count; i++)
+                    h = (h ^ ownedUnits[i].Id) * 1099511628211UL;
+            return h;
+        }
+
+        private static bool TryPackPos5B(float x, float y, out ulong packed)
+        {
+            packed = 0;
+            if (float.IsNaN(x) || float.IsNaN(y) || x < -64f || y < -64f || x >= 959f || y >= 959f)
+                return false;
+            double sx = Math.Round((x + 64.0) * 256.0, MidpointRounding.ToEven);
+            double sy = Math.Round((y + 64.0) * 256.0, MidpointRounding.ToEven);
+            if (sx < 0 || sx > 262143.0 || sy < 0 || sy > 262143.0)
+                return false;
+            uint qx = (uint)sx;
+            uint qy = (uint)sy;
+            float rx = (qx / 256.0f) - 64.0f;
+            float ry = (qy / 256.0f) - 64.0f;
+            if (Math.Abs(rx - x) > 1e-4f || Math.Abs(ry - y) > 1e-4f)
+                return false;
+            packed = (ulong)qx | ((ulong)qy << 18);
+            return true;
+        }
+
+        private static void WritePacked5B(BinaryWriter w, ulong packed)
+        {
+            w.Write((byte)(packed & 0xFFUL));
+            w.Write((byte)((packed >> 8) & 0xFFUL));
+            w.Write((byte)((packed >> 16) & 0xFFUL));
+            w.Write((byte)((packed >> 24) & 0xFFUL));
+            w.Write((byte)((packed >> 32) & 0xFFUL));
+        }
+
+        private static void ReadPacked5B(BinaryReader r, out float x, out float y)
+        {
+            ulong b0 = r.ReadByte();
+            ulong b1 = r.ReadByte();
+            ulong b2 = r.ReadByte();
+            ulong b3 = r.ReadByte();
+            ulong b4 = r.ReadByte();
+            ulong packed = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32);
+            uint qx = (uint)(packed & 0x3FFFFUL);
+            uint qy = (uint)((packed >> 18) & 0x3FFFFUL);
+            x = (qx / 256.0f) - 64.0f;
+            y = (qy / 256.0f) - 64.0f;
+        }
+
         private static void ResetSyncTrackingState()
         {
             _asyncGeneration++;
             Interlocked.Exchange(ref _posSyncBuildInFlight, 0);
+            _lastSentCursorWorldPos = new PointF(-9999f, -9999f);
+            _lastSentCamArea = RectangleF.Empty;
+            _lastCursorCamPacketMs = -100000.0;
+            _clientEpochDetails.Clear();
+            _clientEpochDetailOrder.Clear();
+            lock (_driftBaselineLock)
+            {
+                _hostAckedBaselineByPeer.Clear();
+                _hostPendingBaselinesBySeq.Clear();
+                _clientPrevDriftSeq = 0;
+                _clientPrevDriftSamples = null;
+            }
             _lastCheckedSimTick = -1;
             _lastFullPosAlignSentTicks = -100000.0;
             _lastEntityPosCorrectedTick.Clear();
@@ -1360,12 +1502,14 @@ namespace TABCoopMod.Sync
 
             int startTick = DXGame.Current?.IAIterationInt ?? 0;
             long idCounter = LockstepClock.CurrentSyncedEntityIdCounter;
+            _useCompactWireProtocol = true;
             Transport.Broadcast(SendChannel.ReliableCommand, PacketType.SessionStart, w =>
             {
                 w.Write(startTick);
                 w.Write(CurrentSessionSeed);
                 w.Write(idCounter);
                 w.Write((byte)InputDelayTicks);
+                w.Write(SessionStartProtoFlag_CompactBinary);
             });
             ModLogger.InfoImmediate($"[CoopSessionManager] Host+Client barrier satisfied; entered synced level and sent SessionStart at tick={startTick}, seed={CurrentSessionSeed}, inputDelay={InputDelayTicks}!");
         }
@@ -2013,26 +2157,57 @@ namespace TABCoopMod.Sync
                     LockstepClock.RunInDeterministicContext(() => FlushDueTurnCommands(pausedTick));
             }
 
-            // 3. Broadcast Ally Cursor & Camera Viewport at 20Hz (every 50ms)
+            // 3. Broadcast Ally Cursor & Camera Viewport at 20Hz when moving, 4Hz heartbeat when idle
             double nowTicks = DXHelper_Environment.Ticks;
-            if (nowTicks - _lastCursorBroadcastTicks >= 50.0 && DXScene.Current != null)
+            if (nowTicks - _lastCursorCamPacketMs >= 50.0 && DXScene.Current != null)
             {
-                _lastCursorBroadcastTicks = nowTicks;
                 var camArea = DXScene.Current.CameraArea;
                 var mouseWorldPos = GetLocalMouseWorldPos();
+                bool movedEnough = Math.Abs(mouseWorldPos.X - _lastSentCursorWorldPos.X) >= 0.05f
+                    || Math.Abs(mouseWorldPos.Y - _lastSentCursorWorldPos.Y) >= 0.05f
+                    || Math.Abs(camArea.X - _lastSentCamArea.X) >= 0.05f
+                    || Math.Abs(camArea.Y - _lastSentCamArea.Y) >= 0.05f
+                    || Math.Abs(camArea.Width - _lastSentCamArea.Width) >= 0.05f
+                    || Math.Abs(camArea.Height - _lastSentCamArea.Height) >= 0.05f;
+                bool heartbeatDue = (nowTicks - _lastCursorCamPacketMs) >= 250.0 || nowTicks < _lastCursorCamPacketMs;
 
-                int broadcastTick = DXGame.Current?.IAIterationInt ?? 0;
-                Transport.Broadcast(SendChannel.UnreliableSequenced, PacketType.AllyCursorAndCamera, w =>
+                if (movedEnough || heartbeatDue)
                 {
-                    w.Write(Transport.LocalPlayerId);
-                    w.Write(mouseWorldPos.X);
-                    w.Write(mouseWorldPos.Y);
-                    w.Write(camArea.X);
-                    w.Write(camArea.Y);
-                    w.Write(camArea.Width);
-                    w.Write(camArea.Height);
-                    w.Write(broadcastTick);
-                });
+                    _lastCursorCamPacketMs = nowTicks;
+                    _lastCursorBroadcastTicks = nowTicks;
+                    _lastSentCursorWorldPos = mouseWorldPos;
+                    _lastSentCamArea = camArea;
+
+                    int broadcastTick = DXGame.Current?.IAIterationInt ?? 0;
+                    if (_useCompactWireProtocol)
+                    {
+                        Transport.Broadcast(SendChannel.UnreliableSequenced, PacketType.AllyCursorAndCamera, w =>
+                        {
+                            w.Write((byte)(Transport.LocalPlayerId | 0x80));
+                            w.Write(QuantizeCursorCoord(mouseWorldPos.X));
+                            w.Write(QuantizeCursorCoord(mouseWorldPos.Y));
+                            w.Write(QuantizeCursorCoord(camArea.X));
+                            w.Write(QuantizeCursorCoord(camArea.Y));
+                            w.Write(QuantizeCursorCoord(camArea.Width));
+                            w.Write(QuantizeCursorCoord(camArea.Height));
+                            NetCommand.WriteVarUInt32(w, (uint)Math.Max(0, broadcastTick));
+                        });
+                    }
+                    else
+                    {
+                        Transport.Broadcast(SendChannel.UnreliableSequenced, PacketType.AllyCursorAndCamera, w =>
+                        {
+                            w.Write(Transport.LocalPlayerId);
+                            w.Write(mouseWorldPos.X);
+                            w.Write(mouseWorldPos.Y);
+                            w.Write(camArea.X);
+                            w.Write(camArea.Y);
+                            w.Write(camArea.Width);
+                            w.Write(camArea.Height);
+                            w.Write(broadcastTick);
+                        });
+                    }
+                }
             }
 
             // 4. Initial StateHash baseline on session entry (per-tick epoch steps are driven
@@ -2425,7 +2600,9 @@ namespace TABCoopMod.Sync
         internal static void GetHostPaceAdjustment(out double paceMultiplier, out int maxTicks)
         {
             paceMultiplier = 1.0;
-            maxTicks = 3;
+            double gameSpeed = DXGame.Current?.GameSpeed ?? 1.0;
+            int speedCeil = gameSpeed > 1.05 ? Math.Max(2, (int)Math.Ceiling(gameSpeed)) : 1;
+            maxTicks = speedCeil > 1 ? Math.Min(16, speedCeil + 2) : 3;
 
             if (!IsSessionActive || !IsInSyncedLevel || Transport == null || !Transport.IsHost)
                 return;
@@ -2452,18 +2629,24 @@ namespace TABCoopMod.Sync
                 return;
             }
 
-            if (maxLagTicks >= HostBackpressureHoldLagTicks)
+            // At elevated GameSpeed (>1x fast-forward), one render frame spans multiple sim ticks so RTT +
+            // inputDelay produce larger transient tick deltas without indicating Client overload.
+            int slowLag = speedCeil > 1 ? Math.Max(HostBackpressureSlowLagTicks, speedCeil * 2) : HostBackpressureSlowLagTicks;
+            int midLag = speedCeil > 1 ? Math.Max(6, speedCeil * 3) : 6;
+            int holdLag = speedCeil > 1 ? Math.Max(HostBackpressureHoldLagTicks, speedCeil * 4) : HostBackpressureHoldLagTicks;
+
+            if (maxLagTicks >= holdLag)
             {
                 maxTicks = 0;
             }
-            else if (maxLagTicks >= 6)
+            else if (maxLagTicks >= midLag)
             {
-                maxTicks = 1;
+                maxTicks = speedCeil > 1 ? Math.Max(1, speedCeil / 3) : 1;
                 paceMultiplier = 1.38;
             }
-            else if (maxLagTicks >= HostBackpressureSlowLagTicks)
+            else if (maxLagTicks >= slowLag)
             {
-                maxTicks = 2;
+                maxTicks = speedCeil > 1 ? Math.Max(2, (speedCeil * 2) / 3) : 2;
                 paceMultiplier = 1.15;
             }
         }
@@ -2565,25 +2748,26 @@ namespace TABCoopMod.Sync
 
             CacheTickPositions(digest.SimTick, dynamicPositions, in digest, prodQueues);
 
-            string digestSummary =
-                $"Pos={digest.PosChecksum:X16} Coarse={digest.CoarsePosChecksum:X16} Life={digest.LifeChecksum:X16} " +
-                $"Aggro={digest.ZombieAggroChecksum:X16}({digest.AggroZombieCount}) Proj={digest.ProjectileChecksum:X16} " +
-                $"Prod={digest.ProductionChecksum:X16} Resv={digest.ReservationChecksum:X16} " +
-                $"(entities={digest.EntityCount} proj={digest.ProjectileCount} queued={digest.QueuedOrderCount} " +
-                $"res={digest.Gold}/{digest.Wood}/{digest.Stone}/{digest.Iron}/{digest.Oil} time={digest.GameTimeMs})";
-
             long idCounter = LockstepClock.CurrentSyncedEntityIdCounter;
             if (Transport.IsHost)
             {
-                _hostTickDigests[digest.SimTick] = new TickDigestRecord { Digest = digest, Summary = digestSummary, SyncedIdCounter = idCounter };
+                _hostTickDigests[digest.SimTick] = new TickDigestRecord { Digest = digest, Summary = null, SyncedIdCounter = idCounter, HasFullDetail = true };
                 VerifyTickChecksum(digest.SimTick);
             }
             else
             {
                 List<OwnedUnitPosSample> ownedUnits = CollectClientOwnedActiveUnits(digest.SimTick, dynamicPositions);
+                _clientEpochDetails[digest.SimTick] = new ClientEpochDetailEntry { Digest = digest, OwnedUnits = ownedUnits };
+                _clientEpochDetailOrder.Enqueue(digest.SimTick);
+                while (_clientEpochDetailOrder.Count > 8)
+                    _clientEpochDetails.Remove(_clientEpochDetailOrder.Dequeue());
+
                 Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.StateChecksumReport, w =>
                 {
-                    WriteDigestReport(w, in digest, digestSummary, ownedUnits, idCounter);
+                    if (_useCompactWireProtocol)
+                        WriteStage1DigestReport(w, in digest, ownedUnits, idCounter);
+                    else
+                        WriteDigestReport(w, in digest, FormatDigestSummary(in digest), ownedUnits, idCounter);
                 });
             }
         }
@@ -2765,10 +2949,12 @@ namespace TABCoopMod.Sync
                     int seed = r.ReadInt32();
                     long idCounter = r.ReadInt64();
                     byte hostDelay = r.BaseStream.Position < r.BaseStream.Length ? r.ReadByte() : (byte)MinInputDelayTicks;
+                    byte protoFlags = r.BaseStream.Position < r.BaseStream.Length ? r.ReadByte() : (byte)0;
                     ResetSyncTrackingState();
+                    _useCompactWireProtocol = (protoFlags & SessionStartProtoFlag_CompactBinary) != 0;
                     InputDelayTicks = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, (int)hostDelay));
                     EnterSyncedLevel();
-                    ModLogger.InfoImmediate($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, inputDelay={InputDelayTicks}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
+                    ModLogger.InfoImmediate($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, inputDelay={InputDelayTicks}, compact={_useCompactWireProtocol}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
                     break;
                 }
 
@@ -2887,7 +3073,7 @@ namespace TABCoopMod.Sync
                 case PacketType.StateChecksumReport:
                 {
                     if (!Transport.IsHost) break;
-                    TickDigestRecord rec = ReadDigestReport(r);
+                    TickDigestRecord rec = _useCompactWireProtocol ? ReadStage1DigestReport(r) : ReadDigestReport(r);
                     int clientTick = rec.Digest.SimTick;
                     UpdatePeerSimTick(senderId, clientTick);
                     if (!_clientTickDigests.TryGetValue(clientTick, out var byPeer))
@@ -2907,6 +3093,26 @@ namespace TABCoopMod.Sync
                     break;
                 }
 
+                case PacketType.StateChecksumDetailRequest:
+                {
+                    if (Transport.IsHost) break;
+                    int reqTick = r.ReadInt32();
+                    _clientEpochDetails.TryGetValue(reqTick, out var entry);
+                    Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.StateChecksumDetailResponse, w =>
+                    {
+                        WriteStage2DetailResponse(w, reqTick, entry);
+                    });
+                    break;
+                }
+
+                case PacketType.StateChecksumDetailResponse:
+                {
+                    if (!Transport.IsHost) break;
+                    MergeStage2DetailResponse(r, out int mergedTick, senderId);
+                    VerifyTickChecksum(mergedTick);
+                    break;
+                }
+
                 case PacketType.PosDriftSyncChunk:
                 {
                     if (Transport.IsHost) break;
@@ -2918,6 +3124,23 @@ namespace TABCoopMod.Sync
                 {
                     if (!Transport.IsHost) break;
                     int pTick = r.ReadInt32();
+                    lock (_driftBaselineLock)
+                    {
+                        int ackSeq = 0;
+                        foreach (var kvp in _hostPendingBaselinesBySeq)
+                        {
+                            if (kvp.Value.PeerId == senderId && kvp.Value.Tick == pTick && kvp.Value.Seq > ackSeq)
+                                ackSeq = kvp.Value.Seq;
+                        }
+                        if (ackSeq > 0 && _hostPendingBaselinesBySeq.TryGetValue(ackSeq, out var confirmed))
+                        {
+                            _hostAckedBaselineByPeer[senderId] = (confirmed.Seq, confirmed.Samples);
+                            var rm = new List<int>();
+                            foreach (var k in _hostPendingBaselinesBySeq.Keys)
+                                if (_hostPendingBaselinesBySeq[k].PeerId == senderId && k <= ackSeq) rm.Add(k);
+                            for (int ri = 0; ri < rm.Count; ri++) _hostPendingBaselinesBySeq.Remove(rm[ri]);
+                        }
+                    }
                     bool wasApplied = r.ReadBoolean();
                     int appliedCount = r.ReadInt32();
                     int comparedCount = r.ReadInt32();
@@ -2997,36 +3220,77 @@ namespace TABCoopMod.Sync
 
                 case PacketType.AllyCursorAndCamera:
                 {
-                    byte pid = r.ReadByte();
+                    byte hdr = r.ReadByte();
+                    bool isCompact = (hdr & 0x80) != 0;
+                    byte pid = (byte)(hdr & 0x7F);
                     if (pid == Transport.LocalPlayerId) break;
+
+                    PointF mouseWorld;
+                    RectangleF camWorld;
+                    int peerTick = 0;
+                    bool hasPeerTick = false;
+                    if (isCompact)
+                    {
+                        mouseWorld = new PointF(DequantizeCursorCoord(r.ReadUInt16()), DequantizeCursorCoord(r.ReadUInt16()));
+                        camWorld = new RectangleF(
+                            DequantizeCursorCoord(r.ReadUInt16()),
+                            DequantizeCursorCoord(r.ReadUInt16()),
+                            DequantizeCursorCoord(r.ReadUInt16()),
+                            DequantizeCursorCoord(r.ReadUInt16()));
+                        if (r.BaseStream.Position < r.BaseStream.Length)
+                        {
+                            peerTick = (int)NetCommand.ReadVarUInt32(r);
+                            hasPeerTick = true;
+                        }
+                    }
+                    else
+                    {
+                        mouseWorld = new PointF(r.ReadSingle(), r.ReadSingle());
+                        camWorld = new RectangleF(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                        if (r.BaseStream.Position + 4 <= r.BaseStream.Length)
+                        {
+                            peerTick = r.ReadInt32();
+                            hasPeerTick = true;
+                        }
+                    }
 
                     var state = new AllyVisualState
                     {
                         PlayerId = pid,
-                        MouseWorldPosition = new PointF(r.ReadSingle(), r.ReadSingle()),
-                        CameraWorldArea = new RectangleF(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
+                        MouseWorldPosition = mouseWorld,
+                        CameraWorldArea = camWorld,
                         LastUpdatedUtc = DateTime.UtcNow
                     };
                     AllyStates[pid] = state;
 
-                    if (Transport.IsHost && r.BaseStream.Position + 4 <= r.BaseStream.Length)
-                    {
-                        int peerTick = r.ReadInt32();
+                    if (Transport.IsHost && hasPeerTick)
                         UpdatePeerSimTick(senderId, peerTick);
-                    }
 
                     // If Host, relay to other clients in 3-player session
                     if (Transport.IsHost && Transport.ConnectedPeers.Count > 2)
                     {
                         Transport.Broadcast(SendChannel.UnreliableSequenced, PacketType.AllyCursorAndCamera, w =>
                         {
-                            w.Write(state.PlayerId);
-                            w.Write(state.MouseWorldPosition.X);
-                            w.Write(state.MouseWorldPosition.Y);
-                            w.Write(state.CameraWorldArea.X);
-                            w.Write(state.CameraWorldArea.Y);
-                            w.Write(state.CameraWorldArea.Width);
-                            w.Write(state.CameraWorldArea.Height);
+                            if (_useCompactWireProtocol)
+                            {
+                                w.Write((byte)(state.PlayerId | 0x80));
+                                w.Write(QuantizeCursorCoord(state.MouseWorldPosition.X));
+                                w.Write(QuantizeCursorCoord(state.MouseWorldPosition.Y));
+                                w.Write(QuantizeCursorCoord(state.CameraWorldArea.X));
+                                w.Write(QuantizeCursorCoord(state.CameraWorldArea.Y));
+                                w.Write(QuantizeCursorCoord(state.CameraWorldArea.Width));
+                                w.Write(QuantizeCursorCoord(state.CameraWorldArea.Height));
+                            }
+                            else
+                            {
+                                w.Write(state.PlayerId);
+                                w.Write(state.MouseWorldPosition.X);
+                                w.Write(state.MouseWorldPosition.Y);
+                                w.Write(state.CameraWorldArea.X);
+                                w.Write(state.CameraWorldArea.Y);
+                                w.Write(state.CameraWorldArea.Width);
+                                w.Write(state.CameraWorldArea.Height);
+                            }
                         });
                     }
                     break;
@@ -3138,6 +3402,147 @@ namespace TABCoopMod.Sync
                 _tickEconCache.Remove(old);
                 _tickProdCache.Remove(old);
             }
+        }
+
+        private static void WriteStage1DigestReport(BinaryWriter w, in StateHasher.LevelStateSnapshotDigest d, List<OwnedUnitPosSample> ownedUnits, long idCounter)
+        {
+            NetCommand.WriteVarUInt32(w, (uint)Math.Max(0, d.SimTick));
+            NetCommand.WriteVarUInt32(w, (uint)Math.Max(0, d.GameTimeMs));
+            NetCommand.WriteVarUInt32(w, (uint)Math.Max(0, d.EntityCount));
+            NetCommand.WriteVarUInt32(w, (uint)Math.Max(0, d.AggroZombieCount));
+            NetCommand.WriteVarUInt32(w, (uint)Math.Max(0, d.ProjectileCount));
+            NetCommand.WriteVarUInt32(w, (uint)Math.Max(0, d.QueuedOrderCount));
+            w.Write(d.FullHash);
+            w.Write(d.HardHash);
+            w.Write(d.PosChecksum);
+            w.Write(d.LifeChecksum);
+            w.Write(d.CoarsePosChecksum);
+            w.Write(ComputeDetailMixHash(in d, ownedUnits));
+            w.Write(idCounter);
+        }
+
+        private static TickDigestRecord ReadStage1DigestReport(BinaryReader r)
+        {
+            var d = new StateHasher.LevelStateSnapshotDigest
+            {
+                SimTick = (int)NetCommand.ReadVarUInt32(r),
+                GameTimeMs = (int)NetCommand.ReadVarUInt32(r),
+                EntityCount = (int)NetCommand.ReadVarUInt32(r),
+                AggroZombieCount = (int)NetCommand.ReadVarUInt32(r),
+                ProjectileCount = (int)NetCommand.ReadVarUInt32(r),
+                QueuedOrderCount = (int)NetCommand.ReadVarUInt32(r),
+                FullHash = r.ReadUInt64(),
+                HardHash = r.ReadUInt64(),
+                PosChecksum = r.ReadInt64(),
+                LifeChecksum = r.ReadInt64(),
+                CoarsePosChecksum = r.ReadInt64(),
+            };
+            ulong detailMix = r.ReadUInt64();
+            long idCounter = r.ReadInt64();
+            return new TickDigestRecord
+            {
+                Digest = d,
+                Summary = null,
+                OwnedUnits = null,
+                SyncedIdCounter = idCounter,
+                HasFullDetail = false,
+                DetailMixHash = detailMix
+            };
+        }
+
+        private static void WriteStage2DetailResponse(BinaryWriter w, int tick, ClientEpochDetailEntry entry)
+        {
+            w.Write(tick);
+            bool found = entry != null;
+            w.Write(found);
+            if (!found) return;
+
+            var d = entry.Digest;
+            NetCommand.WriteZigZagVarInt32(w, d.Gold);
+            NetCommand.WriteZigZagVarInt32(w, d.Wood);
+            NetCommand.WriteZigZagVarInt32(w, d.Stone);
+            NetCommand.WriteZigZagVarInt32(w, d.Iron);
+            NetCommand.WriteZigZagVarInt32(w, d.Oil);
+            w.Write(d.ZombieAggroChecksum);
+            w.Write(d.ProjectileChecksum);
+            w.Write(d.ProductionChecksum);
+            w.Write(d.ReservationChecksum);
+
+            WriteBucketArray(w, d.PosBuckets);
+            WriteBucketArray(w, d.LifeBuckets);
+            WriteBucketArray(w, d.EntityBuckets);
+
+            var owned = entry.OwnedUnits;
+            int ownedCount = owned != null ? Math.Min(owned.Count, MaxReverseAlignUnitsPerReport) : 0;
+            w.Write((ushort)ownedCount);
+            for (int i = 0; i < ownedCount; i++)
+            {
+                w.Write(owned[i].Id);
+                w.Write(owned[i].X);
+                w.Write(owned[i].Y);
+            }
+        }
+
+        private static void WriteBucketArray(BinaryWriter w, ulong[] arr)
+        {
+            int len = arr?.Length ?? 0;
+            w.Write((ushort)len);
+            for (int i = 0; i < len; i++)
+                w.Write(arr[i]);
+        }
+
+        private static void MergeStage2DetailResponse(BinaryReader r, out int tick, byte senderId)
+        {
+            tick = r.ReadInt32();
+            bool found = r.ReadBoolean();
+            if (!_clientTickDigests.TryGetValue(tick, out var byPeer) || !byPeer.TryGetValue(senderId, out var rec))
+                return;
+
+            if (found)
+            {
+                rec.Digest.Gold = NetCommand.ReadZigZagVarInt32(r);
+                rec.Digest.Wood = NetCommand.ReadZigZagVarInt32(r);
+                rec.Digest.Stone = NetCommand.ReadZigZagVarInt32(r);
+                rec.Digest.Iron = NetCommand.ReadZigZagVarInt32(r);
+                rec.Digest.Oil = NetCommand.ReadZigZagVarInt32(r);
+                rec.Digest.ZombieAggroChecksum = r.ReadInt64();
+                rec.Digest.ProjectileChecksum = r.ReadInt64();
+                rec.Digest.ProductionChecksum = r.ReadInt64();
+                rec.Digest.ReservationChecksum = r.ReadInt64();
+                rec.Digest.PosBuckets = ReadBucketArray(r);
+                rec.Digest.LifeBuckets = ReadBucketArray(r);
+                rec.Digest.EntityBuckets = ReadBucketArray(r);
+
+                if (r.BaseStream.Position + 2 <= r.BaseStream.Length)
+                {
+                    ushort ownedCount = r.ReadUInt16();
+                    if (ownedCount > 0 && r.BaseStream.Position + ownedCount * 16L <= r.BaseStream.Length)
+                    {
+                        var ownedUnits = new List<OwnedUnitPosSample>(ownedCount);
+                        for (int i = 0; i < ownedCount; i++)
+                        {
+                            ownedUnits.Add(new OwnedUnitPosSample
+                            {
+                                Id = r.ReadUInt64(),
+                                X = r.ReadSingle(),
+                                Y = r.ReadSingle()
+                            });
+                        }
+                        rec.OwnedUnits = ownedUnits;
+                        if (EnableAsyncPosAlign)
+                        {
+                            _incomingReverseAlignQueue.Enqueue(new PendingReverseAlignApply
+                            {
+                                Generation = _asyncGeneration,
+                                SenderPlayerId = senderId,
+                                Tick = tick,
+                                Units = ownedUnits
+                            });
+                        }
+                    }
+                }
+            }
+            rec.HasFullDetail = true;
         }
 
         private static void WriteDigestReport(BinaryWriter w, in StateHasher.LevelStateSnapshotDigest d, string summary, List<OwnedUnitPosSample> ownedUnits = null, long idCounter = 0L)
@@ -3297,19 +3702,17 @@ namespace TABCoopMod.Sync
             if (!_clientTickDigests.TryGetValue(tick, out var byPeer) || byPeer.Count == 0) return;
 
             var host = hostRec.Digest;
-            string hostSummary = hostRec.Summary;
             var resolvedPeers = new List<byte>();
 
             foreach (var kv in byPeer)
             {
                 byte senderId = kv.Key;
                 var client = kv.Value.Digest;
-                string clientSummary = kv.Value.Summary;
-                resolvedPeers.Add(senderId);
-                _verifiedChecksumCycles++;
 
                 if (host.FullHash == client.FullHash)
                 {
+                    resolvedPeers.Add(senderId);
+                    _verifiedChecksumCycles++;
                     _consecutiveProjOnlyMismatch = 0;
                     _consecutiveHardMismatch = 0;
                     _consecutivePosExceeded = 0;
@@ -3330,6 +3733,27 @@ namespace TABCoopMod.Sync
                     }
                     continue;
                 }
+
+                // Stage 2 pull: if compact Stage 1 detected a hash difference and buckets/res detail
+                // have not yet arrived, request full diagnostic + bucket payload before running triage.
+                if (!kv.Value.HasFullDetail)
+                {
+                    double nowReq = DXHelper_Environment.Ticks;
+                    if (!kv.Value.DetailRequested)
+                    {
+                        kv.Value.DetailRequested = true;
+                        kv.Value.DetailRequestedAtMs = nowReq;
+                        Transport.SendToPeer(senderId, SendChannel.ReliableCommand, PacketType.StateChecksumDetailRequest, w => w.Write(tick));
+                        continue;
+                    }
+                    if (nowReq >= kv.Value.DetailRequestedAtMs && (nowReq - kv.Value.DetailRequestedAtMs) < 3000.0)
+                        continue;
+                }
+
+                resolvedPeers.Add(senderId);
+                _verifiedChecksumCycles++;
+                string hostSummary = hostRec.Summary ?? FormatDigestSummary(in host);
+                string clientSummary = kv.Value.Summary ?? FormatDigestSummary(in client);
 
                 if (hostRec.SyncedIdCounter != 0L && kv.Value.SyncedIdCounter != 0L
                     && hostRec.SyncedIdCounter != kv.Value.SyncedIdCounter)
@@ -4029,9 +4453,9 @@ namespace TABCoopMod.Sync
                 return;
             }
 
-            List<StructSampleMeta> structMetas = null;
-            List<DynamicTargetSample> targetMetas = null;
-            List<DynamicSpawnMeta> spawnMetas = null;
+            Dictionary<ulong, StructSampleMeta> structMetaMap = null;
+            Dictionary<ulong, DynamicTargetSample> targetMetaMap = null;
+            Dictionary<ulong, DynamicSpawnMeta> spawnMetaMap = null;
             if (includeStructMeta || includeTargetMeta || includeSpawnMeta)
             {
                 var game = DXGame.Current;
@@ -4047,8 +4471,8 @@ namespace TABCoopMod.Sync
                         {
                             if (GameBridge.TryCaptureStructureMeta(ent, out ulong tplId, out int cx, out int cy, out byte w, out byte h, out float bf))
                             {
-                                if (structMetas == null) structMetas = new List<StructSampleMeta>(32);
-                                structMetas.Add(new StructSampleMeta
+                                if (structMetaMap == null) structMetaMap = new Dictionary<ulong, StructSampleMeta>(32);
+                                structMetaMap[s.Id] = new StructSampleMeta
                                 {
                                     Id = s.Id,
                                     TemplateId = tplId,
@@ -4059,7 +4483,7 @@ namespace TABCoopMod.Sync
                                     Life = s.Life,
                                     BuildFactor = bf,
                                     OwnerPlayerId = IsMultiFactionActive ? FactionOwnershipTracker.GetOwner(s.Id) : (byte)0
-                                });
+                                };
                             }
                         }
 
@@ -4068,14 +4492,14 @@ namespace TABCoopMod.Sync
                             GameBridge.GetEntityCombatAndMoveTargets(ent, out ulong tgtId, out float mx, out float my);
                             if (tgtId != 0 || !float.IsNaN(mx) || !GameBridge.IsZombieType(ent.GetType()))
                             {
-                                if (targetMetas == null) targetMetas = new List<DynamicTargetSample>(64);
-                                targetMetas.Add(new DynamicTargetSample
+                                if (targetMetaMap == null) targetMetaMap = new Dictionary<ulong, DynamicTargetSample>(64);
+                                targetMetaMap[s.Id] = new DynamicTargetSample
                                 {
                                     Id = s.Id,
                                     TargetEntityId = tgtId,
                                     MoveX = mx,
                                     MoveY = my
-                                });
+                                };
                             }
                         }
 
@@ -4083,24 +4507,24 @@ namespace TABCoopMod.Sync
                         {
                             if (GameBridge.TryCaptureDynamicSpawnMeta(ent, out ulong dTplId, out byte teamRaw, out ulong dTgtId))
                             {
-                                if (spawnMetas == null) spawnMetas = new List<DynamicSpawnMeta>(64);
-                                spawnMetas.Add(new DynamicSpawnMeta
+                                if (spawnMetaMap == null) spawnMetaMap = new Dictionary<ulong, DynamicSpawnMeta>(64);
+                                spawnMetaMap[s.Id] = new DynamicSpawnMeta
                                 {
                                     Id = s.Id,
                                     TemplateId = dTplId,
                                     TeamRaw = teamRaw,
                                     TargetEntityId = dTgtId,
                                     OwnerPlayerId = IsMultiFactionActive ? FactionOwnershipTracker.GetOwner(s.Id) : (byte)0
-                                });
+                                };
                             }
                         }
                     }
                 }
             }
 
-            bool hasStructMeta = includeStructMeta && structMetas != null && structMetas.Count > 0;
-            bool hasTargetMeta = includeTargetMeta && targetMetas != null && targetMetas.Count > 0;
-            bool hasSpawnMeta = includeSpawnMeta && spawnMetas != null && spawnMetas.Count > 0;
+            bool hasStructMeta = includeStructMeta && structMetaMap != null && structMetaMap.Count > 0;
+            bool hasTargetMeta = includeTargetMeta && targetMetaMap != null && targetMetaMap.Count > 0;
+            bool hasSpawnMeta = includeSpawnMeta && spawnMetaMap != null && spawnMetaMap.Count > 0;
 
             ushort sentMask = effectiveMask;
             byte flags = (byte)(
@@ -4112,6 +4536,7 @@ namespace TABCoopMod.Sync
                 | (hasStructMeta ? 32 : 0)
                 | (hasTargetMeta ? 64 : 0)
                 | (hasSpawnMeta ? 128 : 0));
+            bool useCompactV2 = _useCompactWireProtocol;
             int seq = ++_posSyncSeq;
             Task.Run(() =>
             {
@@ -4120,94 +4545,240 @@ namespace TABCoopMod.Sync
                     if (gen != _asyncGeneration) return;
 
                     byte[] compressed;
-                    int estCap = filtered.Count * 20 + 64
-                        + (hasStructMeta ? structMetas.Count * 32 : 0)
-                        + (hasTargetMeta ? targetMetas.Count * 24 : 0)
-                        + (hasSpawnMeta ? spawnMetas.Count * 25 : 0);
-                    using (var rawMs = new MemoryStream(estCap))
-                    using (var bw = new BinaryWriter(rawMs))
+                    if (useCompactV2)
                     {
-                        bw.Write(sentMask);
-                        bw.Write(flags);
-                        bw.Write(filtered.Count);
-                        for (int i = 0; i < filtered.Count; i++)
+                        filtered.Sort((a, b) => a.Id.CompareTo(b.Id));
+                        int baselineSeq = 0;
+                        Dictionary<ulong, DriftBaselineEntry> baselineSamples = null;
+                        lock (_driftBaselineLock)
                         {
-                            bw.Write(filtered[i].Id);
-                            bw.Write(filtered[i].X);
-                            bw.Write(filtered[i].Y);
-                            bw.Write(filtered[i].Life);
-                        }
-                        if (hasEcon)
-                        {
-                            bw.Write(econSnap.Gold);
-                            bw.Write(econSnap.Wood);
-                            bw.Write(econSnap.Stone);
-                            bw.Write(econSnap.Iron);
-                            bw.Write(econSnap.Oil);
-                        }
-                        if (hasProd)
-                        {
-                            int pCount = prodSnap != null ? prodSnap.Length : 0;
-                            bw.Write(pCount);
-                            for (int i = 0; i < pCount; i++)
+                            if (_hostAckedBaselineByPeer.TryGetValue(targetPlayerId, out var acked) && acked.Seq > 0 && acked.Samples != null)
                             {
-                                var pq = prodSnap[i];
-                                bw.Write(pq.EntityId);
-                                int len = pq.CommandIds != null ? Math.Min(255, pq.CommandIds.Length) : 0;
-                                bw.Write((byte)len);
-                                for (int j = 0; j < len; j++)
-                                    bw.Write(pq.CommandIds[j]);
+                                baselineSeq = acked.Seq;
+                                baselineSamples = acked.Samples;
                             }
                         }
-                        if (hasStructMeta)
+                        var nextBaseline = new Dictionary<ulong, DriftBaselineEntry>(filtered.Count);
+
+                        int estCap = filtered.Count * 10 + 128
+                            + (hasStructMeta ? structMetaMap.Count * 24 : 0)
+                            + (hasTargetMeta ? targetMetaMap.Count * 16 : 0)
+                            + (hasSpawnMeta ? spawnMetaMap.Count * 18 : 0);
+                        using (var rawMs = new MemoryStream(estCap))
+                        using (var bw = new BinaryWriter(rawMs))
                         {
-                            bw.Write(structMetas.Count);
-                            for (int i = 0; i < structMetas.Count; i++)
+                            bw.Write((ushort)0x0000); // v2 compact sentinel (sentMask is always non-zero)
+                            bw.Write((byte)2);
+                            bw.Write(sentMask);
+                            bw.Write(flags);
+                            bw.Write(seq);
+                            bw.Write(baselineSeq);
+                            NetCommand.WriteVarUInt32(bw, (uint)filtered.Count);
+
+                            ulong prevId = 0UL;
+                            for (int i = 0; i < filtered.Count; i++)
                             {
-                                var sm = structMetas[i];
-                                bw.Write(sm.Id);
-                                bw.Write(sm.TemplateId);
-                                bw.Write(sm.CellX);
-                                bw.Write(sm.CellY);
-                                bw.Write(sm.Width);
-                                bw.Write(sm.Height);
-                                bw.Write(sm.Life);
-                                bw.Write(sm.BuildFactor);
-                                bw.Write(sm.OwnerPlayerId);
+                                var fs = filtered[i];
+                                ulong id = fs.Id;
+                                NetCommand.WriteVarUInt64(bw, id - prevId);
+                                prevId = id;
+                                nextBaseline[id] = new DriftBaselineEntry { X = fs.X, Y = fs.Y, Life = fs.Life };
+
+                                DynamicTargetSample tm = default;
+                                StructSampleMeta sm = default;
+                                DynamicSpawnMeta dsm = default;
+                                bool hasT = hasTargetMeta && targetMetaMap.TryGetValue(id, out tm);
+                                bool hasS = hasStructMeta && structMetaMap.TryGetValue(id, out sm);
+                                bool hasD = hasSpawnMeta && spawnMetaMap.TryGetValue(id, out dsm);
+
+                                if (baselineSamples != null && !hasT && !hasS && !hasD
+                                    && baselineSamples.TryGetValue(id, out var prevS)
+                                    && prevS.Life == fs.Life
+                                    && Math.Abs(prevS.X - fs.X) < 0.002f
+                                    && Math.Abs(prevS.Y - fs.Y) < 0.002f)
+                                {
+                                    bw.Write((byte)0x01); // FlagUnchangedFromBaseline
+                                    continue;
+                                }
+
+                                ulong packedXY = 0UL;
+                                bool isPacked = TryPackPos5B(fs.X, fs.Y, out packedXY);
+                                byte eFlags = 0;
+                                if (fs.Life != 0) eFlags |= 0x02;
+                                eFlags |= isPacked ? (byte)0x04 : (byte)0x40;
+                                if (hasT) eFlags |= 0x08;
+                                if (hasS) eFlags |= 0x10;
+                                if (hasD) eFlags |= 0x20;
+                                bw.Write(eFlags);
+
+                                if ((eFlags & 0x02) != 0) NetCommand.WriteZigZagVarInt32(bw, fs.Life);
+                                if (isPacked)
+                                    WritePacked5B(bw, packedXY);
+                                else
+                                {
+                                    bw.Write(fs.X);
+                                    bw.Write(fs.Y);
+                                }
+
+                                if (hasT)
+                                {
+                                    bool hasMove = !float.IsNaN(tm.MoveX) && !float.IsNaN(tm.MoveY);
+                                    byte tf = (byte)((tm.TargetEntityId != 0UL ? 1 : 0) | (hasMove ? 2 : 0));
+                                    bw.Write(tf);
+                                    if ((tf & 1) != 0) bw.Write(tm.TargetEntityId);
+                                    if ((tf & 2) != 0) { bw.Write(tm.MoveX); bw.Write(tm.MoveY); }
+                                }
+                                if (hasS)
+                                {
+                                    bw.Write(sm.TemplateId);
+                                    NetCommand.WriteZigZagVarInt32(bw, sm.CellX);
+                                    NetCommand.WriteZigZagVarInt32(bw, sm.CellY);
+                                    bw.Write(sm.Width);
+                                    bw.Write(sm.Height);
+                                    bw.Write(sm.BuildFactor);
+                                    bw.Write(sm.OwnerPlayerId);
+                                }
+                                if (hasD)
+                                {
+                                    bw.Write(dsm.TemplateId);
+                                    bw.Write(dsm.TeamRaw);
+                                    bw.Write(dsm.TargetEntityId);
+                                    bw.Write(dsm.OwnerPlayerId);
+                                }
+                            }
+
+                            if (hasEcon)
+                            {
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.Gold);
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.Wood);
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.Stone);
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.Iron);
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.Oil);
+                            }
+                            if (hasProd)
+                            {
+                                int pCount = prodSnap != null ? prodSnap.Length : 0;
+                                NetCommand.WriteVarUInt32(bw, (uint)pCount);
+                                for (int i = 0; i < pCount; i++)
+                                {
+                                    var pq = prodSnap[i];
+                                    bw.Write(pq.EntityId);
+                                    int len = pq.CommandIds != null ? Math.Min(255, pq.CommandIds.Length) : 0;
+                                    bw.Write((byte)len);
+                                    for (int j = 0; j < len; j++)
+                                        NetCommand.WriteZigZagVarInt32(bw, pq.CommandIds[j]);
+                                }
+                            }
+                            bw.Flush();
+                            byte[] rawBytes = rawMs.ToArray();
+                            using (var outMs = new MemoryStream(Math.Max(64, rawBytes.Length / 3)))
+                            {
+                                using (var ds = new DeflateStream(outMs, CompressionLevel.Fastest, leaveOpen: true))
+                                    ds.Write(rawBytes, 0, rawBytes.Length);
+                                compressed = outMs.ToArray();
                             }
                         }
-                        if (hasTargetMeta)
+
+                        if (gen != _asyncGeneration) return;
+                        lock (_driftBaselineLock)
                         {
-                            bw.Write(targetMetas.Count);
-                            for (int i = 0; i < targetMetas.Count; i++)
+                            _hostPendingBaselinesBySeq[seq] = new HostPendingBaseline
                             {
-                                var tm = targetMetas[i];
-                                bw.Write(tm.Id);
-                                bw.Write(tm.TargetEntityId);
-                                bw.Write(tm.MoveX);
-                                bw.Write(tm.MoveY);
-                            }
+                                PeerId = targetPlayerId,
+                                Tick = tick,
+                                Seq = seq,
+                                Samples = nextBaseline
+                            };
                         }
-                        if (hasSpawnMeta)
+                    }
+                    else
+                    {
+                        int estCap = filtered.Count * 20 + 64
+                            + (hasStructMeta ? structMetaMap.Count * 32 : 0)
+                            + (hasTargetMeta ? targetMetaMap.Count * 24 : 0)
+                            + (hasSpawnMeta ? spawnMetaMap.Count * 25 : 0);
+                        using (var rawMs = new MemoryStream(estCap))
+                        using (var bw = new BinaryWriter(rawMs))
                         {
-                            bw.Write(spawnMetas.Count);
-                            for (int i = 0; i < spawnMetas.Count; i++)
+                            bw.Write(sentMask);
+                            bw.Write(flags);
+                            bw.Write(filtered.Count);
+                            for (int i = 0; i < filtered.Count; i++)
                             {
-                                var dsm = spawnMetas[i];
-                                bw.Write(dsm.Id);
-                                bw.Write(dsm.TemplateId);
-                                bw.Write(dsm.TeamRaw);
-                                bw.Write(dsm.TargetEntityId);
-                                bw.Write(dsm.OwnerPlayerId);
+                                bw.Write(filtered[i].Id);
+                                bw.Write(filtered[i].X);
+                                bw.Write(filtered[i].Y);
+                                bw.Write(filtered[i].Life);
                             }
-                        }
-                        bw.Flush();
-                        byte[] rawBytes = rawMs.ToArray();
-                        using (var outMs = new MemoryStream(Math.Max(64, rawBytes.Length / 2)))
-                        {
-                            using (var ds = new DeflateStream(outMs, CompressionLevel.Fastest, leaveOpen: true))
-                                ds.Write(rawBytes, 0, rawBytes.Length);
-                            compressed = outMs.ToArray();
+                            if (hasEcon)
+                            {
+                                bw.Write(econSnap.Gold);
+                                bw.Write(econSnap.Wood);
+                                bw.Write(econSnap.Stone);
+                                bw.Write(econSnap.Iron);
+                                bw.Write(econSnap.Oil);
+                            }
+                            if (hasProd)
+                            {
+                                int pCount = prodSnap != null ? prodSnap.Length : 0;
+                                bw.Write(pCount);
+                                for (int i = 0; i < pCount; i++)
+                                {
+                                    var pq = prodSnap[i];
+                                    bw.Write(pq.EntityId);
+                                    int len = pq.CommandIds != null ? Math.Min(255, pq.CommandIds.Length) : 0;
+                                    bw.Write((byte)len);
+                                    for (int j = 0; j < len; j++)
+                                        bw.Write(pq.CommandIds[j]);
+                                }
+                            }
+                            if (hasStructMeta)
+                            {
+                                bw.Write(structMetaMap.Count);
+                                foreach (var sm in structMetaMap.Values)
+                                {
+                                    bw.Write(sm.Id);
+                                    bw.Write(sm.TemplateId);
+                                    bw.Write(sm.CellX);
+                                    bw.Write(sm.CellY);
+                                    bw.Write(sm.Width);
+                                    bw.Write(sm.Height);
+                                    bw.Write(sm.Life);
+                                    bw.Write(sm.BuildFactor);
+                                    bw.Write(sm.OwnerPlayerId);
+                                }
+                            }
+                            if (hasTargetMeta)
+                            {
+                                bw.Write(targetMetaMap.Count);
+                                foreach (var tm in targetMetaMap.Values)
+                                {
+                                    bw.Write(tm.Id);
+                                    bw.Write(tm.TargetEntityId);
+                                    bw.Write(tm.MoveX);
+                                    bw.Write(tm.MoveY);
+                                }
+                            }
+                            if (hasSpawnMeta)
+                            {
+                                bw.Write(spawnMetaMap.Count);
+                                foreach (var dsm in spawnMetaMap.Values)
+                                {
+                                    bw.Write(dsm.Id);
+                                    bw.Write(dsm.TemplateId);
+                                    bw.Write(dsm.TeamRaw);
+                                    bw.Write(dsm.TargetEntityId);
+                                    bw.Write(dsm.OwnerPlayerId);
+                                }
+                            }
+                            bw.Flush();
+                            byte[] rawBytes = rawMs.ToArray();
+                            using (var outMs = new MemoryStream(Math.Max(64, rawBytes.Length / 2)))
+                            {
+                                using (var ds = new DeflateStream(outMs, CompressionLevel.Fastest, leaveOpen: true))
+                                    ds.Write(rawBytes, 0, rawBytes.Length);
+                                compressed = outMs.ToArray();
+                            }
                         }
                     }
 
@@ -4332,103 +4903,242 @@ namespace TABCoopMod.Sync
                     using (var ds = new DeflateStream(inMs, CompressionMode.Decompress))
                     using (var br = new BinaryReader(ds))
                     {
-                        hostMask = br.ReadUInt16();
-                        byte flags = br.ReadByte();
-                        flagApplyLife = (flags & 1) != 0;
-                        flagApplyPos = (flags & 2) != 0;
-                        flagIncludeStatic = (flags & 4) != 0;
-                        flagHasEcon = (flags & 8) != 0;
-                        flagHasProd = (flags & 16) != 0;
-                        flagHasStructMeta = (flags & 32) != 0;
-                        flagHasTargetMeta = (flags & 64) != 0;
-                        flagHasSpawnMeta = (flags & 128) != 0;
-                        count = br.ReadInt32();
-                        hostSamples = new List<StateHasher.EntityPosSample>(count);
-                        for (int i = 0; i < count; i++)
+                        ushort firstU16 = br.ReadUInt16();
+                        if (firstU16 == 0)
                         {
-                            hostSamples.Add(new StateHasher.EntityPosSample
+                            byte ver = br.ReadByte();
+                            if (ver != 2) throw new InvalidDataException($"Unsupported PosDriftSync v{ver}");
+                            hostMask = br.ReadUInt16();
+                            byte flags = br.ReadByte();
+                            flagApplyLife = (flags & 1) != 0;
+                            flagApplyPos = (flags & 2) != 0;
+                            flagIncludeStatic = (flags & 4) != 0;
+                            flagHasEcon = (flags & 8) != 0;
+                            flagHasProd = (flags & 16) != 0;
+                            flagHasStructMeta = (flags & 32) != 0;
+                            flagHasTargetMeta = (flags & 64) != 0;
+                            flagHasSpawnMeta = (flags & 128) != 0;
+                            int chunkSeq = br.ReadInt32();
+                            int baselineSeq = br.ReadInt32();
+                            count = (int)NetCommand.ReadVarUInt32(br);
+
+                            Dictionary<ulong, StateHasher.EntityPosSample> prevBase = null;
+                            if (baselineSeq != 0)
                             {
-                                Id = br.ReadUInt64(),
-                                X = br.ReadSingle(),
-                                Y = br.ReadSingle(),
-                                Life = br.ReadInt32()
-                            });
-                        }
-                        if (flagHasEcon)
-                        {
-                            hostEcon = new EconSnapshot
-                            {
-                                Gold = br.ReadInt32(),
-                                Wood = br.ReadInt32(),
-                                Stone = br.ReadInt32(),
-                                Iron = br.ReadInt32(),
-                                Oil = br.ReadInt32()
-                            };
-                        }
-                        if (flagHasProd)
-                        {
-                            int pCount = br.ReadInt32();
-                            hostProds = new List<StateHasher.ProdQueueSample>(pCount);
-                            for (int i = 0; i < pCount; i++)
-                            {
-                                ulong eid = br.ReadUInt64();
-                                int len = br.ReadByte();
-                                var cmdIds = len > 0 ? new int[len] : Array.Empty<int>();
-                                for (int j = 0; j < len; j++)
-                                    cmdIds[j] = br.ReadInt32();
-                                hostProds.Add(new StateHasher.ProdQueueSample { EntityId = eid, CommandIds = cmdIds });
-                            }
-                        }
-                        if (flagHasStructMeta)
-                        {
-                            int sCount = br.ReadInt32();
-                            hostStructMetas = new List<StructSampleMeta>(sCount);
-                            for (int i = 0; i < sCount; i++)
-                            {
-                                hostStructMetas.Add(new StructSampleMeta
+                                lock (_driftBaselineLock)
                                 {
-                                    Id = br.ReadUInt64(),
-                                    TemplateId = br.ReadUInt64(),
-                                    CellX = br.ReadInt32(),
-                                    CellY = br.ReadInt32(),
-                                    Width = br.ReadByte(),
-                                    Height = br.ReadByte(),
-                                    Life = br.ReadInt32(),
-                                    BuildFactor = br.ReadSingle(),
-                                    OwnerPlayerId = br.ReadByte()
-                                });
+                                    if (_clientPrevDriftSeq == baselineSeq && _clientPrevDriftSamples != null)
+                                        prevBase = _clientPrevDriftSamples;
+                                }
                             }
-                        }
-                        if (flagHasTargetMeta)
-                        {
-                            int tCount = br.ReadInt32();
-                            hostTargetMetas = new Dictionary<ulong, DynamicTargetSample>(tCount);
-                            for (int i = 0; i < tCount; i++)
+
+                            hostSamples = new List<StateHasher.EntityPosSample>(count);
+                            var nextBase = new Dictionary<ulong, StateHasher.EntityPosSample>(count);
+                            if (flagHasTargetMeta) hostTargetMetas = new Dictionary<ulong, DynamicTargetSample>(Math.Min(count, 256));
+                            if (flagHasStructMeta) hostStructMetas = new List<StructSampleMeta>(32);
+                            if (flagHasSpawnMeta) hostSpawnMetas = new List<DynamicSpawnMeta>(64);
+
+                            ulong prevId = 0UL;
+                            for (int i = 0; i < count; i++)
                             {
-                                var tm = new DynamicTargetSample
+                                ulong id = prevId + NetCommand.ReadVarUInt64(br);
+                                prevId = id;
+                                byte eFlags = br.ReadByte();
+                                StateHasher.EntityPosSample sample;
+                                if ((eFlags & 0x01) != 0)
                                 {
-                                    Id = br.ReadUInt64(),
-                                    TargetEntityId = br.ReadUInt64(),
-                                    MoveX = br.ReadSingle(),
-                                    MoveY = br.ReadSingle()
+                                    if (prevBase != null && prevBase.TryGetValue(id, out var bs))
+                                        sample = bs;
+                                    else
+                                        sample = new StateHasher.EntityPosSample { Id = id };
+                                }
+                                else
+                                {
+                                    int life = (eFlags & 0x02) != 0 ? NetCommand.ReadZigZagVarInt32(br) : 0;
+                                    float sx, sy;
+                                    if ((eFlags & 0x04) != 0)
+                                        ReadPacked5B(br, out sx, out sy);
+                                    else
+                                    {
+                                        sx = br.ReadSingle();
+                                        sy = br.ReadSingle();
+                                    }
+                                    sample = new StateHasher.EntityPosSample { Id = id, X = sx, Y = sy, Life = life };
+
+                                    if ((eFlags & 0x08) != 0)
+                                    {
+                                        byte tf = br.ReadByte();
+                                        ulong tgtId = (tf & 1) != 0 ? br.ReadUInt64() : 0UL;
+                                        float mx = float.NaN, my = float.NaN;
+                                        if ((tf & 2) != 0) { mx = br.ReadSingle(); my = br.ReadSingle(); }
+                                        if (hostTargetMetas == null) hostTargetMetas = new Dictionary<ulong, DynamicTargetSample>();
+                                        hostTargetMetas[id] = new DynamicTargetSample { Id = id, TargetEntityId = tgtId, MoveX = mx, MoveY = my };
+                                    }
+                                    if ((eFlags & 0x10) != 0)
+                                    {
+                                        if (hostStructMetas == null) hostStructMetas = new List<StructSampleMeta>();
+                                        hostStructMetas.Add(new StructSampleMeta
+                                        {
+                                            Id = id,
+                                            TemplateId = br.ReadUInt64(),
+                                            CellX = NetCommand.ReadZigZagVarInt32(br),
+                                            CellY = NetCommand.ReadZigZagVarInt32(br),
+                                            Width = br.ReadByte(),
+                                            Height = br.ReadByte(),
+                                            Life = life,
+                                            BuildFactor = br.ReadSingle(),
+                                            OwnerPlayerId = br.ReadByte()
+                                        });
+                                    }
+                                    if ((eFlags & 0x20) != 0)
+                                    {
+                                        if (hostSpawnMetas == null) hostSpawnMetas = new List<DynamicSpawnMeta>();
+                                        hostSpawnMetas.Add(new DynamicSpawnMeta
+                                        {
+                                            Id = id,
+                                            TemplateId = br.ReadUInt64(),
+                                            TeamRaw = br.ReadByte(),
+                                            TargetEntityId = br.ReadUInt64(),
+                                            OwnerPlayerId = br.ReadByte()
+                                        });
+                                    }
+                                }
+                                hostSamples.Add(sample);
+                                nextBase[id] = sample;
+                            }
+
+                            lock (_driftBaselineLock)
+                            {
+                                _clientPrevDriftSeq = chunkSeq;
+                                _clientPrevDriftSamples = nextBase;
+                            }
+
+                            if (flagHasEcon)
+                            {
+                                hostEcon = new EconSnapshot
+                                {
+                                    Gold = NetCommand.ReadZigZagVarInt32(br),
+                                    Wood = NetCommand.ReadZigZagVarInt32(br),
+                                    Stone = NetCommand.ReadZigZagVarInt32(br),
+                                    Iron = NetCommand.ReadZigZagVarInt32(br),
+                                    Oil = NetCommand.ReadZigZagVarInt32(br)
                                 };
-                                hostTargetMetas[tm.Id] = tm;
+                            }
+                            if (flagHasProd)
+                            {
+                                int pCount = (int)NetCommand.ReadVarUInt32(br);
+                                hostProds = new List<StateHasher.ProdQueueSample>(pCount);
+                                for (int i = 0; i < pCount; i++)
+                                {
+                                    ulong eid = br.ReadUInt64();
+                                    int len = br.ReadByte();
+                                    var cmdIds = len > 0 ? new int[len] : Array.Empty<int>();
+                                    for (int j = 0; j < len; j++)
+                                        cmdIds[j] = NetCommand.ReadZigZagVarInt32(br);
+                                    hostProds.Add(new StateHasher.ProdQueueSample { EntityId = eid, CommandIds = cmdIds });
+                                }
                             }
                         }
-                        if (flagHasSpawnMeta)
+                        else
                         {
-                            int dCount = br.ReadInt32();
-                            hostSpawnMetas = new List<DynamicSpawnMeta>(dCount);
-                            for (int i = 0; i < dCount; i++)
+                            hostMask = firstU16;
+                            byte flags = br.ReadByte();
+                            flagApplyLife = (flags & 1) != 0;
+                            flagApplyPos = (flags & 2) != 0;
+                            flagIncludeStatic = (flags & 4) != 0;
+                            flagHasEcon = (flags & 8) != 0;
+                            flagHasProd = (flags & 16) != 0;
+                            flagHasStructMeta = (flags & 32) != 0;
+                            flagHasTargetMeta = (flags & 64) != 0;
+                            flagHasSpawnMeta = (flags & 128) != 0;
+                            count = br.ReadInt32();
+                            hostSamples = new List<StateHasher.EntityPosSample>(count);
+                            for (int i = 0; i < count; i++)
                             {
-                                hostSpawnMetas.Add(new DynamicSpawnMeta
+                                hostSamples.Add(new StateHasher.EntityPosSample
                                 {
                                     Id = br.ReadUInt64(),
-                                    TemplateId = br.ReadUInt64(),
-                                    TeamRaw = br.ReadByte(),
-                                    TargetEntityId = br.ReadUInt64(),
-                                    OwnerPlayerId = br.ReadByte()
+                                    X = br.ReadSingle(),
+                                    Y = br.ReadSingle(),
+                                    Life = br.ReadInt32()
                                 });
+                            }
+                            if (flagHasEcon)
+                            {
+                                hostEcon = new EconSnapshot
+                                {
+                                    Gold = br.ReadInt32(),
+                                    Wood = br.ReadInt32(),
+                                    Stone = br.ReadInt32(),
+                                    Iron = br.ReadInt32(),
+                                    Oil = br.ReadInt32()
+                                };
+                            }
+                            if (flagHasProd)
+                            {
+                                int pCount = br.ReadInt32();
+                                hostProds = new List<StateHasher.ProdQueueSample>(pCount);
+                                for (int i = 0; i < pCount; i++)
+                                {
+                                    ulong eid = br.ReadUInt64();
+                                    int len = br.ReadByte();
+                                    var cmdIds = len > 0 ? new int[len] : Array.Empty<int>();
+                                    for (int j = 0; j < len; j++)
+                                        cmdIds[j] = br.ReadInt32();
+                                    hostProds.Add(new StateHasher.ProdQueueSample { EntityId = eid, CommandIds = cmdIds });
+                                }
+                            }
+                            if (flagHasStructMeta)
+                            {
+                                int sCount = br.ReadInt32();
+                                hostStructMetas = new List<StructSampleMeta>(sCount);
+                                for (int i = 0; i < sCount; i++)
+                                {
+                                    hostStructMetas.Add(new StructSampleMeta
+                                    {
+                                        Id = br.ReadUInt64(),
+                                        TemplateId = br.ReadUInt64(),
+                                        CellX = br.ReadInt32(),
+                                        CellY = br.ReadInt32(),
+                                        Width = br.ReadByte(),
+                                        Height = br.ReadByte(),
+                                        Life = br.ReadInt32(),
+                                        BuildFactor = br.ReadSingle(),
+                                        OwnerPlayerId = br.ReadByte()
+                                    });
+                                }
+                            }
+                            if (flagHasTargetMeta)
+                            {
+                                int tCount = br.ReadInt32();
+                                hostTargetMetas = new Dictionary<ulong, DynamicTargetSample>(tCount);
+                                for (int i = 0; i < tCount; i++)
+                                {
+                                    var tm = new DynamicTargetSample
+                                    {
+                                        Id = br.ReadUInt64(),
+                                        TargetEntityId = br.ReadUInt64(),
+                                        MoveX = br.ReadSingle(),
+                                        MoveY = br.ReadSingle()
+                                    };
+                                    hostTargetMetas[tm.Id] = tm;
+                                }
+                            }
+                            if (flagHasSpawnMeta)
+                            {
+                                int dCount = br.ReadInt32();
+                                hostSpawnMetas = new List<DynamicSpawnMeta>(dCount);
+                                for (int i = 0; i < dCount; i++)
+                                {
+                                    hostSpawnMetas.Add(new DynamicSpawnMeta
+                                    {
+                                        Id = br.ReadUInt64(),
+                                        TemplateId = br.ReadUInt64(),
+                                        TeamRaw = br.ReadByte(),
+                                        TargetEntityId = br.ReadUInt64(),
+                                        OwnerPlayerId = br.ReadByte()
+                                    });
+                                }
                             }
                         }
                     }

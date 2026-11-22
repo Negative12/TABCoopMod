@@ -30,7 +30,7 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(object __instance)
         {
-            var ccs = GameBridge.GetAllCommandCenters(aliveOnly: true);
+            var ccs = GameBridge.GetAliveCommandCentersCached();
             if (!CoopSessionManager.IsMultiFactionActive && ccs.Count <= 1)
                 return true;
             if (ccs.Count == 0)
@@ -65,19 +65,17 @@ namespace TABCoopMod.Patches
             }
             lastIdx = 0;
 
-            var transfererList = new List<DXEntity>();
+            var transfererList = new List<DXEntity>(64);
             if (GameBridge.TypeCEnergyTransferer != null)
             {
-                var allEntities = GameBridge.GetEntitiesList(game);
-                if (allEntities != null)
+                foreach (var comp in game.ComponentsOfType(GameBridge.TypeCEnergyTransferer))
                 {
-                    for (int i = 0; i < allEntities.Count; i++)
-                    {
-                        var e = allEntities[i];
-                        if (e != null && !e.Disposed && GameBridge.HasComponent(e, GameBridge.TypeCEnergyTransferer))
-                            transfererList.Add(e);
-                    }
+                    var e = comp?.Entity;
+                    if (e != null && !e.Disposed)
+                        transfererList.Add(e);
                 }
+                if (transfererList.Count > 1)
+                    transfererList.Sort(GameBridge.CompareEntitiesDeterministically);
             }
 
             int maxX = energyGrid.GetLength(0) - 1;
@@ -171,7 +169,7 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix()
         {
-            var ccs = GameBridge.GetAllCommandCenters(aliveOnly: true);
+            var ccs = GameBridge.GetAliveCommandCentersCached();
             if (!CoopSessionManager.IsMultiFactionActive && ccs.Count <= 1)
                 return true;
             if (ccs.Count == 0)
@@ -180,10 +178,6 @@ namespace TABCoopMod.Patches
             var game = DXGame.Current;
             Type tEt = GameBridge.TypeCEnergyTransferer;
             if (game == null || tEt == null)
-                return true;
-
-            var entities = GameBridge.GetEntitiesList(game);
-            if (entities == null)
                 return true;
 
             var remaining = new List<DXComponent>(32);
@@ -198,15 +192,16 @@ namespace TABCoopMod.Patches
                     connected.Add(comp);
             }
 
-            for (int i = 0; i < entities.Count; i++)
+            foreach (var comp in game.ComponentsOfType(tEt))
             {
-                var ent = entities[i];
+                if (comp == null || connectedSet.Contains(comp)) continue;
+                var ent = comp.Entity;
                 if (ent == null || ent.Disposed) continue;
                 if (!GameBridge.IsEntityEnabled(ent)) continue;
-                var comp = GameBridge.FindComponent(ent, tEt) as DXComponent;
-                if (comp == null || connectedSet.Contains(comp)) continue;
                 remaining.Add(comp);
             }
+            if (remaining.Count > 1)
+                remaining.Sort((a, b) => GameBridge.CompareEntitiesDeterministically(a.Entity, b.Entity));
 
             bool progress = true;
             while (progress)
@@ -272,7 +267,7 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(object __instance)
         {
-            var ccs = GameBridge.GetAllCommandCenters(aliveOnly: true);
+            var ccs = GameBridge.GetAliveCommandCentersCached();
             if (!CoopSessionManager.IsMultiFactionActive && ccs.Count <= 1)
                 return true;
 
@@ -285,37 +280,35 @@ namespace TABCoopMod.Patches
 
             GameBridge.SetMapLayersEnergyInitDone(__instance, false);
 
-            var entities = GameBridge.GetEntitiesList(game);
-            if (entities != null)
+            Type tEt = GameBridge.TypeCEnergyTransferer;
+            Type tBldg = GameBridge.TypeBuilding;
+            if (tEt != null)
             {
-                Type tEt = GameBridge.TypeCEnergyTransferer;
-                Type tBldg = GameBridge.TypeBuilding;
-                if (tEt != null)
+                var transferers = new List<DXComponent>(64);
+                foreach (var comp in game.ComponentsOfType(tEt))
                 {
-                    for (int i = 0; i < entities.Count; i++)
-                    {
-                        var ent = entities[i];
-                        if (ent == null || ent.Disposed) continue;
-                        var comp = GameBridge.FindComponent(ent, tEt);
-                        if (comp != null)
-                            GameBridge.InvokeCEnergyTransfererUpdateGrid(comp);
-                    }
+                    if (comp != null && comp.Entity != null && !comp.Entity.Disposed)
+                        transferers.Add(comp);
                 }
-                if (tBldg != null)
+                if (transferers.Count > 1)
+                    transferers.Sort((a, b) => GameBridge.CompareEntitiesDeterministically(a.Entity, b.Entity));
+                for (int i = 0; i < transferers.Count; i++)
+                    GameBridge.InvokeCEnergyTransfererUpdateGrid(transferers[i]);
+            }
+            if (tBldg != null)
+            {
+                var buildings = new List<DXEntity>(128);
+                foreach (var ent in game.EntitiesOfType(tBldg))
                 {
-                    for (int i = 0; i < entities.Count; i++)
-                    {
-                        var ent = entities[i];
-                        if (ent != null && !ent.Disposed && tBldg.IsInstanceOfType(ent))
-                            GameBridge.InvokeBuildingRefreshEnergy(ent, true);
-                    }
-                    for (int i = 0; i < entities.Count; i++)
-                    {
-                        var ent = entities[i];
-                        if (ent != null && !ent.Disposed && tBldg.IsInstanceOfType(ent))
-                            GameBridge.InvokeStructureUpdateEnabled(ent);
-                    }
+                    if (ent != null && !ent.Disposed)
+                        buildings.Add(ent);
                 }
+                if (buildings.Count > 1)
+                    buildings.Sort(GameBridge.CompareEntitiesDeterministically);
+                for (int i = 0; i < buildings.Count; i++)
+                    GameBridge.InvokeBuildingRefreshEnergy(buildings[i], true);
+                for (int i = 0; i < buildings.Count; i++)
+                    GameBridge.InvokeStructureUpdateEnabled(buildings[i]);
             }
 
             int nCells = level.NCells;
@@ -385,7 +378,7 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(object __instance, object __0, Point __1, int __2, int __3, bool __4)
         {
-            var ccs = GameBridge.GetAllCommandCenters(aliveOnly: true);
+            var ccs = GameBridge.GetAliveCommandCentersCached();
             if (!CoopSessionManager.IsMultiFactionActive && ccs.Count <= 1)
                 return true;
 

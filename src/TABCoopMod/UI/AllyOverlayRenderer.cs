@@ -28,6 +28,7 @@ namespace TABCoopMod.UI
         // Pooled world-space faction foot-rings for mobile player units in Multi-Faction mode
         private static readonly Dictionary<byte, DXImage> _ringImages = new Dictionary<byte, DXImage>();
         private static readonly List<DXObject> _unitRingPool = new List<DXObject>();
+        private static readonly List<KeyValuePair<ulong, byte>> _trackedOwnersBuffer = new List<KeyValuePair<ulong, byte>>(256);
         private static int _activeRingCount;
         private static double _lastRingUpdateMs = -1000.0;
         private static DXObject _ringParent;
@@ -228,25 +229,26 @@ namespace TABCoopMod.UI
                 RectangleF camScene = DXScene.Current != null ? DXScene.Current.CameraArea : RectangleF.Empty;
                 if (!camScene.IsEmpty) camScene.Inflate(4f, 4f);
 
-                var entities = GameBridge.GetEntitiesList(game);
-                int count = entities != null ? entities.Count : 0;
+                FactionOwnershipTracker.CopyTrackedOwners(_trackedOwnersBuffer);
                 Type movableType = GameBridge.TypeCMovable;
                 int used = 0;
                 const int MaxRings = 350;
 
-                for (int i = 0; i < count && used < MaxRings; i++)
+                for (int i = 0; i < _trackedOwnersBuffer.Count && used < MaxRings; i++)
                 {
-                    var ent = entities[i];
-                    if (ent == null || ent.Disposed) continue;
-                    if (movableType != null && !GameBridge.HasComponent(ent, movableType)) continue;
-                    if (!GameBridge.IsPlayerEntity(ent)) continue;
-
-                    byte owner = FactionOwnershipTracker.GetOwner(ent.ID);
+                    var kv = _trackedOwnersBuffer[i];
+                    byte owner = kv.Value;
                     if (owner < 1 || owner > 3) continue;
+
+                    var ent = game.GetEntityByID(kv.Key);
+                    if (ent == null || ent.Disposed) continue;
 
                     PointF pos = ent.Position;
                     PointF scenePos = DXWorldGrid.ScenePointFromWorldPoint(pos);
                     if (!camScene.IsEmpty && !camScene.Contains(scenePos)) continue;
+
+                    if (!GameBridge.IsPlayerEntity(ent)) continue;
+                    if (movableType != null && !GameBridge.HasComponent(ent, movableType)) continue;
 
                     DXObject ring;
                     if (used < _unitRingPool.Count)

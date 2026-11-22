@@ -35,6 +35,7 @@ namespace TABCoopMod.Sync
             public int OwnEnergyNeeded;
             public int TestExtraStorage;
             public int TestExtraWorkers;
+            public int TestExtraColonists;
             public bool ShowFullMap;
             public Dictionary<ulong, int> BonusEntityTemplates = new Dictionary<ulong, int>();
             public Dictionary<int, int> OnlyOneExecutedCommands = new Dictionary<int, int>();
@@ -46,6 +47,9 @@ namespace TABCoopMod.Sync
                     Economy = Economy,
                     OwnEnergySupply = OwnEnergySupply,
                     OwnEnergyNeeded = OwnEnergyNeeded,
+                    TestExtraStorage = TestExtraStorage,
+                    TestExtraWorkers = TestExtraWorkers,
+                    TestExtraColonists = TestExtraColonists,
                     BonusEntityTemplates = new Dictionary<ulong, int>(BonusEntityTemplates),
                     OnlyOneExecutedCommands = new Dictionary<int, int>(OnlyOneExecutedCommands)
                 };
@@ -200,10 +204,14 @@ namespace TABCoopMod.Sync
             if (playerId < 1 || playerId > 3)
                 playerId = 1;
 
-            FlushActiveOwnerFromLevelState();
-            _contextStack.Push(playerId);
+            // Lazy flush: when ZXLevelState already holds playerId's ledger, pushing again needs
+            // neither an 80-field ReadRawLevelEconomyState nor LoadOwnerIntoLevelState.
             if (_activeLevelStateOwner != playerId)
+            {
+                FlushActiveOwnerFromLevelState();
                 LoadOwnerIntoLevelState(playerId);
+            }
+            _contextStack.Push(playerId);
         }
 
         public static void PopContext()
@@ -211,11 +219,13 @@ namespace TABCoopMod.Sync
             if (!CoopSessionManager.IsMultiFactionActive || !IsInitialized || _contextStack.Count == 0)
                 return;
 
-            FlushActiveOwnerFromLevelState();
             _contextStack.Pop();
             byte target = _contextStack.Count > 0 ? _contextStack.Peek() : GetRestingPlayerId();
             if (_activeLevelStateOwner != target)
+            {
+                FlushActiveOwnerFromLevelState();
                 LoadOwnerIntoLevelState(target);
+            }
         }
 
         public static void FlushActiveOwnerFromLevelState()
@@ -260,47 +270,68 @@ namespace TABCoopMod.Sync
         /// </summary>
         public static void RecalculateAllFactions()
         {
-            if (!CoopSessionManager.IsMultiFactionActive || !IsInitialized || DXGame.Current == null)
+            var game = DXGame.Current;
+            if (!CoopSessionManager.IsMultiFactionActive || !IsInitialized || game == null)
                 return;
 
             FlushActiveOwnerFromLevelState();
             byte savedOwner = _activeLevelStateOwner >= 1 && _activeLevelStateOwner <= 3 ? _activeLevelStateOwner : GetRestingPlayerId();
 
-            // 1. Keep vanilla cross-faction enhancer building scan (Banks / Markets / Warehouses / TheVictorious auras).
-            var rawEntities = GameBridge.GetEntitiesList(DXGame.Current);
-            var allBuildings = new List<DXEntity>();
-            var allUnits = new List<DXEntity>();
-            var enhancers = new List<DXEntity>();
+            // 1. Scan only Buildings, Humans, and DefensiveMachines via engine type indices instead of 128k full entities.
+            var allBuildings = new List<DXEntity>(128);
+            var allUnits = new List<DXEntity>(128);
+            var enhancers = new List<DXEntity>(16);
             bool spireAliveEnabled = false;
-            if (rawEntities != null)
+
+            Type tBuilding = GameBridge.TypeBuilding;
+            Type tSpire = GameBridge.TypeTheSpire;
+            if (tBuilding != null)
             {
-                for (int i = 0; i < rawEntities.Count; i++)
+                foreach (var ent in game.EntitiesOfType(tBuilding))
                 {
-                    var ent = rawEntities[i];
                     if (ent == null || ent.Disposed) continue;
-                    if (GameBridge.TypeBuilding != null && GameBridge.TypeBuilding.IsInstanceOfType(ent))
+                    allBuildings.Add(ent);
+                    var dp = GameBridge.GetEntityDefaultParamsBoxed(ent);
+                    if (dp != null)
                     {
-                        allBuildings.Add(ent);
-                        var dp = GameBridge.GetEntityDefaultParamsBoxed(ent);
-                        if (dp != null)
-                        {
-                            GameBridge.ReadDefaultParamsStats(dp, out bool canEnhance, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _);
-                            if (canEnhance && GameBridge.IsEntityEnabled(ent))
-                                enhancers.Add(ent);
-                        }
-                        if (GameBridge.TypeTheSpire != null && GameBridge.TypeTheSpire.IsInstanceOfType(ent)
-                            && GameBridge.IsPlayerEntity(ent) && GameBridge.IsEntityEnabled(ent)
-                            && !GameBridge.IsBuildingBeingBuilt(ent) && !GameBridge.IsBuildingInfected(ent))
-                        {
-                            spireAliveEnabled = true;
-                        }
+                        GameBridge.ReadDefaultParamsStats(dp, out bool canEnhance, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _);
+                        if (canEnhance && GameBridge.IsEntityEnabled(ent))
+                            enhancers.Add(ent);
                     }
-                    else if (GameBridge.IsHumanEntity(ent) || GameBridge.IsDefensiveMachineEntity(ent))
+                    if (tSpire != null && tSpire.IsInstanceOfType(ent)
+                        && GameBridge.IsPlayerEntity(ent) && GameBridge.IsEntityEnabled(ent)
+                        && !GameBridge.IsBuildingBeingBuilt(ent) && !GameBridge.IsBuildingInfected(ent))
                     {
-                        allUnits.Add(ent);
+                        spireAliveEnabled = true;
                     }
                 }
+                if (allBuildings.Count > 1)
+                    allBuildings.Sort(GameBridge.CompareEntitiesDeterministically);
+                if (enhancers.Count > 1)
+                    enhancers.Sort(GameBridge.CompareEntitiesDeterministically);
             }
+
+            Type tHuman = GameBridge.TypeHuman;
+            if (tHuman != null)
+            {
+                foreach (var ent in game.EntitiesOfType(tHuman))
+                {
+                    if (ent != null && !ent.Disposed)
+                        allUnits.Add(ent);
+                }
+            }
+            Type tDefMachine = GameBridge.TypeDefensiveMachine;
+            if (tDefMachine != null)
+            {
+                foreach (var ent in game.EntitiesOfType(tDefMachine))
+                {
+                    if (ent == null || ent.Disposed) continue;
+                    if (tHuman != null && tHuman.IsInstanceOfType(ent)) continue;
+                    allUnits.Add(ent);
+                }
+            }
+            if (allUnits.Count > 1)
+                allUnits.Sort(GameBridge.CompareEntitiesDeterministically);
             GameBridge.CallLevelStateSetEnhancerBuildings(enhancers);
 
             int maxP = Math.Max(1, Math.Min(3, (int)FactionOwnershipTracker.ActivePlayerCount));
@@ -423,6 +454,7 @@ namespace TABCoopMod.Sync
 
                 e.ResourceStorage = Math.Max(50, e.ResourceStorage + ledger.TestExtraStorage);
                 e.WorkersSupply += ledger.TestExtraWorkers;
+                e.Colonists += ledger.TestExtraColonists;
 
                 int armyFoodPen = 0;
                 int uWood = 0, uStone = 0, uIron = 0, uOil = 0;
@@ -508,13 +540,13 @@ namespace TABCoopMod.Sync
                 GameBridge.ReadRawLevelEconomyState(out var e);
 
                 int hw = 0, hs = 0, hi = 0, ho = 0;
-                var entitiesList = GameBridge.GetEntitiesList(DXGame.Current);
-                if (entitiesList != null)
+                var game = DXGame.Current;
+                Type tHuman = GameBridge.TypeHuman;
+                if (game != null && tHuman != null)
                 {
-                    for (int i = 0; i < entitiesList.Count; i++)
+                    foreach (var h in game.EntitiesOfType(tHuman))
                     {
-                        var h = entitiesList[i];
-                        if (h == null || h.Disposed || !GameBridge.IsHumanEntity(h) || !GameBridge.IsPlayerEntity(h)) continue;
+                        if (h == null || h.Disposed || !GameBridge.IsPlayerEntity(h)) continue;
                         if (FactionOwnershipTracker.GetOwner(h.ID) != pid) continue;
                         var dp = GameBridge.GetEntityDefaultParamsBoxed(h);
                         if (dp == null) continue;
@@ -535,14 +567,14 @@ namespace TABCoopMod.Sync
                 else
                 {
                     e.NegGoldTurns++;
-                    if (e.NegGoldTurns >= 2 && entitiesList != null)
+                    Type tUnit = GameBridge.TypeUnit;
+                    if (e.NegGoldTurns >= 2 && game != null && tUnit != null)
                     {
                         int deficit = -e.Gold;
                         var candidates = new List<(DXEntity U, int Level, int GoldCost)>();
-                        for (int i = 0; i < entitiesList.Count; i++)
+                        foreach (var u in game.EntitiesOfType(tUnit))
                         {
-                            var u = entitiesList[i];
-                            if (u == null || u.Disposed || !GameBridge.IsUnitEntity(u) || !GameBridge.IsPlayerEntity(u)) continue;
+                            if (u == null || u.Disposed || !GameBridge.IsPlayerEntity(u)) continue;
                             if (FactionOwnershipTracker.GetOwner(u.ID) != pid) continue;
                             if (GameBridge.HasInsideBuildingComponent(u)) continue;
                             var dp = GameBridge.GetEntityDefaultParamsBoxed(u);
@@ -694,7 +726,7 @@ namespace TABCoopMod.Sync
             }
         }
 
-        public static void AdjustResourcesForTesting(byte pid, int gold, int wood, int stone, int iron, int oil, int extraStorage = 0, int extraWorkers = 0)
+        public static void AdjustResourcesForTesting(byte pid, int gold, int wood, int stone, int iron, int oil, int extraStorage = 0, int extraWorkers = 0, int extraColonists = 0)
         {
             if (!IsInitialized || pid < 1 || pid > 3) return;
             FlushActiveOwnerFromLevelState();
@@ -710,6 +742,12 @@ namespace TABCoopMod.Sync
                 {
                     l.TestExtraWorkers = Math.Max(0, l.TestExtraWorkers + extraWorkers);
                     l.Economy.WorkersSupply += extraWorkers;
+                }
+                if (extraColonists != 0)
+                {
+                    l.TestExtraColonists = Math.Max(0, l.TestExtraColonists + extraColonists);
+                    l.Economy.Colonists += extraColonists;
+                    l.Economy.MaxColonists = Math.Max(l.Economy.MaxColonists, l.Economy.Colonists);
                 }
                 if (gold != 0) AdjustStockOnActive(ref l.Economy, 0, gold);
                 if (wood != 0) AdjustStockOnActive(ref l.Economy, 1, wood);

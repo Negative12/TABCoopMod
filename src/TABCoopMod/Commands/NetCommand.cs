@@ -60,7 +60,76 @@ namespace TABCoopMod.Commands
         public bool IsMayorFinalDecision { get; set; }
         public uint TraceId { get; set; }
 
+        public static bool UseCompactWireFormat { get; set; } = true;
+
         public void WriteTo(BinaryWriter w)
+        {
+            if (!UseCompactWireFormat)
+            {
+                WriteLegacy(w);
+                return;
+            }
+
+            w.Write((byte)(0x80 | ((byte)Type & 0x7F)));
+            w.Write(PlayerId);
+            WriteZigZagVarInt32(w, TargetSimTick);
+
+            uint mask = 0;
+            if (IsShiftQueued) mask |= 1u << 0;
+            if (CommandId != 0) mask |= 1u << 1;
+            if (!string.IsNullOrEmpty(BuildingTypeName)) mask |= 1u << 2;
+            int idCount = ExecutorEntityIds != null ? ExecutorEntityIds.Length : 0;
+            if (idCount > 0) mask |= 1u << 3;
+            if (TargetEntityId != 0UL) mask |= 1u << 4;
+            if (TargetPosition.X != 0f || TargetPosition.Y != 0f) mask |= 1u << 5;
+            if (TargetSize.Width != 0f || TargetSize.Height != 0f) mask |= 1u << 6;
+            if (TargetOrigin.X != 0f || TargetOrigin.Y != 0f) mask |= 1u << 7;
+            if (BuildingCellArea.X != 0 || BuildingCellArea.Y != 0 || BuildingCellArea.Width != 0 || BuildingCellArea.Height != 0) mask |= 1u << 8;
+            if (IsBonusBuilding) mask |= 1u << 9;
+            if (InstantBuild) mask |= 1u << 10;
+            if (QueueSlotIndex != 0) mask |= 1u << 11;
+            if (TargetPausedState) mask |= 1u << 12;
+            if (IsMayorFinalDecision) mask |= 1u << 13;
+            if (MayorOptionIndex != 0) mask |= 1u << 14;
+            if (GameSpeed != 1f) mask |= 1u << 15;
+            if (!string.IsNullOrEmpty(MayorId)) mask |= 1u << 16;
+            if (TraceId != 0u) mask |= 1u << 17;
+            WriteVarUInt32(w, mask);
+
+            if ((mask & (1u << 1)) != 0) WriteZigZagVarInt32(w, CommandId);
+            if ((mask & (1u << 2)) != 0) w.Write(BuildingTypeName);
+            if ((mask & (1u << 3)) != 0)
+            {
+                WriteVarUInt32(w, (uint)idCount);
+                ulong prev = ExecutorEntityIds[0];
+                w.Write(prev);
+                for (int i = 1; i < idCount; i++)
+                {
+                    ulong cur = ExecutorEntityIds[i];
+                    long delta = unchecked((long)(cur - prev));
+                    WriteZigZagVarInt64(w, delta);
+                    prev = cur;
+                }
+            }
+            if ((mask & (1u << 4)) != 0) w.Write(TargetEntityId);
+            if ((mask & (1u << 5)) != 0) { w.Write(TargetPosition.X); w.Write(TargetPosition.Y); }
+            if ((mask & (1u << 6)) != 0) { w.Write(TargetSize.Width); w.Write(TargetSize.Height); }
+            if ((mask & (1u << 7)) != 0) { w.Write(TargetOrigin.X); w.Write(TargetOrigin.Y); }
+            if ((mask & (1u << 8)) != 0)
+            {
+                WriteZigZagVarInt32(w, BuildingCellArea.X);
+                WriteZigZagVarInt32(w, BuildingCellArea.Y);
+                WriteZigZagVarInt32(w, BuildingCellArea.Width);
+                WriteZigZagVarInt32(w, BuildingCellArea.Height);
+            }
+            if ((mask & (1u << 11)) != 0) w.Write(QueueSlotIndex);
+            if ((mask & (1u << 14)) != 0) w.Write(MayorOptionIndex);
+            if ((mask & (1u << 15)) != 0) w.Write(GameSpeed);
+            if ((mask & (1u << 16)) != 0) w.Write(MayorId);
+            if ((mask & (1u << 17)) != 0) WriteVarUInt32(w, TraceId);
+        }
+
+        private void WriteLegacy(BinaryWriter w)
         {
             w.Write((byte)Type);
             w.Write(PlayerId);
@@ -101,9 +170,13 @@ namespace TABCoopMod.Commands
 
         public static NetCommand ReadFrom(BinaryReader r)
         {
+            byte first = r.ReadByte();
+            if ((first & 0x80) != 0)
+                return ReadCompact(r, (NetCommandType)(first & 0x7F));
+
             var cmd = new NetCommand
             {
-                Type = (NetCommandType)r.ReadByte(),
+                Type = (NetCommandType)first,
                 PlayerId = r.ReadByte(),
                 TargetSimTick = r.ReadInt32(),
                 IsShiftQueued = r.ReadBoolean(),
@@ -136,6 +209,134 @@ namespace TABCoopMod.Commands
                 cmd.TraceId = r.ReadUInt32();
 
             return cmd;
+        }
+
+        private static NetCommand ReadCompact(BinaryReader r, NetCommandType type)
+        {
+            byte pid = r.ReadByte();
+            int targetTick = ReadZigZagVarInt32(r);
+            uint mask = ReadVarUInt32(r);
+
+            var cmd = new NetCommand
+            {
+                Type = type,
+                PlayerId = pid,
+                TargetSimTick = targetTick,
+                IsShiftQueued = (mask & (1u << 0)) != 0,
+                CommandId = (mask & (1u << 1)) != 0 ? ReadZigZagVarInt32(r) : 0,
+                BuildingTypeName = (mask & (1u << 2)) != 0 ? r.ReadString() : string.Empty
+            };
+
+            if ((mask & (1u << 3)) != 0)
+            {
+                uint count = ReadVarUInt32(r);
+                cmd.ExecutorEntityIds = new ulong[count];
+                if (count > 0)
+                {
+                    ulong prev = r.ReadUInt64();
+                    cmd.ExecutorEntityIds[0] = prev;
+                    for (uint i = 1; i < count; i++)
+                    {
+                        long delta = ReadZigZagVarInt64(r);
+                        prev = unchecked(prev + (ulong)delta);
+                        cmd.ExecutorEntityIds[i] = prev;
+                    }
+                }
+            }
+            if ((mask & (1u << 4)) != 0) cmd.TargetEntityId = r.ReadUInt64();
+            if ((mask & (1u << 5)) != 0) cmd.TargetPosition = new PointF(r.ReadSingle(), r.ReadSingle());
+            if ((mask & (1u << 6)) != 0) cmd.TargetSize = new SizeF(r.ReadSingle(), r.ReadSingle());
+            if ((mask & (1u << 7)) != 0) cmd.TargetOrigin = new PointF(r.ReadSingle(), r.ReadSingle());
+            if ((mask & (1u << 8)) != 0)
+            {
+                cmd.BuildingCellArea = new Rectangle(
+                    ReadZigZagVarInt32(r),
+                    ReadZigZagVarInt32(r),
+                    ReadZigZagVarInt32(r),
+                    ReadZigZagVarInt32(r));
+            }
+            cmd.IsBonusBuilding = (mask & (1u << 9)) != 0;
+            cmd.InstantBuild = (mask & (1u << 10)) != 0;
+            if ((mask & (1u << 11)) != 0) cmd.QueueSlotIndex = r.ReadByte();
+            cmd.TargetPausedState = (mask & (1u << 12)) != 0;
+            cmd.IsMayorFinalDecision = (mask & (1u << 13)) != 0;
+            if ((mask & (1u << 14)) != 0) cmd.MayorOptionIndex = r.ReadByte();
+            if ((mask & (1u << 15)) != 0) cmd.GameSpeed = r.ReadSingle();
+            if ((mask & (1u << 16)) != 0) cmd.MayorId = r.ReadString();
+            if ((mask & (1u << 17)) != 0) cmd.TraceId = ReadVarUInt32(r);
+            return cmd;
+        }
+
+        internal static void WriteVarUInt32(BinaryWriter w, uint v)
+        {
+            while (v >= 0x80u)
+            {
+                w.Write((byte)((v & 0x7Fu) | 0x80u));
+                v >>= 7;
+            }
+            w.Write((byte)v);
+        }
+
+        internal static uint ReadVarUInt32(BinaryReader r)
+        {
+            uint v = 0;
+            int shift = 0;
+            while (shift < 35)
+            {
+                byte b = r.ReadByte();
+                v |= (uint)(b & 0x7F) << shift;
+                if ((b & 0x80) == 0) break;
+                shift += 7;
+            }
+            return v;
+        }
+
+        internal static void WriteZigZagVarInt32(BinaryWriter w, int v)
+        {
+            uint zz = unchecked((uint)((v << 1) ^ (v >> 31)));
+            WriteVarUInt32(w, zz);
+        }
+
+        internal static int ReadZigZagVarInt32(BinaryReader r)
+        {
+            uint zz = ReadVarUInt32(r);
+            return unchecked((int)((zz >> 1) ^ (uint)-(int)(zz & 1u)));
+        }
+
+        internal static void WriteVarUInt64(BinaryWriter w, ulong v)
+        {
+            while (v >= 0x80UL)
+            {
+                w.Write((byte)((v & 0x7FUL) | 0x80UL));
+                v >>= 7;
+            }
+            w.Write((byte)v);
+        }
+
+        internal static ulong ReadVarUInt64(BinaryReader r)
+        {
+            ulong v = 0;
+            int shift = 0;
+            while (shift < 70)
+            {
+                byte b = r.ReadByte();
+                v |= (ulong)(b & 0x7F) << shift;
+                if ((b & 0x80) == 0) break;
+                shift += 7;
+            }
+            return v;
+        }
+
+        internal static void WriteZigZagVarInt64(BinaryWriter w, long v)
+        {
+            ulong zz = unchecked((ulong)((v << 1) ^ (v >> 63)));
+            WriteVarUInt64(w, zz);
+        }
+
+        internal static long ReadZigZagVarInt64(BinaryReader r)
+        {
+            ulong zz = ReadVarUInt64(r);
+            return unchecked((long)((zz >> 1) ^ (ulong)-(long)(zz & 1UL)));
         }
 
         public override string ToString()
@@ -462,6 +663,32 @@ namespace TABCoopMod.Commands
             // 1. Assign distributed target positions to each unit's CCommandable.Target
             GameBridge.AssignGroupMoveTargets(entities, cmd, netCmd.TargetPosition);
 
+            // Two-Phase Parallel A* pre-warm for bulk unit group moves/attack-moves.
+            if (entitiesForExecution.Count >= 4 && TABCoopMod.Testing.TestHarnessConfig.ParallelWorkers > 1)
+            {
+                var batch = new List<DeterministicPathfindingPatch.PathPrewarmItem>(entitiesForExecution.Count);
+                for (int i = 0; i < entitiesForExecution.Count; i++)
+                {
+                    var ent = entitiesForExecution[i];
+                    object cmdComp = GameBridge.GetCommandableObject(ent);
+                    object unitTarget = cmdComp != null ? GameBridge.GetCommandableTargetObject(cmdComp) : null;
+                    if (unitTarget == null) continue;
+                    PointF destPos = GameBridge.GetCommandTargetPosition(unitTarget);
+                    if (float.IsNaN(destPos.X) || float.IsNaN(destPos.Y)) continue;
+                    DXComponent mov = GameBridge.FindComponent(ent, movable);
+                    int cellSize = mov != null ? GameBridge.GetMovableCellSize(mov) : 1;
+                    uint mask = GameBridge.GetEntityPathfindingMask(ent);
+                    batch.Add(new DeterministicPathfindingPatch.PathPrewarmItem
+                    {
+                        CellSize = cellSize,
+                        Start = ent.Cell,
+                        End = Point.Truncate(destPos),
+                        Mask = mask
+                    });
+                }
+                DeterministicPathfindingPatch.PrewarmUniquePathsParallel(batch);
+            }
+
             // 2. Trigger command execution on each unit using its assigned CCommandable.Target
             foreach (var entity in entitiesForExecution)
             {
@@ -529,12 +756,29 @@ namespace TABCoopMod.Commands
                 return;
             }
 
+            if (TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive
+                && TABCoopMod.Sync.FactionContextManager.IsInitialized)
+            {
+                TABCoopMod.Sync.FactionContextManager.RecalculateAllFactions();
+            }
+
             object buildCmd = GameBridge.GetBuildCommandForType(buildingType);
             if (buildCmd != null && !GameBridge.CanExecuteCommandOnEntity(buildCmd, builder))
             {
                 string errReason = null;
-                try { errReason = buildCmd.GetType().GetProperty("Error")?.GetValue(buildCmd) as string; } catch { }
-                LogRejected($"buildExec:{netCmd.BuildingTypeName}", $"[CommandExecutor] Rejected PlaceBuilding {netCmd.BuildingTypeName}: CanExecute=false ({errReason ?? "insufficient resources or prerequisites"}).");
+                try
+                {
+                    var errField = GameBridge.TypeZXCommand?.GetField("#=z4gwFgFCco_Z9",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    errReason = errField?.GetValue(buildCmd) as string;
+                    if (string.IsNullOrEmpty(errReason))
+                        errReason = buildCmd.GetType().GetProperty("Error")?.GetValue(buildCmd) as string;
+                }
+                catch { }
+                string econInfo = GameBridge.ReadRawLevelEconomyState(out var eco)
+                    ? $" [G={eco.Gold},W={eco.Wood},S={eco.Stone},I={eco.Iron},O={eco.Oil},Col={eco.Colonists},Work={eco.WorkersSupply - eco.WorkersNeeded},Eng={eco.EnergySupply - eco.EnergyNeeded},Food={eco.FoodSupply - eco.FoodNeeded}]"
+                    : string.Empty;
+                LogRejected($"buildExec:{netCmd.BuildingTypeName}", $"[CommandExecutor] Rejected PlaceBuilding {netCmd.BuildingTypeName}: CanExecute=false ({errReason ?? "insufficient resources or prerequisites"}){econInfo}.");
                 return;
             }
 

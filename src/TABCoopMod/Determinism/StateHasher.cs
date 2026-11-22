@@ -115,6 +115,7 @@ namespace TABCoopMod.Determinism
         public sealed class IncrementalEpochHasher
         {
             private readonly DigestAccumulators _acc = new DigestAccumulators();
+            private readonly List<DXEntity>[] _slotBuckets = new List<DXEntity>[EpochTicks];
             private int _lastSteppedTick = -1;
             private bool _inEpoch;
 
@@ -123,6 +124,8 @@ namespace TABCoopMod.Determinism
                 _inEpoch = false;
                 _lastSteppedTick = -1;
                 _acc.Reset(allocateBuckets: false, dynamicOut: null);
+                for (int i = 0; i < EpochTicks; i++)
+                    _slotBuckets[i]?.Clear();
             }
 
             public bool Step(int curTick, out LevelStateSnapshotDigest digest, out List<EntityPosSample> dynamicPositions, out List<ProdQueueSample> prodQueues)
@@ -147,38 +150,22 @@ namespace TABCoopMod.Determinism
                     if (slot != 0)
                         return false;
                     _acc.Reset(allocateBuckets: true, dynamicOut: new List<EntityPosSample>(2048), prodQueuesOut: new List<ProdQueueSample>(16));
+                    PartitionEntitiesForEpoch(game);
                     _inEpoch = true;
                 }
 
-                ulong targetSlot = (ulong)slot;
-                var fastEntities = GameBridge.GetEntitiesList(game);
-                if (fastEntities != null)
+                List<DXEntity> bucket = _slotBuckets[slot];
+                if (bucket != null)
                 {
-                    int n = fastEntities.Count;
+                    int n = bucket.Count;
                     for (int i = 0; i < n; i++)
                     {
-                        var entity = fastEntities[i];
+                        var entity = bucket[i];
                         if (entity == null || entity.Disposed)
-                            continue;
-                        if ((entity.ID & 0x8000000000000000UL) != 0)
-                            continue;
-                        if ((entity.ID % (ulong)EpochTicks) != targetSlot)
                             continue;
                         AccumulateEntity(entity, _acc);
                     }
-                }
-                else if (game.Entities != null)
-                {
-                    foreach (var entity in game.Entities)
-                    {
-                        if (entity == null || entity.Disposed)
-                            continue;
-                        if ((entity.ID & 0x8000000000000000UL) != 0)
-                            continue;
-                        if ((entity.ID % (ulong)EpochTicks) != targetSlot)
-                            continue;
-                        AccumulateEntity(entity, _acc);
-                    }
+                    bucket.Clear();
                 }
 
                 if (slot != EpochTicks - 1)
@@ -192,6 +179,43 @@ namespace TABCoopMod.Determinism
                 _acc.ProdQueues = null;
                 _acc.PosBuckets = null;
                 return true;
+            }
+
+            private void PartitionEntitiesForEpoch(DXGame game)
+            {
+                for (int i = 0; i < EpochTicks; i++)
+                {
+                    if (_slotBuckets[i] == null)
+                        _slotBuckets[i] = new List<DXEntity>(256);
+                    else
+                        _slotBuckets[i].Clear();
+                }
+
+                // Single full-list partition pass at slot 0 filters out ~100k ignored ambient/visual bare DXEntities
+                // once per 60-tick epoch instead of modulo-checking 128k entities on every single tick.
+                var fastEntities = GameBridge.GetEntitiesList(game);
+                if (fastEntities != null)
+                {
+                    int n = fastEntities.Count;
+                    for (int i = 0; i < n; i++)
+                    {
+                        var entity = fastEntities[i];
+                        if (entity == null || entity.Disposed) continue;
+                        if ((entity.ID & 0x8000000000000000UL) != 0) continue;
+                        if ((GetOrClassifyEntityType(entity) & FlagIgnore) != 0) continue;
+                        _slotBuckets[(int)(entity.ID % (ulong)EpochTicks)].Add(entity);
+                    }
+                }
+                else if (game.Entities != null)
+                {
+                    foreach (var entity in game.Entities)
+                    {
+                        if (entity == null || entity.Disposed) continue;
+                        if ((entity.ID & 0x8000000000000000UL) != 0) continue;
+                        if ((GetOrClassifyEntityType(entity) & FlagIgnore) != 0) continue;
+                        _slotBuckets[(int)(entity.ID % (ulong)EpochTicks)].Add(entity);
+                    }
+                }
             }
         }
 
@@ -220,10 +244,8 @@ namespace TABCoopMod.Determinism
             return FinalizeDigest(game, ls, game.IAIterationInt, acc);
         }
 
-        private static void AccumulateEntity(DXEntity entity, DigestAccumulators acc)
+        private static byte GetOrClassifyEntityType(DXEntity entity)
         {
-            // Bare DXEntity instances (e.g. blood/hit sprites) and non-interactive ambient birds
-            // (Raven) are purely visual/ambient and do not affect simulation state.
             Type entityType = entity.GetType();
             if (!_entityTypeFlags.TryGetValue(entityType, out byte flags))
             {
@@ -240,6 +262,14 @@ namespace TABCoopMod.Determinism
                     flags = FlagStructure;
                 _entityTypeFlags[entityType] = flags;
             }
+            return flags;
+        }
+
+        private static void AccumulateEntity(DXEntity entity, DigestAccumulators acc)
+        {
+            // Bare DXEntity instances (e.g. blood/hit sprites) and non-interactive ambient birds
+            // (Raven) are purely visual/ambient and do not affect simulation state.
+            byte flags = GetOrClassifyEntityType(entity);
             if ((flags & FlagIgnore) != 0)
                 return;
 
@@ -311,7 +341,11 @@ namespace TABCoopMod.Determinism
             bool swappedToP1 = TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive
                 && TABCoopMod.Sync.FactionContextManager.IsInitialized;
             if (swappedToP1)
+            {
+                if (simTick > 0)
+                    TABCoopMod.Sync.FactionContextManager.RecalculateAllFactions();
                 TABCoopMod.Sync.FactionContextManager.PushContext(1);
+            }
 
             long reservationChecksum;
             try

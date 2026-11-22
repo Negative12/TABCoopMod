@@ -48,7 +48,8 @@ namespace TABCoopMod.Patches
             // Even inside PushContext (ContextDepth > 0), never let vanilla ZXLevelState.#=zBpC6By32LAqv()
             // run a global full-map sum over the pushed player's ledger. RecalculateAllFactions() flushes
             // the currently pushed owner, recalculates all factions independently, and restores the pushed owner.
-            GameBridge.SetLevelStateNeedsRecalculate(false);
+            // Do NOT clear NeedsRecalculate: vanilla sets it true once after level init as an enable flag
+            // and never sets it back to true on building completion/destruction.
             _inRecalcAll = true;
             try
             {
@@ -69,6 +70,54 @@ namespace TABCoopMod.Patches
     [HarmonyPatch]
     public static class Patch_CResourceGenerator_Update_Context
     {
+        private static Func<object, bool> _fastShouldRunGenerator;
+        private static bool _genGuardCompiled;
+
+        private static bool ShouldPushContextForGenerator(DXComponent comp)
+        {
+            if (!_genGuardCompiled)
+            {
+                _genGuardCompiled = true;
+                try
+                {
+                    Type t = GameBridge.TypeCResourceGenerator ?? GameBridge.GameAssembly?.GetType(ObfuscatedSymbols.Type_CResourceGenerator);
+                    var gCounter = t?.GetProperty("Counter", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetGetMethod(true);
+                    var gInterval = t?.GetProperty("GenerationIntervalMs", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetGetMethod(true);
+                    if (t != null && gCounter != null && gInterval != null)
+                    {
+                        var dm = new System.Reflection.Emit.DynamicMethod(
+                            "TABCoop_ShouldRunResourceGen",
+                            typeof(bool),
+                            new[] { typeof(object) },
+                            typeof(Patch_CResourceGenerator_Update_Context).Module,
+                            skipVisibility: true);
+                        var il = dm.GetILGenerator();
+                        var loc = il.DeclareLocal(t);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
+                        il.Emit(System.Reflection.Emit.OpCodes.Castclass, t);
+                        il.Emit(System.Reflection.Emit.OpCodes.Stloc, loc);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ldloc, loc);
+                        il.Emit(System.Reflection.Emit.OpCodes.Callvirt, gCounter);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ldc_R8, 33.34);
+                        il.Emit(System.Reflection.Emit.OpCodes.Add);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ldloc, loc);
+                        il.Emit(System.Reflection.Emit.OpCodes.Callvirt, gInterval);
+                        il.Emit(System.Reflection.Emit.OpCodes.Conv_R8);
+                        il.Emit(System.Reflection.Emit.OpCodes.Clt);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ldc_I4_0);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ceq);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ret);
+                        _fastShouldRunGenerator = (Func<object, bool>)dm.CreateDelegate(typeof(Func<object, bool>));
+                    }
+                }
+                catch
+                {
+                    _fastShouldRunGenerator = null;
+                }
+            }
+            return _fastShouldRunGenerator == null || _fastShouldRunGenerator(comp);
+        }
+
         public static MethodBase TargetMethod()
         {
             Type t = GameBridge.GameAssembly?.GetType(ObfuscatedSymbols.Type_CResourceGenerator);
@@ -79,10 +128,15 @@ namespace TABCoopMod.Patches
         public static void Prefix(DXComponent __instance, out bool __state)
         {
             __state = false;
-            if (!CoopSessionManager.IsMultiFactionActive || !FactionContextManager.IsInitialized || __instance?.Entity == null)
+            if (!CoopSessionManager.IsMultiFactionActive || !FactionContextManager.IsInitialized)
+                return;
+            var ent = __instance?.Entity;
+            if (ent == null || !GameBridge.IsEntityEnabled(ent))
+                return;
+            if (!ShouldPushContextForGenerator(__instance))
                 return;
 
-            byte owner = FactionOwnershipTracker.GetOwner(__instance.Entity.ID);
+            byte owner = FactionOwnershipTracker.GetOwner(ent.ID);
             if (owner != 0)
             {
                 FactionContextManager.PushContext(owner);
@@ -217,6 +271,43 @@ namespace TABCoopMod.Patches
     [HarmonyPatch]
     public static class Patch_CCommandable_QueueMethods_Context
     {
+        private static MethodBase _mUpdateTick;
+        private static Func<object, bool> _fastHasProgressCmd;
+        private static bool _cmdGuardCompiled;
+
+        private static bool HasProgressCmdFast(DXComponent comp)
+        {
+            if (!_cmdGuardCompiled)
+            {
+                _cmdGuardCompiled = true;
+                try
+                {
+                    Type t = GameBridge.TypeCCommandable;
+                    var fActive = t?.GetField("#=zu9BgZBFyR1Zo", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (t != null && fActive != null && fActive.FieldType == typeof(bool))
+                    {
+                        var dm = new System.Reflection.Emit.DynamicMethod(
+                            "TABCoop_CCommandableHasProgress",
+                            typeof(bool),
+                            new[] { typeof(object) },
+                            typeof(Patch_CCommandable_QueueMethods_Context).Module,
+                            skipVisibility: true);
+                        var il = dm.GetILGenerator();
+                        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
+                        il.Emit(System.Reflection.Emit.OpCodes.Castclass, t);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ldfld, fActive);
+                        il.Emit(System.Reflection.Emit.OpCodes.Ret);
+                        _fastHasProgressCmd = (Func<object, bool>)dm.CreateDelegate(typeof(Func<object, bool>));
+                    }
+                }
+                catch
+                {
+                    _fastHasProgressCmd = null;
+                }
+            }
+            return _fastHasProgressCmd == null || _fastHasProgressCmd(comp);
+        }
+
         public static IEnumerable<MethodBase> TargetMethods()
         {
             Type t = GameBridge.TypeCCommandable;
@@ -232,14 +323,17 @@ namespace TABCoopMod.Patches
             if (mCancelAt != null) yield return mCancelAt;
 
             var mUpdate = AccessTools.Method(t, "#=zzHXxhbjNa0Zf", Type.EmptyTypes);
+            _mUpdateTick = mUpdate;
             if (mUpdate != null) yield return mUpdate;
         }
 
         [HarmonyPrefix]
-        public static void Prefix(DXComponent __instance, out bool __state)
+        public static void Prefix(DXComponent __instance, MethodBase __originalMethod, out bool __state)
         {
             __state = false;
             if (!CoopSessionManager.IsMultiFactionActive || !FactionContextManager.IsInitialized || __instance?.Entity == null)
+                return;
+            if (ReferenceEquals(__originalMethod, _mUpdateTick) && !HasProgressCmdFast(__instance))
                 return;
 
             byte owner = FactionOwnershipTracker.GetOwner(__instance.Entity.ID);

@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using System.Threading.Tasks;
 using DXVision;
 using HarmonyLib;
 using TABCoopMod.Core;
@@ -90,6 +91,9 @@ namespace TABCoopMod.Determinism
 
         /// <summary>Managed thread ID executing UpdatePhysics() (used to keep async physics off MainThread render RNG/GUIDs).</summary>
         public static volatile int PhysicsThreadId;
+
+        /// <summary>True when DeterministicTaskPatch replaced Loop 2 + Quantize with the merged Two-Phase pass in the current step.</summary>
+        internal static volatile bool MergedPhysicsReadbackHandled;
 
         internal static bool IsPhysicsThreadActive()
         {
@@ -1138,6 +1142,434 @@ namespace TABCoopMod.Determinism
                 DeterministicSandboxPatches.DiagPhysQuantDynTotal += dynTotal;
             }
         }
+
+        private struct NativePhysWrite
+        {
+            public DXPhysicBody Body;
+            public bool WritePos;
+            public PointF Pos;
+            public bool WriteVel;
+            public PointF Vel;
+        }
+
+        private struct CrossedBodyWrite
+        {
+            public DXPhysicBody Body;
+            public bool HighBitVfx;
+        }
+
+        private const int MaxPhysicsWorkers = 8;
+        private static bool _mergedPhysAccessorsTried;
+        private static bool _mergedPhysAccessorsReady;
+        private static Func<DXEntity, PointF> _physGetRawPos;
+        private static Action<DXEntity, PointF> _physSetRawPos;
+        private static Func<DXEntity, PointF> _physGetRawLastPos;
+        private static Action<DXEntity, PointF> _physSetRawLastPos;
+        private static Func<DXEntity, Point> _physGetRawCell;
+        private static List<NativePhysWrite>[] _physNativeQueues;
+        private static List<CrossedBodyWrite>[] _physCrossedQueues;
+        private static int[] _physModCounts;
+        private static int[] _physDynCounts;
+
+        private static bool EnsureMergedPhysicsAccessors()
+        {
+            if (_mergedPhysAccessorsTried) return _mergedPhysAccessorsReady;
+            _mergedPhysAccessorsTried = true;
+            try
+            {
+                var fPos = typeof(DXEntity).GetField("_Position", BindingFlags.NonPublic | BindingFlags.Instance);
+                var fLastPos = typeof(DXEntity).GetField("_LastPosition", BindingFlags.NonPublic | BindingFlags.Instance);
+                var fCell = typeof(DXEntity).GetField("_Cell", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (fPos == null || fPos.FieldType != typeof(PointF)
+                    || fLastPos == null || fLastPos.FieldType != typeof(PointF)
+                    || fCell == null || fCell.FieldType != typeof(Point))
+                {
+                    ModLogger.Warn("[Perf] Merged physics accessors missing DXEntity private fields; using sequential fallback.");
+                    return false;
+                }
+
+                var mod = typeof(LockstepClock).Module;
+
+                var dmGp = new DynamicMethod("TABCoop_PhysGetRawPos", typeof(PointF), new[] { typeof(DXEntity) }, mod, true);
+                var ilGp = dmGp.GetILGenerator();
+                ilGp.Emit(OpCodes.Ldarg_0); ilGp.Emit(OpCodes.Ldfld, fPos); ilGp.Emit(OpCodes.Ret);
+                _physGetRawPos = (Func<DXEntity, PointF>)dmGp.CreateDelegate(typeof(Func<DXEntity, PointF>));
+
+                var dmSp = new DynamicMethod("TABCoop_PhysSetRawPos", typeof(void), new[] { typeof(DXEntity), typeof(PointF) }, mod, true);
+                var ilSp = dmSp.GetILGenerator();
+                ilSp.Emit(OpCodes.Ldarg_0); ilSp.Emit(OpCodes.Ldarg_1); ilSp.Emit(OpCodes.Stfld, fPos); ilSp.Emit(OpCodes.Ret);
+                _physSetRawPos = (Action<DXEntity, PointF>)dmSp.CreateDelegate(typeof(Action<DXEntity, PointF>));
+
+                var dmGlp = new DynamicMethod("TABCoop_PhysGetRawLastPos", typeof(PointF), new[] { typeof(DXEntity) }, mod, true);
+                var ilGlp = dmGlp.GetILGenerator();
+                ilGlp.Emit(OpCodes.Ldarg_0); ilGlp.Emit(OpCodes.Ldfld, fLastPos); ilGlp.Emit(OpCodes.Ret);
+                _physGetRawLastPos = (Func<DXEntity, PointF>)dmGlp.CreateDelegate(typeof(Func<DXEntity, PointF>));
+
+                var dmSlp = new DynamicMethod("TABCoop_PhysSetRawLastPos", typeof(void), new[] { typeof(DXEntity), typeof(PointF) }, mod, true);
+                var ilSlp = dmSlp.GetILGenerator();
+                ilSlp.Emit(OpCodes.Ldarg_0); ilSlp.Emit(OpCodes.Ldarg_1); ilSlp.Emit(OpCodes.Stfld, fLastPos); ilSlp.Emit(OpCodes.Ret);
+                _physSetRawLastPos = (Action<DXEntity, PointF>)dmSlp.CreateDelegate(typeof(Action<DXEntity, PointF>));
+
+                var dmGc = new DynamicMethod("TABCoop_PhysGetRawCell", typeof(Point), new[] { typeof(DXEntity) }, mod, true);
+                var ilGc = dmGc.GetILGenerator();
+                ilGc.Emit(OpCodes.Ldarg_0); ilGc.Emit(OpCodes.Ldfld, fCell); ilGc.Emit(OpCodes.Ret);
+                _physGetRawCell = (Func<DXEntity, Point>)dmGc.CreateDelegate(typeof(Func<DXEntity, Point>));
+
+                _physNativeQueues = new List<NativePhysWrite>[MaxPhysicsWorkers];
+                _physCrossedQueues = new List<CrossedBodyWrite>[MaxPhysicsWorkers];
+                for (int w = 0; w < MaxPhysicsWorkers; w++)
+                {
+                    _physNativeQueues[w] = new List<NativePhysWrite>(256);
+                    _physCrossedQueues[w] = new List<CrossedBodyWrite>(64);
+                }
+                _physModCounts = new int[MaxPhysicsWorkers];
+                _physDynCounts = new int[MaxPhysicsWorkers];
+
+                _mergedPhysAccessorsReady = true;
+                ModLogger.Info("[Perf] Compiled DynamicMethods for Two-Phase Merged Physics Readback+Quantize.");
+            }
+            catch (Exception ex)
+            {
+                _mergedPhysAccessorsReady = false;
+                ModLogger.Warn($"[Perf] EnsureMergedPhysicsAccessors failed (using sequential fallback): {ex.Message}");
+            }
+            return _mergedPhysAccessorsReady;
+        }
+
+        private static bool ApplyQuantizeSingleBody(DXPhysicBody body, int scaleInt, double scale, double invScale, int nCells, float maxCoord)
+        {
+            if (scaleInt <= 0) return false;
+            DXEntity ent = body.GameEntity;
+            if (ent == null || ent.Disposed || ent.PhysicalType != DXBodyType.Dynamic || (ent.ID & 0x8000000000000000UL) != 0UL)
+                return false;
+
+            PointF rawPhysPos = body.PhysicPosition;
+            bool posValid = IsFinite(rawPhysPos.X) && IsFinite(rawPhysPos.Y);
+            PointF rawPhysVel = body.PhysicVelocity;
+            bool velValid = IsFinite(rawPhysVel.X) && IsFinite(rawPhysVel.Y);
+            bool anyChanged = false;
+
+            if (posValid)
+            {
+                float qx = QuantizeScalar(rawPhysPos.X, scale, invScale);
+                float qy = QuantizeScalar(rawPhysPos.Y, scale, invScale);
+                if (nCells > 1)
+                {
+                    if (rawPhysPos.X >= 0f && qx < 0f) qx = 0f;
+                    else if (rawPhysPos.X < nCells && qx >= nCells) qx = maxCoord;
+                    if (rawPhysPos.Y >= 0f && qy < 0f) qy = 0f;
+                    else if (rawPhysPos.Y < nCells && qy >= nCells) qy = maxCoord;
+                }
+                var qPos = new PointF(qx, qy);
+
+                if (rawPhysPos.X != qx || rawPhysPos.Y != qy)
+                {
+                    body.PhysicPosition = qPos;
+                    anyChanged = true;
+                }
+
+                bool wasStationary = body.LastPositionComputed == body.PositionComputed && body.PositionComputed == rawPhysPos;
+                if (body.PositionComputed.X != qx || body.PositionComputed.Y != qy)
+                {
+                    body.PositionComputed = qPos;
+                    anyChanged = true;
+                }
+                if (wasStationary && (body.LastPositionComputed.X != qx || body.LastPositionComputed.Y != qy))
+                {
+                    body.LastPositionComputed = qPos;
+                }
+
+                PointF entPos = ent.Position;
+                if (entPos.X != qx || entPos.Y != qy)
+                {
+                    ent.Position = qPos;
+                    anyChanged = true;
+                }
+                if (wasStationary && (ent.LastPosition.X != qx || ent.LastPosition.Y != qy))
+                {
+                    ent.LastPosition = qPos;
+                }
+            }
+
+            if (velValid)
+            {
+                float qvx = QuantizeScalar(rawPhysVel.X, scale, invScale);
+                float qvy = QuantizeScalar(rawPhysVel.Y, scale, invScale);
+                var qVel = new PointF(qvx, qvy);
+
+                if (rawPhysVel.X != qvx || rawPhysVel.Y != qvy)
+                {
+                    body.PhysicVelocity = qVel;
+                    anyChanged = true;
+                }
+                if (body.Velocity.X != qvx || body.Velocity.Y != qvy)
+                {
+                    body.Velocity = qVel;
+                    anyChanged = true;
+                }
+            }
+            return anyChanged;
+        }
+
+        private static void ProcessPhysicsReadbackWorker(
+            int workerIdx,
+            IList<DXPhysicBody> bodies,
+            int sliceStart,
+            int sliceEnd,
+            int scaleInt,
+            double scale,
+            double invScale,
+            int nCells,
+            float maxCoord)
+        {
+            var nativeQ = _physNativeQueues[workerIdx];
+            var crossedQ = _physCrossedQueues[workerIdx];
+            nativeQ.Clear();
+            crossedQ.Clear();
+            int modCount = 0;
+            int dynCount = 0;
+
+            var getPos = _physGetRawPos;
+            var setPos = _physSetRawPos;
+            var getLastPos = _physGetRawLastPos;
+            var setLastPos = _physSetRawLastPos;
+            var getCell = _physGetRawCell;
+
+            for (int i = sliceStart; i < sliceEnd; i++)
+            {
+                DXPhysicBody body = bodies[i];
+                if (body == null || body.Handle == IntPtr.Zero) continue;
+
+                DXEntity ent = body.GameEntity;
+                if (ent == null || ent.Disposed) continue;
+                if (ent.PhysicalType != DXBodyType.Dynamic) continue;
+
+                if ((ent.ID & 0x8000000000000000UL) != 0UL)
+                {
+                    crossedQ.Add(new CrossedBodyWrite { Body = body, HighBitVfx = true });
+                    continue;
+                }
+
+                dynCount++;
+
+                PointF entPos = getPos(ent);
+                PointF entLastPos = getLastPos(ent);
+                PointF rawPhysPos = body.PhysicPosition;
+                bool didMoveStep = !(entPos == rawPhysPos) || !(entLastPos == rawPhysPos);
+
+                PointF managedVel = body.Velocity;
+                PointF oldPosComp = body.PositionComputed;
+                PointF oldLastComp = body.LastPositionComputed;
+
+                if (!didMoveStep && managedVel.X == 0f && managedVel.Y == 0f && oldPosComp == oldLastComp && oldPosComp == entPos)
+                {
+                    if (scaleInt <= 0
+                        || (IsFinite(oldPosComp.X) && IsFinite(oldPosComp.Y)
+                            && QuantizeScalar(oldPosComp.X, scale, invScale) == oldPosComp.X
+                            && QuantizeScalar(oldPosComp.Y, scale, invScale) == oldPosComp.Y))
+                    {
+                        continue;
+                    }
+                }
+
+                bool posValid = IsFinite(rawPhysPos.X) && IsFinite(rawPhysPos.Y);
+                PointF qPos = rawPhysPos;
+                if (scaleInt > 0 && posValid)
+                {
+                    float qx = QuantizeScalar(rawPhysPos.X, scale, invScale);
+                    float qy = QuantizeScalar(rawPhysPos.Y, scale, invScale);
+                    if (nCells > 1)
+                    {
+                        if (rawPhysPos.X >= 0f && qx < 0f) qx = 0f;
+                        else if (rawPhysPos.X < nCells && qx >= nCells) qx = maxCoord;
+                        if (rawPhysPos.Y >= 0f && qy < 0f) qy = 0f;
+                        else if (rawPhysPos.Y < nCells && qy >= nCells) qy = maxCoord;
+                    }
+                    qPos = new PointF(qx, qy);
+                }
+
+                PointF rawPhysVel = body.PhysicVelocity;
+                bool velValid = IsFinite(rawPhysVel.X) && IsFinite(rawPhysVel.Y);
+                PointF qVel = rawPhysVel;
+                if (scaleInt > 0 && velValid)
+                {
+                    qVel = new PointF(
+                        QuantizeScalar(rawPhysVel.X, scale, invScale),
+                        QuantizeScalar(rawPhysVel.Y, scale, invScale));
+                }
+
+                PointF targetPos = (scaleInt > 0 && posValid) ? qPos : rawPhysPos;
+                PointF targetVel = (scaleInt > 0 && velValid) ? qVel : rawPhysVel;
+
+                // Non-one-cell dynamic entities or any entity crossing a grid cell between entPos -> rawPhysPos / targetPos
+                // are deferred to Phase 2 so DXWorldGrid.SetNewCellFor executes strictly in ascending body index order.
+                bool touchesGrid = targetPos != entPos || (didMoveStep && rawPhysPos != entPos);
+                if (touchesGrid)
+                {
+                    if (!ent.IsOneCellSize)
+                    {
+                        crossedQ.Add(new CrossedBodyWrite { Body = body, HighBitVfx = false });
+                        continue;
+                    }
+                    Point curCell = getCell(ent);
+                    if ((int)targetPos.X != curCell.X || (int)targetPos.Y != curCell.Y
+                        || (didMoveStep && ((int)rawPhysPos.X != curCell.X || (int)rawPhysPos.Y != curCell.Y)))
+                    {
+                        crossedQ.Add(new CrossedBodyWrite { Body = body, HighBitVfx = false });
+                        continue;
+                    }
+                }
+
+                bool writeNativePos = scaleInt > 0 && posValid && (rawPhysPos.X != qPos.X || rawPhysPos.Y != qPos.Y);
+                bool writeNativeVel = scaleInt > 0 && velValid && (rawPhysVel.X != qVel.X || rawPhysVel.Y != qVel.Y);
+                bool anyChanged = writeNativePos || writeNativeVel;
+
+                if (didMoveStep)
+                {
+                    bool wasStationary = scaleInt > 0 && posValid && oldPosComp == rawPhysPos;
+                    PointF newLastComp = wasStationary ? targetPos : oldPosComp;
+                    PointF newEntLastPos = wasStationary ? targetPos : entPos;
+
+                    if (scaleInt > 0 && posValid && (rawPhysPos.X != qPos.X || rawPhysPos.Y != qPos.Y))
+                        anyChanged = true;
+                    if (scaleInt > 0 && posValid && (entPos.X != qPos.X || entPos.Y != qPos.Y))
+                        anyChanged = true;
+                    if (scaleInt > 0 && velValid && (rawPhysVel.X != qVel.X || rawPhysVel.Y != qVel.Y))
+                        anyChanged = true;
+
+                    body.Velocity = targetVel;
+                    body.LastPositionComputed = newLastComp;
+                    body.PositionComputed = targetPos;
+                    setLastPos(ent, newEntLastPos);
+                    if (targetPos.X != entPos.X || targetPos.Y != entPos.Y)
+                        setPos(ent, targetPos);
+                }
+                else
+                {
+                    bool wasStationary = scaleInt > 0 && posValid && oldLastComp == oldPosComp && oldPosComp == rawPhysPos;
+                    if (scaleInt > 0 && posValid)
+                    {
+                        if (oldPosComp.X != qPos.X || oldPosComp.Y != qPos.Y)
+                        {
+                            body.PositionComputed = qPos;
+                            anyChanged = true;
+                        }
+                        if (wasStationary && (oldLastComp.X != qPos.X || oldLastComp.Y != qPos.Y))
+                            body.LastPositionComputed = qPos;
+                        if (entPos.X != qPos.X || entPos.Y != qPos.Y)
+                        {
+                            setPos(ent, qPos);
+                            anyChanged = true;
+                        }
+                        if (wasStationary && (entLastPos.X != qPos.X || entLastPos.Y != qPos.Y))
+                            setLastPos(ent, qPos);
+                    }
+                    if (scaleInt > 0 && velValid && (managedVel.X != qVel.X || managedVel.Y != qVel.Y))
+                    {
+                        body.Velocity = qVel;
+                        anyChanged = true;
+                    }
+                }
+
+                if (writeNativePos || writeNativeVel)
+                {
+                    nativeQ.Add(new NativePhysWrite
+                    {
+                        Body = body,
+                        WritePos = writeNativePos,
+                        Pos = qPos,
+                        WriteVel = writeNativeVel,
+                        Vel = qVel
+                    });
+                }
+                if (anyChanged) modCount++;
+            }
+
+            _physModCounts[workerIdx] = modCount;
+            _physDynCounts[workerIdx] = dynCount;
+        }
+
+        internal static bool TryRunMergedPhysicsReadbackAndQuantize(int start, int end)
+        {
+            if (DXProject.IsInDesigner) return false;
+            var bodies = DXPhysicWorld.Bodies;
+            if (bodies == null || start < 0 || end < start || end > bodies.Count)
+                return false;
+            if (!EnsureMergedPhysicsAccessors())
+                return false;
+
+            int total = end - start;
+            if (total == 0)
+            {
+                MergedPhysicsReadbackHandled = true;
+                return true;
+            }
+
+            bool samplePerf = DeterministicSandboxPatches.DiagPerfSamplingActive;
+            int scaleInt = Testing.TestHarnessConfig.PhysicsQuantScale;
+            double scale = scaleInt > 0 ? scaleInt : 1.0;
+            double invScale = 1.0 / scale;
+            int nCells = DXWorldGrid.NCells;
+            float maxCoord = nCells > 1 ? nCells - (float)invScale : float.MaxValue;
+
+            int workerCount = total >= 512 ? Testing.TestHarnessConfig.ParallelWorkers : 1;
+            if (workerCount > MaxPhysicsWorkers) workerCount = MaxPhysicsWorkers;
+            if (workerCount < 1) workerCount = 1;
+
+            if (workerCount == 1)
+            {
+                ProcessPhysicsReadbackWorker(0, bodies, start, end, scaleInt, scale, invScale, nCells, maxCoord);
+            }
+            else
+            {
+                Parallel.For(0, workerCount, w =>
+                {
+                    int wStart = start + (int)(((long)total * w) / workerCount);
+                    int wEnd = start + (int)(((long)total * (w + 1)) / workerCount);
+                    ProcessPhysicsReadbackWorker(w, bodies, wStart, wEnd, scaleInt, scale, invScale, nCells, maxCoord);
+                });
+            }
+
+            int totalModified = 0;
+            int totalDyn = 0;
+
+            // Phase 2: Sequential commit in ascending worker + body index order for Chipmunk cpBody writes & DXWorldGrid cell updates.
+            for (int w = 0; w < workerCount; w++)
+            {
+                totalModified += _physModCounts[w];
+                totalDyn += _physDynCounts[w];
+
+                var nq = _physNativeQueues[w];
+                for (int i = 0; i < nq.Count; i++)
+                {
+                    var item = nq[i];
+                    if (item.Body.Handle == IntPtr.Zero) continue;
+                    if (item.WritePos) item.Body.PhysicPosition = item.Pos;
+                    if (item.WriteVel) item.Body.PhysicVelocity = item.Vel;
+                }
+                nq.Clear();
+
+                var cq = _physCrossedQueues[w];
+                for (int i = 0; i < cq.Count; i++)
+                {
+                    var c = cq[i];
+                    var b = c.Body;
+                    if (b == null || b.Handle == IntPtr.Zero || b.GameEntity == null || b.GameEntity.Disposed) continue;
+                    b.OnNewPositionComputed();
+                    if (!c.HighBitVfx && scaleInt > 0 && ApplyQuantizeSingleBody(b, scaleInt, scale, invScale, nCells, maxCoord))
+                        totalModified++;
+                }
+                cq.Clear();
+            }
+
+            MergedPhysicsReadbackHandled = true;
+            if (samplePerf)
+            {
+                DeterministicSandboxPatches.DiagPhysQuantModified += totalModified;
+                DeterministicSandboxPatches.DiagPhysQuantDynTotal += totalDyn;
+            }
+            return true;
+        }
     }
 
     /// <summary>
@@ -1438,30 +1870,52 @@ namespace TABCoopMod.Determinism
                     {
                         maxTicksThisFrame = 0;
                     }
-                    else if (readyAhead <= Sync.CoopSessionManager.InputDelayTicks)
-                    {
-                        // Pace Client smoothly at 30Hz * GameSpeed so it doesn't burn the entire InputDelayTicks
-                        // cushion in a single frame and then stall for the next 2 frames.
-                        maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, 1);
-                    }
                     else
                     {
-                        int behind = readyAhead - Sync.CoopSessionManager.InputDelayTicks;
-                        // Keep async 1-tick overlap alive whenever lag is mild (<=3t) OR a single tick
-                        // already exceeds 16ms (so a 28ms sync catchup budget would break at ran=1 anyway
-                        // and lose _TaskLogic/RenderFrame parallelism, halving client FPS).
-                        if (behind <= 3 || DiagAvgTickLogicMs > 16.0)
+                        double clientSpeed = __instance.GameSpeed;
+                        int clientSpeedCeil = clientSpeed > 1.05 ? Math.Max(2, (int)Math.Ceiling(clientSpeed)) : 1;
+                        if (readyAhead <= Sync.CoopSessionManager.InputDelayTicks)
                         {
-                            maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, 1, paceMultiplier: 0.72);
-                            if (maxTicksThisFrame < 1) maxTicksThisFrame = 1;
+                            if (clientSpeedCeil > 1)
+                            {
+                                int clientCap = Math.Min(16, Math.Min(readyAhead + 1, clientSpeedCeil + 2));
+                                maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(clientSpeed, clientCap);
+                            }
+                            else
+                            {
+                                // Pace Client smoothly at 30Hz * GameSpeed so it doesn't burn the entire InputDelayTicks
+                                // cushion in a single frame and then stall for the next 2 frames.
+                                maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(clientSpeed, 1);
+                            }
                         }
                         else
                         {
-                            // Client fell behind by >=4 ticks and ticks are fast enough to batch: sync catchup.
-                            int catchup = behind >= 12 ? 4 : (behind >= 7 ? 3 : 2);
-                            maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, catchup);
-                            maxTicksThisFrame = Math.Max(maxTicksThisFrame, Math.Min(catchup, behind));
-                            LockstepClock.ResetHostTickPacing();
+                            int behind = readyAhead - Sync.CoopSessionManager.InputDelayTicks;
+                            if (clientSpeedCeil > 1)
+                            {
+                                // Always batch multiple ticks on Client when GameSpeed > 1x (even if 1 tick > 16ms),
+                                // because async overlap is disabled above 1.05x; otherwise heavy 360x360 maps stay
+                                // capped at want=1 (~13 TPS) while Host runs multi-tick bursts ahead.
+                                int fastCap = Math.Min(16, Math.Min(readyAhead + 1, Math.Max(clientSpeedCeil + 2, behind >= 12 ? 12 : (behind >= 6 ? 8 : 4))));
+                                maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(clientSpeed, fastCap, paceMultiplier: 0.72);
+                                maxTicksThisFrame = Math.Max(maxTicksThisFrame, Math.Min(fastCap, behind));
+                                LockstepClock.ResetHostTickPacing();
+                            }
+                            // Keep async 1-tick overlap alive whenever lag is mild (<=3t) OR a single tick
+                            // already exceeds 16ms (while still recovering if lag grows >=12t).
+                            else if (behind <= 3 || (DiagAvgTickLogicMs > 16.0 && behind < 12))
+                            {
+                                maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(clientSpeed, 1, paceMultiplier: 0.72);
+                                if (maxTicksThisFrame < 1) maxTicksThisFrame = 1;
+                            }
+                            else
+                            {
+                                // Client fell behind by >=4 ticks and ticks are fast enough to batch: sync catchup.
+                                int catchup = behind >= 12 ? 4 : (behind >= 7 ? 3 : 2);
+                                maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(clientSpeed, catchup);
+                                maxTicksThisFrame = Math.Max(maxTicksThisFrame, Math.Min(catchup, behind));
+                                LockstepClock.ResetHostTickPacing();
+                            }
                         }
                     }
                 }
@@ -1523,9 +1977,11 @@ namespace TABCoopMod.Determinism
             int ticksRan = 0;
             // After running at least 1 tick, allow a wider budget when catching up multiple ticks
             // (especially late-game Client catchup where 1 tick alone takes >10ms).
-            double frameSimBudgetMs = (!isHost && maxTicksThisFrame > 1)
-                ? 28.0
-                : (maxTicksThisFrame > 1 ? 18.0 : 10.0);
+            double frameSimBudgetMs = __instance.GameSpeed > 1.05 && maxTicksThisFrame > 1
+                ? Math.Min(180.0, 28.0 * Math.Min(6.0, __instance.GameSpeed))
+                : ((!isHost && maxTicksThisFrame > 1)
+                    ? 28.0
+                    : (maxTicksThisFrame > 1 ? 18.0 : 10.0));
             for (int step = 0; step < maxTicksThisFrame; step++)
             {
                 if (LockstepClock.PausedBySession) break;
@@ -1655,7 +2111,7 @@ namespace TABCoopMod.Determinism
             {
                 DiagPerfSamplingActive = true;
             }
-            else if (DiagAvgTickLogicMs > 45.0 && (nowMs >= _diagSlowSampleCooldownUntilMs || nowMs < _diagSlowSampleCooldownUntilMs - 60000.0))
+            else if (DiagAvgTickLogicMs > 20.0 && (nowMs >= _diagSlowSampleCooldownUntilMs || nowMs < _diagSlowSampleCooldownUntilMs - 60000.0))
             {
                 DiagPerfSamplingActive = true;
             }
@@ -1876,6 +2332,7 @@ namespace TABCoopMod.Determinism
             LockstepClock.InPhysicsContext = true;
             LockstepClock.InPhysicsStep = true;
             LockstepClock.InPhysicsReadback = false;
+            LockstepClock.MergedPhysicsReadbackHandled = false;
             return true;
         }
 
@@ -1892,17 +2349,20 @@ namespace TABCoopMod.Determinism
         public static void UpdatePhysics_Exit(uint __state)
         {
             bool didStep = LockstepClock.InPhysicsStep;
+            bool mergedHandled = LockstepClock.MergedPhysicsReadbackHandled;
             LockstepClock.InPhysicsContext = false;
             LockstepClock.PhysicsThreadId = 0;
             LockstepClock.InPhysicsStep = false;
             LockstepClock.InPhysicsReadback = false;
+            LockstepClock.MergedPhysicsReadbackHandled = false;
 
             if (LockstepClock.IsDeterministicModeActive)
             {
                 DXPhysicWorld.TimeLastBodyPosition = DXPhysicWorld.TimeBodyPosition;
                 if (didStep && DXPhysicWorld.NUpdates != __state && !LockstepClock.LoadingLevel)
                 {
-                    LockstepClock.QuantizePhysicsBodiesPostStep();
+                    if (!mergedHandled)
+                        LockstepClock.QuantizePhysicsBodiesPostStep();
                     if (_asyncTickInFlight)
                     {
                         _asyncPhysicsStepped = true;
@@ -2545,12 +3005,263 @@ namespace TABCoopMod.Determinism
             }
         }
 
+        public struct PathPrewarmItem
+        {
+            public int CellSize;
+            public Point Start;
+            public Point End;
+            public uint Mask;
+        }
+
+        private delegate List<Point> FindPath8Delegate(
+            int cellSize,
+            Algorithms.PathFinderFast pf,
+            Point p1,
+            Point p2,
+            uint mask,
+            bool nearPath,
+            int? maxNodes,
+            bool useCache);
+
         private static FieldInfo _movableRequestField;
+        private static Func<Dictionary<int, Algorithms.PathFinderFast[]>> _fastGetPathFinders;
+        private static Func<Dictionary<int, uint[,]>> _fastGetGrids;
+        private static FindPath8Delegate _fastFindPath8;
+        private static bool _findPath8Resolved;
         private static int _gridMutationVersion;
         private static int _cachedGridVersion = -1;
         private static readonly Dictionary<PathCacheKey, List<Point>> _exactPathCache =
             new Dictionary<PathCacheKey, List<Point>>(512);
         private const int MaxExactPathCacheEntries = 2048;
+
+        private static readonly object _prewarmPfLock = new object();
+        private static readonly Dictionary<int, uint[,]> _cachedGridRefs = new Dictionary<int, uint[,]>(4);
+        private static readonly Dictionary<int, Algorithms.PathFinderFast[]> _parallelPfs = new Dictionary<int, Algorithms.PathFinderFast[]>(4);
+
+        private static void EnsureFindPath8Bound()
+        {
+            if (_findPath8Resolved) return;
+            _findPath8Resolved = true;
+            try
+            {
+                var fPathFinders = AccessTools.Field(typeof(DXWorldGrid), "PathFinders");
+                var fGrids = AccessTools.Field(typeof(DXWorldGrid), "Grids");
+                var mFindPath8 = AccessTools.Method(
+                    typeof(DXWorldGrid),
+                    "FindPath",
+                    new[]
+                    {
+                        typeof(int),
+                        typeof(Algorithms.PathFinderFast),
+                        typeof(Point),
+                        typeof(Point),
+                        typeof(uint),
+                        typeof(bool),
+                        typeof(int?),
+                        typeof(bool)
+                    });
+
+                if (fPathFinders != null && mFindPath8 != null)
+                {
+                    var dmDict = new System.Reflection.Emit.DynamicMethod(
+                        "TABCoop_GetDXWorldGridPathFinders",
+                        typeof(Dictionary<int, Algorithms.PathFinderFast[]>),
+                        Type.EmptyTypes,
+                        typeof(DeterministicPathfindingPatch).Module,
+                        skipVisibility: true);
+                    var il = dmDict.GetILGenerator();
+                    il.Emit(System.Reflection.Emit.OpCodes.Ldsfld, fPathFinders);
+                    il.Emit(System.Reflection.Emit.OpCodes.Ret);
+                    _fastGetPathFinders = (Func<Dictionary<int, Algorithms.PathFinderFast[]>>)dmDict.CreateDelegate(
+                        typeof(Func<Dictionary<int, Algorithms.PathFinderFast[]>>));
+
+                    _fastFindPath8 = (FindPath8Delegate)Delegate.CreateDelegate(typeof(FindPath8Delegate), mFindPath8);
+                }
+
+                if (fGrids != null)
+                {
+                    var dmGrids = new System.Reflection.Emit.DynamicMethod(
+                        "TABCoop_GetDXWorldGridGrids",
+                        typeof(Dictionary<int, uint[,]>),
+                        Type.EmptyTypes,
+                        typeof(DeterministicPathfindingPatch).Module,
+                        skipVisibility: true);
+                    var ilG = dmGrids.GetILGenerator();
+                    ilG.Emit(System.Reflection.Emit.OpCodes.Ldsfld, fGrids);
+                    ilG.Emit(System.Reflection.Emit.OpCodes.Ret);
+                    _fastGetGrids = (Func<Dictionary<int, uint[,]>>)dmGrids.CreateDelegate(
+                        typeof(Func<Dictionary<int, uint[,]>>));
+                }
+            }
+            catch (Exception ex)
+            {
+                _fastGetPathFinders = null;
+                _fastGetGrids = null;
+                _fastFindPath8 = null;
+                ModLogger.Warn($"[Pathfinding] Failed to bind 8-arg FindPath (falling back to 6-arg): {ex.Message}");
+            }
+        }
+
+        private static List<Point> SolveSimplifiedPathPure(
+            Algorithms.PathFinderFast pf,
+            Point p1,
+            Point p2,
+            uint mask,
+            bool nearPath,
+            int? maxNodes)
+        {
+            int searchLimit = pf.SearchLimit;
+            if (maxNodes.HasValue)
+                pf.SearchLimit = maxNodes.Value;
+            List<Algorithms.PathFinderNode> nodes = pf.FindPath(p1, p2, mask, nearPath);
+            pf.SearchLimit = searchLimit;
+
+            if (nodes == null || nodes.Count == 0)
+                return null;
+
+            if (nodes[0].X != p2.X || nodes[0].Y != p2.Y)
+            {
+                p2.X = nodes[0].X;
+                p2.Y = nodes[0].Y;
+            }
+
+            var path = new List<Point>(nodes.Count);
+            if (nodes.Count == 1)
+            {
+                path.Add(new Point(nodes[0].X, nodes[0].Y));
+            }
+            else
+            {
+                Point prev = new Point(nodes[nodes.Count - 1].X, nodes[nodes.Count - 1].Y);
+                Point cur = new Point(nodes[nodes.Count - 2].X, nodes[nodes.Count - 2].Y);
+                for (int i = nodes.Count - 2; i >= 0; i--)
+                {
+                    if (i == 0)
+                    {
+                        path.Add(new Point(nodes[i].X, nodes[i].Y));
+                        break;
+                    }
+                    Point next = cur;
+                    cur.X = nodes[i - 1].X;
+                    cur.Y = nodes[i - 1].Y;
+                    if (cur.X - next.X != next.X - prev.X || cur.Y - next.Y != next.Y - prev.Y)
+                        path.Add(new Point(nodes[i].X, nodes[i].Y));
+                    prev = next;
+                }
+            }
+
+            if (path.Count > 0 && path[path.Count - 1] != p2)
+                path.Add(p2);
+
+            return path;
+        }
+
+        public static void PrewarmUniquePathsParallel(List<PathPrewarmItem> items)
+        {
+            if (!LockstepClock.IsDeterministicModeActive || items == null || items.Count < 4)
+                return;
+
+            int workers = Testing.TestHarnessConfig.ParallelWorkers;
+            if (workers <= 1) return;
+
+            EnsureFindPath8Bound();
+            var grids = _fastGetGrids?.Invoke();
+            if (grids == null) return;
+
+            long t0 = DeterministicSandboxPatches.DiagPerfSamplingActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+
+            int curVer = System.Threading.Volatile.Read(ref _gridMutationVersion);
+            if (_cachedGridVersion != curVer || _exactPathCache.Count >= MaxExactPathCacheEntries)
+            {
+                _exactPathCache.Clear();
+                _cachedGridVersion = curVer;
+            }
+
+            var seenKeys = new HashSet<PathCacheKey>();
+            var toCompute = new List<PathCacheKey>(items.Count);
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                var it = items[i];
+                int safeCellSize = it.CellSize < 1 ? 1 : (it.CellSize > 3 ? 3 : it.CellSize);
+                if (it.Start == it.End || it.Start.DistanceMaxAxis(it.End) <= 1)
+                    continue;
+                if (!grids.ContainsKey(safeCellSize))
+                    continue;
+
+                var key = new PathCacheKey
+                {
+                    CellSize = safeCellSize,
+                    X1 = it.Start.X,
+                    Y1 = it.Start.Y,
+                    X2 = it.End.X,
+                    Y2 = it.End.Y,
+                    Mask = it.Mask,
+                    NearPath = true,
+                    MaxNodes = -1
+                };
+                if (!_exactPathCache.ContainsKey(key) && seenKeys.Add(key))
+                    toCompute.Add(key);
+            }
+
+            if (toCompute.Count < 4)
+                return;
+
+            int activeWorkers = Math.Min(workers, toCompute.Count);
+            var pfByCellSize = new Dictionary<int, Algorithms.PathFinderFast[]>(3);
+
+            lock (_prewarmPfLock)
+            {
+                for (int i = 0; i < toCompute.Count; i++)
+                {
+                    int cs = toCompute[i].CellSize;
+                    if (pfByCellSize.ContainsKey(cs)) continue;
+                    if (!grids.TryGetValue(cs, out uint[,] grid) || grid == null) continue;
+
+                    if (!_cachedGridRefs.TryGetValue(cs, out var cachedGrid)
+                        || !ReferenceEquals(cachedGrid, grid)
+                        || !_parallelPfs.TryGetValue(cs, out var pfArr)
+                        || pfArr == null
+                        || pfArr.Length < activeWorkers)
+                    {
+                        pfArr = new Algorithms.PathFinderFast[activeWorkers];
+                        for (int w = 0; w < activeWorkers; w++)
+                            pfArr[w] = DXWorldGrid.CreatePathFinder(grid);
+                        _cachedGridRefs[cs] = grid;
+                        _parallelPfs[cs] = pfArr;
+                    }
+                    pfByCellSize[cs] = pfArr;
+                }
+            }
+
+            var results = new List<Point>[toCompute.Count];
+            int total = toCompute.Count;
+
+            Parallel.For(0, activeWorkers, w =>
+            {
+                int s = (total * w) / activeWorkers;
+                int e = (total * (w + 1)) / activeWorkers;
+                for (int i = s; i < e; i++)
+                {
+                    var k = toCompute[i];
+                    if (!pfByCellSize.TryGetValue(k.CellSize, out var pfArr)) continue;
+                    var pf = pfArr[w];
+                    results[i] = SolveSimplifiedPathPure(pf, new Point(k.X1, k.Y1), new Point(k.X2, k.Y2), k.Mask, true, null);
+                }
+            });
+
+            if (_exactPathCache.Count + total < MaxExactPathCacheEntries)
+            {
+                for (int i = 0; i < total; i++)
+                {
+                    var p = results[i];
+                    _exactPathCache[toCompute[i]] = p != null ? new List<Point>(p) : null;
+                }
+            }
+
+            if (t0 != 0L)
+                System.Threading.Interlocked.Add(ref DeterministicSandboxPatches.DiagTickPathfindTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
+        }
 
         internal static void InvalidatePathCache()
         {
@@ -2665,7 +3376,24 @@ namespace TABCoopMod.Determinism
             }
             else
             {
-                List<Point> solved = DXWorldGrid.FindPath(safeCellSize, p1, p2, mask, nearPath, maxNodes);
+                EnsureFindPath8Bound();
+                List<Point> solved;
+                var pfDict = _fastGetPathFinders?.Invoke();
+                if (_fastFindPath8 != null &&
+                    pfDict != null &&
+                    pfDict.TryGetValue(safeCellSize, out var pfArr) &&
+                    pfArr != null &&
+                    pfArr.Length > 0 &&
+                    pfArr[0] != null)
+                {
+                    // Use the 8-arg internal DXWorldGrid.FindPath overload so maxNodes (pf.SearchLimit)
+                    // is honored instead of silently dropped by the 6-arg overload.
+                    solved = _fastFindPath8(safeCellSize, pfArr[0], p1, p2, mask, nearPath, maxNodes, false);
+                }
+                else
+                {
+                    solved = DXWorldGrid.FindPath(safeCellSize, p1, p2, mask, nearPath, maxNodes);
+                }
                 _exactPathCache[key] = solved != null ? new List<Point>(solved) : null;
                 req.Path = solved;
             }

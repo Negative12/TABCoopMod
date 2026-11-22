@@ -373,7 +373,8 @@ namespace TABCoopMod.Testing
                         ["hp"] = GameBridge.GetLifeValue(e),
                         ["player"] = GameBridge.IsPlayerEntity(e),
                         ["owner"] = Sync.FactionOwnershipTracker.GetOwner(e.ID),
-                        ["movable"] = GameBridge.HasComponent(e, GameBridge.TypeCMovable)
+                        ["movable"] = GameBridge.HasComponent(e, GameBridge.TypeCMovable),
+                        ["enabled"] = GameBridge.IsEntityEnabled(e)
                     });
                 }
             }
@@ -492,11 +493,23 @@ namespace TABCoopMod.Testing
 
         private static object IssueRawCommand(Dictionary<string, object> args)
         {
+            int cmdId = GetInt(args, "commandId", 0);
+            if (cmdId == 0)
+            {
+                string cmdName = GetStr(args, "commandName");
+                if (!string.IsNullOrEmpty(cmdName))
+                {
+                    Type cmdType = GameBridge.FindCommandTypeByName(cmdName);
+                    object inst = cmdType != null ? GameBridge.GetCommandInstanceByType(cmdType) : null;
+                    if (inst != null)
+                        cmdId = GameBridge.GetCommandId(inst);
+                }
+            }
             var cmd = new NetCommand
             {
                 Type = (NetCommandType)GetInt(args, "type", 1),
                 PlayerId = (byte)GetInt(args, "playerId", CommandInterceptor.LocalPlayerId),
-                CommandId = GetInt(args, "commandId", 0),
+                CommandId = cmdId,
                 BuildingTypeName = GetStr(args, "buildingType") ?? string.Empty,
                 ExecutorEntityIds = GetULongArray(args, "ids"),
                 TargetEntityId = GetULong(args, "targetEntityId", 0),
@@ -1217,7 +1230,8 @@ namespace TABCoopMod.Testing
             int o = GetInt(args, "oil", 0);
             int extraStorage = GetInt(args, "extraStorage", 0);
             int extraWorkers = GetInt(args, "extraWorkers", 0);
-            FactionContextManager.AdjustResourcesForTesting(pid, g, w, s, i, o, extraStorage, extraWorkers);
+            int extraColonists = GetInt(args, "extraColonists", 0);
+            FactionContextManager.AdjustResourcesForTesting(pid, g, w, s, i, o, extraStorage, extraWorkers, extraColonists);
             return GetFactionState();
         }
 
@@ -1233,6 +1247,11 @@ namespace TABCoopMod.Testing
             Type bt = GameBridge.GameAssembly?.GetType(typeName);
             if (bt == null) throw new ArgumentException($"unknown building type '{typeName}'");
 
+            if (DXGame.Current?.GetEntityFromType(bt) is DXEntity tmpl && tmpl.CellSize.Width > 0 && tmpl.CellSize.Height > 0)
+            {
+                w = tmpl.CellSize.Width;
+                h = tmpl.CellSize.Height;
+            }
             var size = new SizeF(w, h);
             for (int r = 4; r <= maxR; r++)
             {
@@ -1254,7 +1273,9 @@ namespace TABCoopMod.Testing
                             {
                                 ["found"] = true,
                                 ["x"] = pt.X,
-                                ["y"] = pt.Y
+                                ["y"] = pt.Y,
+                                ["sizeW"] = w,
+                                ["sizeH"] = h
                             };
                         }
                     }

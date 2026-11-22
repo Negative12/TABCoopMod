@@ -1136,6 +1136,7 @@ namespace TABCoopMod.Core
                 if (missingCount == 0)
                 {
                     TryCompileFastCommandDelegates();
+                    TryCompileFastPerfDelegates();
                     ModLogger.InfoImmediate($"[GameBridge] ALL BINDINGS VERIFIED SUCCESSFULLY (0 missing, verified={verifiedCount}).");
                     IsInitialized = true;
                     return true;
@@ -1918,7 +1919,7 @@ namespace TABCoopMod.Core
         private static readonly Dictionary<Type, PropertyInfo> _ordersPropCache = new Dictionary<Type, PropertyInfo>();
         private static PropertyInfo _ccProp;
 
-        private static int CompareEntitiesDeterministically(DXEntity a, DXEntity b)
+        internal static int CompareEntitiesDeterministically(DXEntity a, DXEntity b)
         {
             if (ReferenceEquals(a, b)) return 0;
             if (a == null) return -1;
@@ -2026,6 +2027,7 @@ namespace TABCoopMod.Core
                         }
                         ModLogger.Info($"[GameBridge] Rebuilt {rebuiltSets} _EntitiesPerType sets deterministically.");
                     }
+                    InvalidateCommandCenterCache();
                 }
 
                 // Flush deferred DXEntity.CreateBody() calls queued during async level load, then sort
@@ -2395,10 +2397,215 @@ namespace TABCoopMod.Core
             return result;
         }
 
+        private static Func<object, int> _fastGetEntityTeamInt;
+        private static int _playerTeamIntValue = int.MinValue;
+        private static Func<object, bool> _fastIsEntityEnabled;
+        private static Func<object, int> _fastGetEnergyTransferRadius;
+        private static Func<object, uint> _fastGetPathfindingMask;
+        private static Func<object, int> _fastGetMovableCellSize;
+        private static Func<object, PointF> _fastGetCmdTargetPos;
+        private static bool _perfDelegatesCompiled;
+
+        private static void TryCompileFastPerfDelegates()
+        {
+            if (_perfDelegatesCompiled) return;
+            _perfDelegatesCompiled = true;
+            try
+            {
+                if (TypeZXEntity != null)
+                {
+                    if (_propEntityTeam == null)
+                        _propEntityTeam = TypeZXEntity.GetProperty("Team", BindingFlags.Public | BindingFlags.Instance);
+                    var teamGetter = _propEntityTeam?.GetGetMethod(true);
+                    if (teamGetter != null && _propEntityTeam.PropertyType.IsEnum)
+                    {
+                        _playerTeamIntValue = Convert.ToInt32(Enum.Parse(_propEntityTeam.PropertyType, "Player", true));
+                        var dmTeam = new DynamicMethod(
+                            "TABCoop_FastGetEntityTeamInt",
+                            typeof(int),
+                            new[] { typeof(object) },
+                            typeof(GameBridge).Module,
+                            skipVisibility: true);
+                        var ilT = dmTeam.GetILGenerator();
+                        var lblBad = ilT.DefineLabel();
+                        ilT.Emit(OpCodes.Ldarg_0);
+                        ilT.Emit(OpCodes.Isinst, TypeZXEntity);
+                        ilT.Emit(OpCodes.Dup);
+                        ilT.Emit(OpCodes.Brfalse_S, lblBad);
+                        ilT.Emit(OpCodes.Callvirt, teamGetter);
+                        ilT.Emit(OpCodes.Conv_I4);
+                        ilT.Emit(OpCodes.Ret);
+                        ilT.MarkLabel(lblBad);
+                        ilT.Emit(OpCodes.Pop);
+                        ilT.Emit(OpCodes.Ldc_I4_M1);
+                        ilT.Emit(OpCodes.Ret);
+                        _fastGetEntityTeamInt = (Func<object, int>)dmTeam.CreateDelegate(typeof(Func<object, int>));
+                    }
+
+                    if (_pStructEnabled == null)
+                        _pStructEnabled = TypeZXEntity.GetProperty("Enabled", BindingFlags.Public | BindingFlags.Instance);
+                    var enabledGetter = _pStructEnabled?.GetGetMethod(true);
+                    if (enabledGetter != null)
+                    {
+                        var dmEn = new DynamicMethod(
+                            "TABCoop_FastIsEntityEnabled",
+                            typeof(bool),
+                            new[] { typeof(object) },
+                            typeof(GameBridge).Module,
+                            skipVisibility: true);
+                        var ilE = dmEn.GetILGenerator();
+                        var lblBad = ilE.DefineLabel();
+                        ilE.Emit(OpCodes.Ldarg_0);
+                        ilE.Emit(OpCodes.Isinst, TypeZXEntity);
+                        ilE.Emit(OpCodes.Dup);
+                        ilE.Emit(OpCodes.Brfalse_S, lblBad);
+                        ilE.Emit(OpCodes.Callvirt, enabledGetter);
+                        ilE.Emit(OpCodes.Ret);
+                        ilE.MarkLabel(lblBad);
+                        ilE.Emit(OpCodes.Pop);
+                        ilE.Emit(OpCodes.Ldc_I4_0);
+                        ilE.Emit(OpCodes.Ret);
+                        _fastIsEntityEnabled = (Func<object, bool>)dmEn.CreateDelegate(typeof(Func<object, bool>));
+                    }
+
+                    var radiusGetter = _propDefaultParamsEnergyRadius?.GetGetMethod(true);
+                    if (_methodEntityGetDefaultParams != null && radiusGetter != null)
+                    {
+                        var dmRad = new DynamicMethod(
+                            "TABCoop_FastGetEnergyTransferRadius",
+                            typeof(int),
+                            new[] { typeof(object) },
+                            typeof(GameBridge).Module,
+                            skipVisibility: true);
+                        var ilR = dmRad.GetILGenerator();
+                        var lblZero = ilR.DefineLabel();
+                        ilR.Emit(OpCodes.Ldarg_0);
+                        ilR.Emit(OpCodes.Isinst, TypeZXEntity);
+                        ilR.Emit(OpCodes.Dup);
+                        ilR.Emit(OpCodes.Brfalse_S, lblZero);
+                        ilR.Emit(OpCodes.Callvirt, _methodEntityGetDefaultParams);
+                        ilR.Emit(OpCodes.Dup);
+                        ilR.Emit(OpCodes.Brfalse_S, lblZero);
+                        ilR.Emit(OpCodes.Callvirt, radiusGetter);
+                        ilR.Emit(OpCodes.Conv_I4);
+                        ilR.Emit(OpCodes.Ret);
+                        ilR.MarkLabel(lblZero);
+                        ilR.Emit(OpCodes.Pop);
+                        ilR.Emit(OpCodes.Ldc_I4_0);
+                        ilR.Emit(OpCodes.Ret);
+                        _fastGetEnergyTransferRadius = (Func<object, int>)dmRad.CreateDelegate(typeof(Func<object, int>));
+                    }
+
+                    var maskGetter = TypeZXEntity.GetProperty("PathfindingMask", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod(true);
+                    if (maskGetter != null)
+                    {
+                        var dmMask = new DynamicMethod(
+                            "TABCoop_FastGetPathfindingMask",
+                            typeof(uint),
+                            new[] { typeof(object) },
+                            typeof(GameBridge).Module,
+                            skipVisibility: true);
+                        var ilM = dmMask.GetILGenerator();
+                        var lblAll = ilM.DefineLabel();
+                        ilM.Emit(OpCodes.Ldarg_0);
+                        ilM.Emit(OpCodes.Isinst, TypeZXEntity);
+                        ilM.Emit(OpCodes.Dup);
+                        ilM.Emit(OpCodes.Brfalse_S, lblAll);
+                        ilM.Emit(OpCodes.Callvirt, maskGetter);
+                        ilM.Emit(OpCodes.Conv_U4);
+                        ilM.Emit(OpCodes.Ret);
+                        ilM.MarkLabel(lblAll);
+                        ilM.Emit(OpCodes.Pop);
+                        ilM.Emit(OpCodes.Ldc_I4_M1);
+                        ilM.Emit(OpCodes.Conv_U4);
+                        ilM.Emit(OpCodes.Ret);
+                        _fastGetPathfindingMask = (Func<object, uint>)dmMask.CreateDelegate(typeof(Func<object, uint>));
+                    }
+                }
+
+                if (TypeCMovable != null)
+                {
+                    var fCellSize = TypeCMovable.GetField("#=zaEz384L8BdkBD$9eFb9jRg5sK8kR", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                    if (fCellSize != null && fCellSize.FieldType == typeof(int))
+                    {
+                        var dmCs = new DynamicMethod(
+                            "TABCoop_FastGetMovableCellSize",
+                            typeof(int),
+                            new[] { typeof(object) },
+                            typeof(GameBridge).Module,
+                            skipVisibility: true);
+                        var ilC = dmCs.GetILGenerator();
+                        var lblOne = ilC.DefineLabel();
+                        ilC.Emit(OpCodes.Ldarg_0);
+                        ilC.Emit(OpCodes.Isinst, TypeCMovable);
+                        ilC.Emit(OpCodes.Dup);
+                        ilC.Emit(OpCodes.Brfalse_S, lblOne);
+                        ilC.Emit(OpCodes.Ldfld, fCellSize);
+                        ilC.Emit(OpCodes.Ret);
+                        ilC.MarkLabel(lblOne);
+                        ilC.Emit(OpCodes.Pop);
+                        ilC.Emit(OpCodes.Ldc_I4_1);
+                        ilC.Emit(OpCodes.Ret);
+                        _fastGetMovableCellSize = (Func<object, int>)dmCs.CreateDelegate(typeof(Func<object, int>));
+                    }
+                }
+
+                EnsureCommandTargetMeta();
+                var serPosGetter = _pSerPosition?.GetGetMethod(true);
+                if (_typeZXCommandTargetRef != null && serPosGetter != null && serPosGetter.ReturnType == typeof(PointF))
+                {
+                    var dmPos = new DynamicMethod(
+                        "TABCoop_FastGetCmdTargetPos",
+                        typeof(PointF),
+                        new[] { typeof(object) },
+                        typeof(GameBridge).Module,
+                        skipVisibility: true);
+                    var ilP = dmPos.GetILGenerator();
+                    var lblEmpty = ilP.DefineLabel();
+                    var locEmpty = ilP.DeclareLocal(typeof(PointF));
+                    ilP.Emit(OpCodes.Ldarg_0);
+                    ilP.Emit(OpCodes.Isinst, _typeZXCommandTargetRef);
+                    ilP.Emit(OpCodes.Brfalse_S, lblEmpty);
+                    ilP.Emit(OpCodes.Ldarg_0);
+                    if (_typeZXCommandTargetRef.IsValueType)
+                    {
+                        ilP.Emit(OpCodes.Unbox, _typeZXCommandTargetRef);
+                        ilP.Emit(OpCodes.Call, serPosGetter);
+                    }
+                    else
+                    {
+                        ilP.Emit(OpCodes.Castclass, _typeZXCommandTargetRef);
+                        ilP.Emit(OpCodes.Callvirt, serPosGetter);
+                    }
+                    ilP.Emit(OpCodes.Ret);
+                    ilP.MarkLabel(lblEmpty);
+                    ilP.Emit(OpCodes.Ldloca_S, locEmpty);
+                    ilP.Emit(OpCodes.Initobj, typeof(PointF));
+                    ilP.Emit(OpCodes.Ldloc, locEmpty);
+                    ilP.Emit(OpCodes.Ret);
+                    _fastGetCmdTargetPos = (Func<object, PointF>)dmPos.CreateDelegate(typeof(Func<object, PointF>));
+                }
+
+                EnsureFastEconomyPerfDelegates();
+            }
+            catch (Exception ex)
+            {
+                _fastGetEntityTeamInt = null;
+                _fastIsEntityEnabled = null;
+                _fastGetEnergyTransferRadius = null;
+                ModLogger.Warn($"[Perf] TryCompileFastPerfDelegates failed (falling back to reflection): {ex.Message}");
+            }
+        }
+
         public static bool IsPlayerEntity(object entity) => IsPlayerTeam(entity);
 
         private static bool IsPlayerTeam(object entity)
         {
+            if (entity == null) return false;
+            var fastTeam = _fastGetEntityTeamInt;
+            if (fastTeam != null)
+                return fastTeam(entity) == _playerTeamIntValue;
+
             Type t = entity.GetType();
             if (!_teamPropCache.TryGetValue(t, out PropertyInfo prop))
             {
@@ -5662,7 +5869,11 @@ namespace TABCoopMod.Core
 
         public static bool IsBuildingInfected(DXEntity entity)
         {
-            if (entity == null || _propBuildingInfected == null || TypeBuilding == null || !TypeBuilding.IsInstanceOfType(entity))
+            if (entity == null) return false;
+            EnsureFastEconomyPerfDelegates();
+            var fast = _fastGetBldgInfected;
+            if (fast != null) return fast(entity);
+            if (_propBuildingInfected == null || TypeBuilding == null || !TypeBuilding.IsInstanceOfType(entity))
                 return false;
             try { return (bool)_propBuildingInfected.GetValue(entity); } catch { return false; }
         }
@@ -5685,41 +5896,127 @@ namespace TABCoopMod.Core
             catch { return true; }
         }
 
+        private sealed class AliveCcCacheEntry
+        {
+            public int Tick;
+            public int Gen;
+            public DXGame Game;
+            public DXEntity[] Items;
+        }
+
+        private static int _ccCacheGeneration = 1;
+        private static volatile AliveCcCacheEntry _aliveCcCache;
+
+        public static void InvalidateCommandCenterCache()
+        {
+            System.Threading.Interlocked.Increment(ref _ccCacheGeneration);
+        }
+
+        private static bool AreEntitiesUndisposed(DXEntity[] items)
+        {
+            for (int i = 0; i < items.Length; i++)
+            {
+                var e = items[i];
+                if (e == null || e.Disposed) return false;
+            }
+            return true;
+        }
+
+        public static IReadOnlyList<DXEntity> GetAliveCommandCentersCached()
+        {
+            var game = DXGame.Current;
+            if (game == null) return Array.Empty<DXEntity>();
+
+            int tick = game.IAIterationInt;
+            int gen = System.Threading.Volatile.Read(ref _ccCacheGeneration);
+            var snap = _aliveCcCache;
+            if (!TABCoopMod.Determinism.LockstepClock.LoadingLevel &&
+                tick > 0 &&
+                snap != null &&
+                ReferenceEquals(snap.Game, game) &&
+                snap.Gen == gen &&
+                snap.Tick == tick &&
+                AreEntitiesUndisposed(snap.Items))
+            {
+                return snap.Items;
+            }
+
+            var list = new List<DXEntity>(4);
+            CollectCommandCenters(game, aliveOnly: true, list);
+            DXEntity[] arr = list.Count > 0 ? list.ToArray() : Array.Empty<DXEntity>();
+            _aliveCcCache = new AliveCcCacheEntry
+            {
+                Tick = tick,
+                Gen = gen,
+                Game = game,
+                Items = arr
+            };
+            return arr;
+        }
+
+        private static void CollectCommandCenters(DXGame game, bool aliveOnly, List<DXEntity> result)
+        {
+            result.Clear();
+            if (game == null) return;
+
+            if (TypeCommandCenter != null)
+            {
+                foreach (var e in game.EntitiesOfType(TypeCommandCenter))
+                {
+                    if (e == null || e.Disposed) continue;
+                    if (!IsPlayerEntity(e)) continue;
+                    if (aliveOnly && (!IsEntityAlive(e) || IsBuildingInfected(e))) continue;
+                    result.Add(e);
+                }
+            }
+            else
+            {
+                var entities = GetEntitiesList(game);
+                if (entities != null)
+                {
+                    for (int i = 0; i < entities.Count; i++)
+                    {
+                        var e = entities[i];
+                        if (e == null || e.Disposed || !IsCommandCenter(e)) continue;
+                        if (!IsPlayerEntity(e)) continue;
+                        if (aliveOnly && (!IsEntityAlive(e) || IsBuildingInfected(e))) continue;
+                        result.Add(e);
+                    }
+                }
+                else if (game.Entities != null)
+                {
+                    foreach (var e in game.Entities)
+                    {
+                        if (e == null || e.Disposed || !IsCommandCenter(e)) continue;
+                        if (!IsPlayerEntity(e)) continue;
+                        if (aliveOnly && (!IsEntityAlive(e) || IsBuildingInfected(e))) continue;
+                        result.Add(e);
+                    }
+                }
+            }
+
+            if (result.Count > 1)
+            {
+                result.Sort((a, b) =>
+                {
+                    int cx = a.CellX.CompareTo(b.CellX);
+                    if (cx != 0) return cx;
+                    int cy = a.CellY.CompareTo(b.CellY);
+                    if (cy != 0) return cy;
+                    return a.ID.CompareTo(b.ID);
+                });
+            }
+        }
+
         public static List<DXEntity> GetAllCommandCenters(bool aliveOnly = true)
         {
-            var result = new List<DXEntity>();
+            if (aliveOnly)
+                return new List<DXEntity>(GetAliveCommandCentersCached());
+
+            var result = new List<DXEntity>(4);
             var game = DXGame.Current;
             if (game == null) return result;
-            var entities = GetEntitiesList(game);
-            if (entities != null)
-            {
-                for (int i = 0; i < entities.Count; i++)
-                {
-                    var e = entities[i];
-                    if (e == null || e.Disposed || !IsCommandCenter(e)) continue;
-                    if (!IsPlayerEntity(e)) continue;
-                    if (aliveOnly && (!IsEntityAlive(e) || IsBuildingInfected(e))) continue;
-                    result.Add(e);
-                }
-            }
-            else if (game.Entities != null)
-            {
-                foreach (var e in game.Entities)
-                {
-                    if (e == null || e.Disposed || !IsCommandCenter(e)) continue;
-                    if (!IsPlayerEntity(e)) continue;
-                    if (aliveOnly && (!IsEntityAlive(e) || IsBuildingInfected(e))) continue;
-                    result.Add(e);
-                }
-            }
-            result.Sort((a, b) =>
-            {
-                int cx = a.CellX.CompareTo(b.CellX);
-                if (cx != 0) return cx;
-                int cy = a.CellY.CompareTo(b.CellY);
-                if (cy != 0) return cy;
-                return a.ID.CompareTo(b.ID);
-            });
+            CollectCommandCenters(game, aliveOnly: false, result);
             return result;
         }
 
@@ -5944,13 +6241,43 @@ namespace TABCoopMod.Core
 
         public static int GetEntityEnergyTransferRadius(DXEntity entity)
         {
-            if (entity == null || _methodEntityGetDefaultParams == null || _propDefaultParamsEnergyRadius == null) return 0;
+            if (entity == null) return 0;
+            var fast = _fastGetEnergyTransferRadius;
+            if (fast != null)
+                return fast(entity);
+
+            if (_methodEntityGetDefaultParams == null || _propDefaultParamsEnergyRadius == null) return 0;
             try
             {
                 object p = _methodEntityGetDefaultParams.Invoke(entity, null);
                 return p != null ? Convert.ToInt32(_propDefaultParamsEnergyRadius.GetValue(p)) : 0;
             }
             catch { return 0; }
+        }
+
+        public static uint GetEntityPathfindingMask(DXEntity entity)
+        {
+            if (entity == null) return uint.MaxValue;
+            var fast = _fastGetPathfindingMask;
+            if (fast != null) return fast(entity);
+            return uint.MaxValue;
+        }
+
+        public static int GetMovableCellSize(object movableComp)
+        {
+            if (movableComp == null) return 1;
+            var fast = _fastGetMovableCellSize;
+            if (fast != null) return fast(movableComp);
+            return 1;
+        }
+
+        public static PointF GetCommandTargetPosition(object cmdTarget)
+        {
+            if (cmdTarget == null) return PointF.Empty;
+            var fast = _fastGetCmdTargetPos;
+            if (fast != null) return fast(cmdTarget);
+            EnsureCommandTargetMeta();
+            return (_pSerPosition?.GetValue(cmdTarget) is PointF p) ? p : PointF.Empty;
         }
 
         public static ZXTerrainResourceType[,] GetTerrainResourceCells()
@@ -6056,11 +6383,331 @@ namespace TABCoopMod.Core
             public bool ShowFullMap;
         }
 
+        private delegate void FastReadEconomyDelegate(object ls, out RawLevelEconomyState s);
+        private delegate void FastWriteEconomyDelegate(object ls, in RawLevelEconomyState s);
+        private delegate void FastReadBuildingTotalsDelegate(
+            object bldg,
+            out int foodSup, out int workSup, out int engSup,
+            out int woodSup, out int stoneSup, out int ironSup,
+            out int oilSup, out int goldSup, out int foodNeed);
+        private delegate void FastReadDefaultParamsDelegate(
+            object dp,
+            out bool canEnhance, out float resGenTime, out bool convertGold,
+            out int colonists, out int resStorage, out int goldGen, out float goldPerCol,
+            out int foodNeed, out int workNeed, out int engNeed,
+            out int woodGen, out int stoneGen, out int ironGen, out int oilGen,
+            out int resCollectRadius, out int goldCost, out int level,
+            out int maxInstances, out float returnFactor);
+
+        private static FastReadEconomyDelegate _fastReadEconomy;
+        private static FastWriteEconomyDelegate _fastWriteEconomy;
+        private static FastReadBuildingTotalsDelegate _fastReadBldgTotals;
+        private static FastReadDefaultParamsDelegate _fastReadDefaultParams;
+        private static Func<object, object> _fastGetEntityDefaultParams;
+        private static Func<object, bool> _fastGetBldgDisabledManual;
+        private static Func<object, bool> _fastGetBldgCanSupply;
+        private static Func<object, bool> _fastGetBldgInfected;
+        private static bool _fastEconPerfCompiled;
+
+        private static void EnsureFastEconomyPerfDelegates()
+        {
+            if (_fastEconPerfCompiled) return;
+            _fastEconPerfCompiled = true;
+            try
+            {
+                var lsType = LevelStateType ?? GameAssembly?.GetType("ZX.ZXLevelState");
+                if (lsType != null)
+                {
+                    var fieldPairs = new (FieldInfo src, string dstName)[]
+                    {
+                        (_fLsWood, nameof(RawLevelEconomyState.Wood)),
+                        (_fLsStone, nameof(RawLevelEconomyState.Stone)),
+                        (_fLsIron, nameof(RawLevelEconomyState.Iron)),
+                        (_fLsOil, nameof(RawLevelEconomyState.Oil)),
+                        (_fLsGold, nameof(RawLevelEconomyState.Gold)),
+                        (_fLsStorage, nameof(RawLevelEconomyState.ResourceStorage)),
+                        (_fLsFoodSup, nameof(RawLevelEconomyState.FoodSupply)),
+                        (_fLsWorkSup, nameof(RawLevelEconomyState.WorkersSupply)),
+                        (_fLsEngSup, nameof(RawLevelEconomyState.EnergySupply)),
+                        (_fLsFoodNeed, nameof(RawLevelEconomyState.FoodNeeded)),
+                        (_fLsWorkNeed, nameof(RawLevelEconomyState.WorkersNeeded)),
+                        (_fLsEngNeed, nameof(RawLevelEconomyState.EnergyNeeded)),
+                        (_fLsColonists, nameof(RawLevelEconomyState.Colonists)),
+                        (_fLsGoldByCc, nameof(RawLevelEconomyState.GoldByCc)),
+                        (_fLsTotalStock, nameof(RawLevelEconomyState.TotalStock)),
+                    };
+                    var propPairs = new (PropertyInfo src, string dstName)[]
+                    {
+                        (_propLevelStateExtraFood, nameof(RawLevelEconomyState.ExtraFood)),
+                        (_propLevelStateExtraWorkers, nameof(RawLevelEconomyState.ExtraWorkers)),
+                        (_pLsExtraEnergy, nameof(RawLevelEconomyState.ExtraEnergy)),
+                        (_pLsFoodRes, nameof(RawLevelEconomyState.FoodReserved)),
+                        (_pLsWorkRes, nameof(RawLevelEconomyState.WorkersReserved)),
+                        (_pLsEngRes, nameof(RawLevelEconomyState.EnergyReserved)),
+                        (_pLsWoodProd, nameof(RawLevelEconomyState.WoodProd)),
+                        (_pLsStoneProd, nameof(RawLevelEconomyState.StoneProd)),
+                        (_pLsIronProd, nameof(RawLevelEconomyState.IronProd)),
+                        (_pLsOilProd, nameof(RawLevelEconomyState.OilProd)),
+                        (_pLsGoldProd, nameof(RawLevelEconomyState.GoldProd)),
+                        (_pLsWoodProdRes, nameof(RawLevelEconomyState.WoodProdRes)),
+                        (_pLsStoneProdRes, nameof(RawLevelEconomyState.StoneProdRes)),
+                        (_pLsIronProdRes, nameof(RawLevelEconomyState.IronProdRes)),
+                        (_pLsOilProdRes, nameof(RawLevelEconomyState.OilProdRes)),
+                        (_pLsNegGoldTurns, nameof(RawLevelEconomyState.NegGoldTurns)),
+                        (_pLsNegFoodTurns, nameof(RawLevelEconomyState.NegFoodTurns)),
+                        (_pLsNMarkets, nameof(RawLevelEconomyState.NMarkets)),
+                        (_pLsMaxGoldExport, nameof(RawLevelEconomyState.MaxGoldExport)),
+                        (_pLsMaxColonists, nameof(RawLevelEconomyState.MaxColonists)),
+                        (_pLsArmyGold, nameof(RawLevelEconomyState.ArmyGold)),
+                        (_pLsArmyFoodPen, nameof(RawLevelEconomyState.ArmyFoodPen)),
+                        (_pLsStructGold, nameof(RawLevelEconomyState.StructGold)),
+                        (_pLsGoldPerCol, nameof(RawLevelEconomyState.GoldPerColonist)),
+                        (_pLsShowFullMap, nameof(RawLevelEconomyState.ShowFullMap)),
+                    };
+
+                    bool allTypesMatch = true;
+                    foreach (var p in fieldPairs)
+                    {
+                        if (p.src == null || typeof(RawLevelEconomyState).GetField(p.dstName)?.FieldType != p.src.FieldType)
+                        { allTypesMatch = false; break; }
+                    }
+                    if (allTypesMatch)
+                    {
+                        foreach (var p in propPairs)
+                        {
+                            var dstF = typeof(RawLevelEconomyState).GetField(p.dstName);
+                            if (p.src == null) continue;
+                            if (dstF == null || dstF.FieldType != p.src.PropertyType || p.src.GetGetMethod(true) == null || p.src.GetSetMethod(true) == null)
+                            { allTypesMatch = false; break; }
+                        }
+                    }
+
+                    if (allTypesMatch)
+                    {
+                        var dmR = new DynamicMethod(
+                            "TABCoop_FastReadRawEconomy",
+                            typeof(void),
+                            new[] { typeof(object), typeof(RawLevelEconomyState).MakeByRefType() },
+                            typeof(GameBridge).Module,
+                            skipVisibility: true);
+                        var ilR = dmR.GetILGenerator();
+                        var locR = ilR.DeclareLocal(lsType);
+                        ilR.Emit(OpCodes.Ldarg_1);
+                        ilR.Emit(OpCodes.Initobj, typeof(RawLevelEconomyState));
+                        ilR.Emit(OpCodes.Ldarg_0);
+                        ilR.Emit(OpCodes.Castclass, lsType);
+                        ilR.Emit(OpCodes.Stloc, locR);
+                        foreach (var p in fieldPairs)
+                        {
+                            var dstF = typeof(RawLevelEconomyState).GetField(p.dstName);
+                            ilR.Emit(OpCodes.Ldarg_1);
+                            ilR.Emit(OpCodes.Ldloc, locR);
+                            ilR.Emit(OpCodes.Ldfld, p.src);
+                            ilR.Emit(OpCodes.Stfld, dstF);
+                        }
+                        foreach (var p in propPairs)
+                        {
+                            if (p.src == null) continue;
+                            var dstF = typeof(RawLevelEconomyState).GetField(p.dstName);
+                            ilR.Emit(OpCodes.Ldarg_1);
+                            ilR.Emit(OpCodes.Ldloc, locR);
+                            ilR.Emit(OpCodes.Callvirt, p.src.GetGetMethod(true));
+                            ilR.Emit(OpCodes.Stfld, dstF);
+                        }
+                        ilR.Emit(OpCodes.Ret);
+                        _fastReadEconomy = (FastReadEconomyDelegate)dmR.CreateDelegate(typeof(FastReadEconomyDelegate));
+
+                        var dmW = new DynamicMethod(
+                            "TABCoop_FastWriteRawEconomy",
+                            typeof(void),
+                            new[] { typeof(object), typeof(RawLevelEconomyState).MakeByRefType() },
+                            typeof(GameBridge).Module,
+                            skipVisibility: true);
+                        var ilW = dmW.GetILGenerator();
+                        var locW = ilW.DeclareLocal(lsType);
+                        ilW.Emit(OpCodes.Ldarg_0);
+                        ilW.Emit(OpCodes.Castclass, lsType);
+                        ilW.Emit(OpCodes.Stloc, locW);
+                        foreach (var p in fieldPairs)
+                        {
+                            var srcF = typeof(RawLevelEconomyState).GetField(p.dstName);
+                            ilW.Emit(OpCodes.Ldloc, locW);
+                            ilW.Emit(OpCodes.Ldarg_1);
+                            ilW.Emit(OpCodes.Ldfld, srcF);
+                            ilW.Emit(OpCodes.Stfld, p.src);
+                        }
+                        foreach (var p in propPairs)
+                        {
+                            if (p.src == null) continue;
+                            var srcF = typeof(RawLevelEconomyState).GetField(p.dstName);
+                            ilW.Emit(OpCodes.Ldloc, locW);
+                            ilW.Emit(OpCodes.Ldarg_1);
+                            ilW.Emit(OpCodes.Ldfld, srcF);
+                            ilW.Emit(OpCodes.Callvirt, p.src.GetSetMethod(true));
+                        }
+                        ilW.Emit(OpCodes.Ret);
+                        _fastWriteEconomy = (FastWriteEconomyDelegate)dmW.CreateDelegate(typeof(FastWriteEconomyDelegate));
+                    }
+                }
+
+                if (TypeZXEntity != null && _methodEntityGetDefaultParams != null)
+                {
+                    var dmDpObj = new DynamicMethod(
+                        "TABCoop_GetEntityDefaultParamsObj",
+                        typeof(object),
+                        new[] { typeof(object) },
+                        typeof(GameBridge).Module,
+                        skipVisibility: true);
+                    var ilDpObj = dmDpObj.GetILGenerator();
+                    var lblNull = ilDpObj.DefineLabel();
+                    ilDpObj.Emit(OpCodes.Ldarg_0);
+                    ilDpObj.Emit(OpCodes.Isinst, TypeZXEntity);
+                    ilDpObj.Emit(OpCodes.Dup);
+                    ilDpObj.Emit(OpCodes.Brfalse_S, lblNull);
+                    ilDpObj.Emit(OpCodes.Callvirt, _methodEntityGetDefaultParams);
+                    ilDpObj.Emit(OpCodes.Ret);
+                    ilDpObj.MarkLabel(lblNull);
+                    ilDpObj.Emit(OpCodes.Ret);
+                    _fastGetEntityDefaultParams = (Func<object, object>)dmDpObj.CreateDelegate(typeof(Func<object, object>));
+                }
+
+                if (TypeBuilding != null)
+                {
+                    _fastGetBldgDisabledManual = CompileBoolPropGetter(TypeBuilding, _pBldgDisabledManual, "TABCoop_FastBldgDisabledManual");
+                    _fastGetBldgCanSupply = CompileBoolPropGetter(TypeBuilding, _pBldgCanSupply, "TABCoop_FastBldgCanSupply");
+                    _fastGetBldgInfected = CompileBoolPropGetter(TypeBuilding, _propBuildingInfected, "TABCoop_FastBldgInfected");
+
+                    var bldgProps = new[]
+                    {
+                        _pBldgTotalFoodSup, _pBldgTotalWorkSup, _pBldgTotalEngSup,
+                        _pBldgTotalWoodSup, _pBldgTotalStoneSup, _pBldgTotalIronSup,
+                        _pBldgTotalOilSup, _pBldgTotalGoldSup, _pBldgTotalFoodNeed
+                    };
+                    bool okB = true;
+                    foreach (var bp in bldgProps)
+                        if (bp == null || bp.PropertyType != typeof(int) || bp.GetGetMethod(true) == null) { okB = false; break; }
+                    if (okB)
+                    {
+                        var pTypes = new Type[10];
+                        pTypes[0] = typeof(object);
+                        for (int i = 1; i < 10; i++) pTypes[i] = typeof(int).MakeByRefType();
+                        var dmB = new DynamicMethod("TABCoop_FastReadBuildingTotals", typeof(void), pTypes, typeof(GameBridge).Module, skipVisibility: true);
+                        var ilB = dmB.GetILGenerator();
+                        var locB = ilB.DeclareLocal(TypeBuilding);
+                        ilB.Emit(OpCodes.Ldarg_0);
+                        ilB.Emit(OpCodes.Castclass, TypeBuilding);
+                        ilB.Emit(OpCodes.Stloc, locB);
+                        for (int i = 0; i < bldgProps.Length; i++)
+                        {
+                            ilB.Emit(OpCodes.Ldarg, i + 1);
+                            ilB.Emit(OpCodes.Ldloc, locB);
+                            ilB.Emit(OpCodes.Callvirt, bldgProps[i].GetGetMethod(true));
+                            ilB.Emit(OpCodes.Stind_I4);
+                        }
+                        ilB.Emit(OpCodes.Ret);
+                        _fastReadBldgTotals = (FastReadBuildingTotalsDelegate)dmB.CreateDelegate(typeof(FastReadBuildingTotalsDelegate));
+                    }
+                }
+
+                var dpType = _methodEntityGetDefaultParams?.ReturnType;
+                if (dpType != null)
+                {
+                    var dpProps = new (PropertyInfo p, Type expected)[]
+                    {
+                        (_pDefCanEnhance, typeof(bool)),
+                        (_pDefResGenTime, typeof(float)),
+                        (_pDefConvertResToGold, typeof(bool)),
+                        (_pDefColonists, typeof(int)),
+                        (_pDefResStorage, typeof(int)),
+                        (_pDefGoldGen, typeof(int)),
+                        (_pDefGoldPerCol, typeof(float)),
+                        (_pDefFoodNeed, typeof(int)),
+                        (_pDefWorkNeed, typeof(int)),
+                        (_pDefEngNeed, typeof(int)),
+                        (_pDefWoodGen, typeof(int)),
+                        (_pDefStoneGen, typeof(int)),
+                        (_pDefIronGen, typeof(int)),
+                        (_pDefOilGen, typeof(int)),
+                        (_pDefResCollectRadius, typeof(int)),
+                        (_pDefGoldCost, typeof(int)),
+                        (_pDefLevel, typeof(int)),
+                        (_pDefMaxInstances, typeof(int)),
+                        (_pDefReturnFactor, typeof(float)),
+                    };
+                    bool okDp = true;
+                    foreach (var pair in dpProps)
+                        if (pair.p == null || pair.p.PropertyType != pair.expected || pair.p.GetGetMethod(true) == null) { okDp = false; break; }
+                    if (okDp)
+                    {
+                        var pTypes = new Type[20];
+                        pTypes[0] = typeof(object);
+                        for (int i = 0; i < dpProps.Length; i++) pTypes[i + 1] = dpProps[i].expected.MakeByRefType();
+                        var dmDp = new DynamicMethod("TABCoop_FastReadDefaultParams", typeof(void), pTypes, typeof(GameBridge).Module, skipVisibility: true);
+                        var ilDp = dmDp.GetILGenerator();
+                        var locDp = ilDp.DeclareLocal(dpType);
+                        ilDp.Emit(OpCodes.Ldarg_0);
+                        ilDp.Emit(OpCodes.Castclass, dpType);
+                        ilDp.Emit(OpCodes.Stloc, locDp);
+                        for (int i = 0; i < dpProps.Length; i++)
+                        {
+                            ilDp.Emit(OpCodes.Ldarg, i + 1);
+                            ilDp.Emit(OpCodes.Ldloc, locDp);
+                            ilDp.Emit(OpCodes.Callvirt, dpProps[i].p.GetGetMethod(true));
+                            Type t = dpProps[i].expected;
+                            if (t == typeof(bool)) ilDp.Emit(OpCodes.Stind_I1);
+                            else if (t == typeof(float)) ilDp.Emit(OpCodes.Stind_R4);
+                            else ilDp.Emit(OpCodes.Stind_I4);
+                        }
+                        ilDp.Emit(OpCodes.Ret);
+                        _fastReadDefaultParams = (FastReadDefaultParamsDelegate)dmDp.CreateDelegate(typeof(FastReadDefaultParamsDelegate));
+                    }
+                }
+
+                if (_fastReadEconomy != null && _fastWriteEconomy != null && _fastReadBldgTotals != null && _fastReadDefaultParams != null)
+                    ModLogger.Info("[Perf] Compiled DynamicMethods for FastEconomy/Building/DefaultParams.");
+            }
+            catch (Exception ex)
+            {
+                _fastReadEconomy = null;
+                _fastWriteEconomy = null;
+                _fastReadBldgTotals = null;
+                _fastReadDefaultParams = null;
+                ModLogger.Warn($"[Perf] EnsureFastEconomyPerfDelegates failed (falling back to reflection): {ex.Message}");
+            }
+        }
+
+        private static Func<object, bool> CompileBoolPropGetter(Type targetType, PropertyInfo prop, string dmName)
+        {
+            var getter = prop?.GetGetMethod(true);
+            if (targetType == null || getter == null || prop.PropertyType != typeof(bool)) return null;
+            var dm = new DynamicMethod(dmName, typeof(bool), new[] { typeof(object) }, typeof(GameBridge).Module, skipVisibility: true);
+            var il = dm.GetILGenerator();
+            var lblFalse = il.DefineLabel();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Isinst, targetType);
+            il.Emit(OpCodes.Dup);
+            il.Emit(OpCodes.Brfalse_S, lblFalse);
+            il.Emit(OpCodes.Callvirt, getter);
+            il.Emit(OpCodes.Ret);
+            il.MarkLabel(lblFalse);
+            il.Emit(OpCodes.Pop);
+            il.Emit(OpCodes.Ldc_I4_0);
+            il.Emit(OpCodes.Ret);
+            return (Func<object, bool>)dm.CreateDelegate(typeof(Func<object, bool>));
+        }
+
         public static bool ReadRawLevelEconomyState(out RawLevelEconomyState s)
         {
             s = default;
             object ls = CurrentLevelState;
             if (ls == null) return false;
+            EnsureFastEconomyPerfDelegates();
+            var fast = _fastReadEconomy;
+            if (fast != null)
+            {
+                fast(ls, out s);
+                return true;
+            }
             try
             {
                 s.Wood = (int)_fLsWood.GetValue(ls);
@@ -6117,6 +6764,13 @@ namespace TABCoopMod.Core
         {
             object ls = CurrentLevelState;
             if (ls == null) return;
+            EnsureFastEconomyPerfDelegates();
+            var fast = _fastWriteEconomy;
+            if (fast != null)
+            {
+                fast(ls, in s);
+                return;
+            }
             try
             {
                 _fLsWood.SetValue(ls, s.Wood);
@@ -6391,7 +7045,11 @@ namespace TABCoopMod.Core
 
         public static object GetEntityDefaultParamsBoxed(DXEntity entity)
         {
-            if (entity == null || _methodEntityGetDefaultParams == null) return null;
+            if (entity == null) return null;
+            EnsureFastEconomyPerfDelegates();
+            var fast = _fastGetEntityDefaultParams;
+            if (fast != null) return fast(entity);
+            if (_methodEntityGetDefaultParams == null) return null;
             try { return _methodEntityGetDefaultParams.Invoke(entity, null); } catch { return null; }
         }
 
@@ -6403,18 +7061,33 @@ namespace TABCoopMod.Core
 
         public static bool GetBuildingDisabledManually(DXEntity bldg)
         {
-            if (bldg == null || _pBldgDisabledManual == null) return false;
+            if (bldg == null) return false;
+            EnsureFastEconomyPerfDelegates();
+            var fast = _fastGetBldgDisabledManual;
+            if (fast != null) return fast(bldg);
+            if (_pBldgDisabledManual == null) return false;
             try { return (bool)_pBldgDisabledManual.GetValue(bldg); } catch { return false; }
         }
 
         public static bool GetBuildingCanSupplyResources(DXEntity bldg)
         {
-            if (bldg == null || _pBldgCanSupply == null) return false;
+            if (bldg == null) return false;
+            EnsureFastEconomyPerfDelegates();
+            var fast = _fastGetBldgCanSupply;
+            if (fast != null) return fast(bldg);
+            if (_pBldgCanSupply == null) return false;
             try { return (bool)_pBldgCanSupply.GetValue(bldg); } catch { return false; }
         }
 
         public static void ReadBuildingTotals(DXEntity bldg, out int foodSup, out int workSup, out int engSup, out int woodSup, out int stoneSup, out int ironSup, out int oilSup, out int goldSup, out int foodNeed)
         {
+            EnsureFastEconomyPerfDelegates();
+            var fast = _fastReadBldgTotals;
+            if (fast != null && bldg != null)
+            {
+                fast(bldg, out foodSup, out workSup, out engSup, out woodSup, out stoneSup, out ironSup, out oilSup, out goldSup, out foodNeed);
+                return;
+            }
             foodSup = (int)_pBldgTotalFoodSup.GetValue(bldg);
             workSup = (int)_pBldgTotalWorkSup.GetValue(bldg);
             engSup = (int)_pBldgTotalEngSup.GetValue(bldg);
@@ -6450,6 +7123,19 @@ namespace TABCoopMod.Core
             out int resCollectRadius, out int goldCost, out int level,
             out int maxInstances, out float returnFactor)
         {
+            EnsureFastEconomyPerfDelegates();
+            var fast = _fastReadDefaultParams;
+            if (fast != null && dp != null)
+            {
+                fast(dp,
+                    out canEnhance, out resGenTime, out convertGold,
+                    out colonists, out resStorage, out goldGen, out goldPerCol,
+                    out foodNeed, out workNeed, out engNeed,
+                    out woodGen, out stoneGen, out ironGen, out oilGen,
+                    out resCollectRadius, out goldCost, out level,
+                    out maxInstances, out returnFactor);
+                return;
+            }
             canEnhance = (bool)_pDefCanEnhance.GetValue(dp);
             resGenTime = (float)_pDefResGenTime.GetValue(dp);
             convertGold = (bool)_pDefConvertResToGold.GetValue(dp);
@@ -6673,24 +7359,32 @@ namespace TABCoopMod.Core
         public static bool IsEntityEnabled(DXEntity ent)
         {
             if (ent == null) return false;
+            var fast = _fastIsEntityEnabled;
+            if (fast != null)
+                return fast(ent);
+
             if (_pStructEnabled == null && TypeZXEntity != null)
                 _pStructEnabled = TypeZXEntity.GetProperty("Enabled", BindingFlags.Public | BindingFlags.Instance);
             if (_pStructEnabled == null) return false;
             try { return (bool)_pStructEnabled.GetValue(ent); } catch { return false; }
         }
 
+        public static Type TypeHuman => _tHuman ?? (_tHuman = GameAssembly?.GetType("ZX.Entities.Human"));
+        public static Type TypeDefensiveMachine => _tDefMachine ?? (_tDefMachine = GameAssembly?.GetType("ZX.Entities.DeffensiveMachine"));
+        public static Type TypeUnit => _typeUnit;
+
         public static bool IsHumanEntity(DXEntity ent)
         {
             if (ent == null) return false;
-            if (_tHuman == null) _tHuman = GameAssembly?.GetType("ZX.Entities.Human");
-            return _tHuman != null && _tHuman.IsInstanceOfType(ent);
+            var t = TypeHuman;
+            return t != null && t.IsInstanceOfType(ent);
         }
 
         public static bool IsDefensiveMachineEntity(DXEntity ent)
         {
             if (ent == null) return false;
-            if (_tDefMachine == null) _tDefMachine = GameAssembly?.GetType("ZX.Entities.DeffensiveMachine");
-            return _tDefMachine != null && _tDefMachine.IsInstanceOfType(ent);
+            var t = TypeDefensiveMachine;
+            return t != null && t.IsInstanceOfType(ent);
         }
 
         public static bool IsUnitEntity(DXEntity ent)

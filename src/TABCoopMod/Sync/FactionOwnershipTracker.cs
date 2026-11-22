@@ -78,6 +78,20 @@ namespace TABCoopMod.Sync
             get { lock (_sync) return _entityOwners.Count; }
         }
 
+        public static void CopyTrackedOwners(List<KeyValuePair<ulong, byte>> dest)
+        {
+            if (dest == null) return;
+            dest.Clear();
+            lock (_sync)
+            {
+                if (_entityOwners.Count == 0) return;
+                if (dest.Capacity < _entityOwners.Count)
+                    dest.Capacity = _entityOwners.Count;
+                foreach (var kv in _entityOwners)
+                    dest.Add(kv);
+            }
+        }
+
         public static void RegisterPendingCcOwners(IReadOnlyList<DXEntity> orderedCcs)
         {
             if (orderedCcs == null) return;
@@ -109,6 +123,7 @@ namespace TABCoopMod.Sync
                 ActiveMapSeed = 0;
             }
             GameBridge.LocalEntityControlFilter = null;
+            GameBridge.InvalidateCommandCenterCache();
             FactionContextManager.Reset();
             WonderCrowdfundManager.Reset();
             MultiWaveSwarmContext.Reset();
@@ -666,6 +681,7 @@ namespace TABCoopMod.Sync
             if (createdCcs > 0)
             {
                 RegisterPendingCcOwners(placedCcs);
+                GameBridge.InvalidateCommandCenterCache();
                 GameBridge.RebuildEnergyGridNow();
             }
             return createdCcs;
@@ -680,37 +696,47 @@ namespace TABCoopMod.Sync
         {
             Point anchor = existingCcs.Count > 0 ? existingCcs[0].Cell : new Point(nCells / 2, nCells / 2);
             double baseAngle = (playerIndex - 1) * (2.0 * Math.PI / 3.0) + 0.5;
-            int[] radii = { 46, 54, 38, 62, 32, 70 };
+            int[] primaryRadii = { 46, 54, 38, 62, 32, 70 };
+            int[] extendedRadii = { 46, 54, 38, 62, 32, 70, 78, 86, 94, 104, 114, 26, 20 };
 
-            for (int rIdx = 0; rIdx < radii.Length; rIdx++)
+            // First try preferred ring distances with >=32-cell CC separation; fall back to wider rings
+            // and relaxed separation (>=18 cells) only when dense late-game colonies occupy 32..70.
+            for (int pass = 0; pass < 2; pass++)
             {
-                int rad = radii[rIdx];
-                for (int aStep = 0; aStep < 24; aStep++)
+                int[] radii = pass == 0 ? primaryRadii : extendedRadii;
+                long minSepSq = pass == 0 ? 32L * 32L : 18L * 18L;
+                int angleDiv = pass == 0 ? 24 : 36;
+
+                for (int rIdx = 0; rIdx < radii.Length; rIdx++)
                 {
-                    double ang = baseAngle + aStep * (Math.PI / 12.0);
-                    int cx = anchor.X + (int)Math.Round(Math.Cos(ang) * rad);
-                    int cy = anchor.Y + (int)Math.Round(Math.Sin(ang) * rad);
-                    if (cx < 20 || cy < 20 || cx >= nCells - 20 || cy >= nCells - 20) continue;
-
-                    if (!playable.IsEmpty)
+                    int rad = radii[rIdx];
+                    for (int aStep = 0; aStep < angleDiv; aStep++)
                     {
-                        PointF scenePt = DXWorldGrid.ScenePointFromWorldCell(cx, cy);
-                        RectangleF safeRect = playable;
-                        safeRect.Inflate(-16f, -16f);
-                        if (!safeRect.Contains(scenePt)) continue;
-                    }
+                        double ang = baseAngle + aStep * (2.0 * Math.PI / angleDiv);
+                        int cx = anchor.X + (int)Math.Round(Math.Cos(ang) * rad);
+                        int cy = anchor.Y + (int)Math.Round(Math.Sin(ang) * rad);
+                        if (cx < 20 || cy < 20 || cx >= nCells - 20 || cy >= nCells - 20) continue;
 
-                    bool tooClose = false;
-                    for (int i = 0; i < existingCcs.Count; i++)
-                    {
-                        long dx = cx - existingCcs[i].CellX;
-                        long dy = cy - existingCcs[i].CellY;
-                        if (dx * dx + dy * dy < 32L * 32L) { tooClose = true; break; }
-                    }
-                    if (tooClose) continue;
+                        if (!playable.IsEmpty)
+                        {
+                            PointF scenePt = DXWorldGrid.ScenePointFromWorldCell(cx, cy);
+                            RectangleF safeRect = playable;
+                            safeRect.Inflate(-16f, -16f);
+                            if (!safeRect.Contains(scenePt)) continue;
+                        }
 
-                    if (IsLiveAreaClearForCC(cx, cy, terrain, nCells))
-                        return new Point(cx, cy);
+                        bool tooClose = false;
+                        for (int i = 0; i < existingCcs.Count; i++)
+                        {
+                            long dx = cx - existingCcs[i].CellX;
+                            long dy = cy - existingCcs[i].CellY;
+                            if (dx * dx + dy * dy < minSepSq) { tooClose = true; break; }
+                        }
+                        if (tooClose) continue;
+
+                        if (IsLiveAreaClearForCC(cx, cy, terrain, nCells))
+                            return new Point(cx, cy);
+                    }
                 }
             }
             return null;

@@ -95,6 +95,12 @@ namespace TABCoopMod.Determinism
                 }
                 bool samplePerf = DeterministicSandboxPatches.DiagPerfSamplingActive;
                 long t0 = samplePerf ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                if (LockstepClock.InPhysicsReadback && LockstepClock.TryRunMergedPhysicsReadbackAndQuantize(__0, __1))
+                {
+                    if (samplePerf)
+                        DeterministicSandboxPatches.DiagPhysFor2Ticks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+                    return false;
+                }
                 __2(__0, __1);
                 if (samplePerf)
                 {

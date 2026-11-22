@@ -61,6 +61,9 @@ namespace TABCoopMod.Testing
         /// <summary>Optional per-tick delay in ms (TABCOOP_SIM_EXTRA_TICK_MS) to simulate slower CPU tick rate in tests.</summary>
         public static int SimExtraTickMs { get; private set; }
 
+        /// <summary>Worker count for Two-Phase deterministic parallel physics/pathfinding (TABCOOP_PARALLEL_WORKERS).</summary>
+        public static int ParallelWorkers { get; private set; } = 1;
+
         /// <summary>True when the MCP control server is enabled (TABCOOP_CONTROL_PORT set).</summary>
         public static bool ControlEnabled => ControlPort > 0;
 
@@ -96,6 +99,8 @@ namespace TABCoopMod.Testing
             PhysicsQuantScale = Math.Max(0, ParseInt(Env("TABCOOP_PHYSICS_QUANT"), DefaultPhysicsQuantScale));
             SimMinFrameMs = Math.Max(0, ParseInt(Env("TABCOOP_SIM_MIN_FRAME_MS"), 0));
             SimExtraTickMs = Math.Max(0, ParseInt(Env("TABCOOP_SIM_EXTRA_TICK_MS"), 0));
+            int defaultWorkers = Math.Min(4, Math.Max(1, Environment.ProcessorCount));
+            ParallelWorkers = Math.Max(1, Math.Min(8, ParseInt(Env("TABCOOP_PARALLEL_WORKERS"), defaultWorkers)));
 
             string logDir = null;
             try { logDir = Path.GetDirectoryName(ModLogger.LogFilePath); } catch { }
@@ -107,7 +112,7 @@ namespace TABCoopMod.Testing
 
             if (Enabled)
             {
-                ModLogger.Info($"[TestHarness] enabled: replaySave={ReplaySave ?? "(none)"}, ticks={ReplayTicks}, run={ReplayRun}, gate={TickGate}, intercept={Intercept}, scenario={Scenario}, role={Role}, chaos={ChaosSpec ?? "(none)"}, physQuant={PhysicsQuantScale}");
+                ModLogger.Info($"[TestHarness] enabled: replaySave={ReplaySave ?? "(none)"}, ticks={ReplayTicks}, run={ReplayRun}, gate={TickGate}, intercept={Intercept}, scenario={Scenario}, role={Role}, chaos={ChaosSpec ?? "(none)"}, physQuant={PhysicsQuantScale}, workers={ParallelWorkers}");
             }
         }
 

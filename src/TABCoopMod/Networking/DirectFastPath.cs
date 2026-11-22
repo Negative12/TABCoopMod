@@ -680,8 +680,28 @@ namespace TABCoopMod.Networking
                 NotifyLocalCandidatesUpdated();
         }
 
-        private void SendStunProbesToServers()
+        private long _lastStunProbeTs;
+        private IPAddress _lastStunIp;
+        private int _lastStunPort;
+        private long _lastStunPortChangeTs;
+        private int _stunPortChurnCount;
+        private volatile bool _symmetricNatDetected;
+        private ulong _lastCandidateBroadcastHash;
+        private long _lastCandidateBroadcastTs;
+        private int _candidateBroadcastCount;
+
+        private void SendStunProbesToServers(bool respectCooldown = false)
         {
+            long nowTs = Stopwatch.GetTimestamp();
+            if (respectCooldown && _lastStunProbeTs > 0)
+            {
+                double elapsedMs = (nowTs - _lastStunProbeTs) * 1000.0 / Stopwatch.Frequency;
+                double minIntervalMs = _symmetricNatDetected ? 30000.0 : 8000.0;
+                if (elapsedMs < minIntervalMs)
+                    return;
+            }
+            _lastStunProbeTs = nowTs;
+
             var stunEndpoints = _cachedStunEndpoints;
             if (stunEndpoints == null || stunEndpoints.Length == 0)
             {
@@ -717,7 +737,7 @@ namespace TABCoopMod.Networking
 
         /// <summary>
         /// Refreshes external STUN NAT bindings (useful when idle in CGNAT lobby or on new peer handshake).
-        /// Always triggers STUN probes; notifies LocalCandidatesUpdated if the mapped port changed.
+        /// Rate-limited and guarded against Symmetric NAT multi-STUN port churn.
         /// </summary>
         public void RefreshExternalCandidatesAsync()
         {
@@ -727,7 +747,7 @@ namespace TABCoopMod.Networking
             {
                 try
                 {
-                    SendStunProbesToServers();
+                    SendStunProbesToServers(respectCooldown: true);
                 }
                 catch { }
                 finally
@@ -755,10 +775,65 @@ namespace TABCoopMod.Networking
             if (ip == null || IPAddress.IsLoopback(ip) || port <= 0 || port > 65535) return false;
 
             bool changed = false;
+            bool logSymNat = false;
+            int prevPort = 0;
             lock (_stateLock)
             {
                 if (kind == DirectCandidateKind.StunIPv4)
                 {
+                    long nowTs = Stopwatch.GetTimestamp();
+                    if (_lastStunIp != null && _lastStunIp.Equals(ip) && _lastStunPort != port)
+                    {
+                        double secSince = _lastStunPortChangeTs > 0
+                            ? (nowTs - _lastStunPortChangeTs) / (double)Stopwatch.Frequency
+                            : 0.0;
+                        if (secSince <= 30.0)
+                        {
+                            _stunPortChurnCount++;
+                            if (_stunPortChurnCount >= 2 && !_symmetricNatDetected)
+                            {
+                                _symmetricNatDetected = true;
+                                logSymNat = true;
+                                prevPort = _lastStunPort;
+                            }
+                        }
+                        else
+                        {
+                            _stunPortChurnCount = 1;
+                        }
+                        _lastStunPortChangeTs = nowTs;
+                    }
+                    else if (_lastStunIp == null)
+                    {
+                        _lastStunIp = ip;
+                        _lastStunPort = port;
+                        _lastStunPortChangeTs = nowTs;
+                    }
+
+                    // If Symmetric NAT assigns a distinct external port per destination, replacing the prior
+                    // StunIPv4 entry on every reply causes candidate storms across Steam. Keep stable entries.
+                    if (_symmetricNatDetected)
+                    {
+                        bool alreadyHave = false;
+                        for (int i = 0; i < _localCandidates.Count; i++)
+                        {
+                            if (_localCandidates[i].Kind == DirectCandidateKind.StunIPv4 && _localCandidates[i].Address.Equals(ip))
+                            {
+                                alreadyHave = true;
+                                break;
+                            }
+                        }
+                        if (alreadyHave)
+                        {
+                            if (logSymNat)
+                                ModLogger.Info($"[DirectFastPath] Symmetric NAT port variance detected (IP={ip}, ports={prevPort}/{port}); suppressing STUN candidate churn.");
+                            return false;
+                        }
+                    }
+
+                    _lastStunIp = ip;
+                    _lastStunPort = port;
+
                     // Replace stale StunIPv4 entry for same external IP if CGNAT reassigned external port.
                     for (int i = _localCandidates.Count - 1; i >= 0; i--)
                     {
@@ -788,6 +863,28 @@ namespace TABCoopMod.Networking
         private void NotifyLocalCandidatesUpdated()
         {
             var snap = GetLocalCandidatesSnapshot();
+            ulong hash = 14695981039346656037UL;
+            for (int i = 0; i < snap.Count; i++)
+            {
+                var c = snap[i];
+                hash ^= (ulong)c.Kind; hash *= 1099511628211UL;
+                byte[] addr = c.Address.GetAddressBytes();
+                for (int j = 0; j < addr.Length; j++) { hash ^= addr[j]; hash *= 1099511628211UL; }
+                hash ^= (ulong)(uint)c.Port; hash *= 1099511628211UL;
+            }
+
+            long nowTs = Stopwatch.GetTimestamp();
+            double sinceLastMs = _lastCandidateBroadcastTs > 0
+                ? (nowTs - _lastCandidateBroadcastTs) * 1000.0 / Stopwatch.Frequency
+                : 10000.0;
+            if (hash == _lastCandidateBroadcastHash && sinceLastMs < 15000.0)
+                return;
+            if (_candidateBroadcastCount >= 2 && sinceLastMs < 1500.0)
+                return;
+
+            _lastCandidateBroadcastHash = hash;
+            _lastCandidateBroadcastTs = nowTs;
+            _candidateBroadcastCount++;
             ModLogger.Info($"[DirectFastPath] Updated external candidates ({snap.Count}): {string.Join(", ", snap)}");
             LocalCandidatesUpdated?.Invoke(snap, _sessionToken);
         }

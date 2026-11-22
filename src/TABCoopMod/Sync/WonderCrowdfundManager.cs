@@ -237,14 +237,9 @@ namespace TABCoopMod.Sync
             var game = DXGame.Current;
             if (reqType == null || game == null) return false;
 
-            var entities = GameBridge.GetEntitiesList(game);
-            if (entities == null) return false;
-
-            for (int i = 0; i < entities.Count; i++)
+            foreach (var ent in game.EntitiesOfType(reqType))
             {
-                var ent = entities[i];
                 if (ent == null || ent.Disposed) continue;
-                if (ent.GetType() != reqType) continue;
                 if (GameBridge.IsBuildingBeingBuilt(ent)) continue;
                 if (!GameBridge.IsPlayerEntity(ent)) continue;
 
