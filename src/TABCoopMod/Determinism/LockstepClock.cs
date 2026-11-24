@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using DXVision;
@@ -94,6 +95,9 @@ namespace TABCoopMod.Determinism
 
         /// <summary>True when DeterministicTaskPatch replaced Loop 2 + Quantize with the merged Two-Phase pass in the current step.</summary>
         internal static volatile bool MergedPhysicsReadbackHandled;
+
+        /// <summary>Deterministic dynamic body count from the last completed physics step (drives AdaptiveSolverIterations).</summary>
+        public static int SyncedDynamicBodyCount;
 
         internal static bool IsPhysicsThreadActive()
         {
@@ -340,16 +344,19 @@ namespace TABCoopMod.Determinism
             // overwrites DXGame.IsIADeterministic = (mode == Multiplayer)!
             DXGame.IsIADeterministic = true;
             AllowPhysicsThisFrame = false;
+            InvalidateAllStage4Caches();
             IsDeterministicModeActive = true;
 
             // Unload background async physics/time threads if they were already running
             DXGame.Current?.UnloadPhysics();
+            DeterministicSandboxPatches.EnsureDedicatedSimWorkerStarted();
 
             ModLogger.Info($"[LockstepClock] Deterministic sandbox ENABLED (Seed={initialSeed}, StartEntityId={startingEntityIdCounter}, IsIADeterministic={DXGame.IsIADeterministic}).");
         }
 
         public static void DisableDeterministicSandbox()
         {
+            DeterministicSandboxPatches.StopDedicatedSimWorker();
             IsDeterministicModeActive = false;
             InDeterministicContext = false;
             LogicTickActive = false;
@@ -360,15 +367,27 @@ namespace TABCoopMod.Determinism
             InPhysicsReadback = false;
             AllowPhysicsThisFrame = false;
             _lastReanchoredSimTick = -1;
+            InvalidateAllStage4Caches();
             DeterministicSandboxPatches.ResetAsyncTickState();
             LoadingLevel = false;
             HasPendingPostLoadCalibration = false;
             PendingSnapshotEntityIdCounter = 0;
             PausedBySession = false;
+            Testing.CommandCenterInvulnerability.ResetLevelFlag();
             TickGate = new AlwaysReadyTickGate();
             DXGame.IsIADeterministic = false;
             SetEngineMultiplayerMode(false);
             ModLogger.Info("[LockstepClock] Deterministic sandbox DISABLED.");
+        }
+
+        internal static void InvalidateAllStage4Caches()
+        {
+            ZombieWatcherCoarseGrid.Invalidate();
+            Physics1uGrid.Invalidate();
+            ActiveUpdateEntityManager.Invalidate();
+            PrecomputedPerceptionManager.Invalidate();
+            AdaptivePhysicsStepPatch.Reset();
+            SyncedDynamicBodyCount = 0;
         }
 
         private static MethodInfo _setPlayerModeMethod;
@@ -482,38 +501,116 @@ namespace TABCoopMod.Determinism
 
         public static int SyncedRandomSeed => _syncedRandomSeed;
 
+        internal enum RngDomainTag : byte
+        {
+            None            = 0,
+            EntityUpdate    = 1,
+            BehaviourRun    = 2,
+            SystemUpdate    = 3,
+            PhysicsCallback = 4,
+            CommandReplay   = 5,
+            LevelLoad       = 6
+        }
+
+        internal struct RngScopeFrame
+        {
+            public ulong ScopeId;
+            public uint DrawCounter;
+            public RngDomainTag Domain;
+        }
+
+        private const int MaxRngScopeDepth = 8;
         private static int _behaviourResetGeneration;
         [ThreadStatic] private static int _behaviourResetGenerationOnThread;
         private static readonly Dictionary<Type, DXRandom> _sharedBehaviourRandoms = new Dictionary<Type, DXRandom>();
         private static DXRandom[] _sharedBehaviourRandomArray = Array.Empty<DXRandom>();
         private static readonly object _behaviourSync = new object();
         private static int _lastReanchoredSimTick = -1;
-        [ThreadStatic] private static ulong _currentBehaviourEntityId;
-        [ThreadStatic] private static uint _currentBehaviourRngCounter;
+        [ThreadStatic] private static RngScopeFrame[] _rngScopeStack;
+        [ThreadStatic] private static int _rngScopeDepth;
+
+        internal static DXRandom RenderGlobalRandomRaw => _renderGlobalRandom;
+
+        internal static bool HasActiveRngScope
+        {
+            get
+            {
+                if (InAudioContext || InVisualVfxContext || LoadingLevel) return false;
+                int depth = _rngScopeDepth;
+                var stack = _rngScopeStack;
+                if (depth <= 0 || stack == null) return false;
+                int idx = depth <= MaxRngScopeDepth ? depth - 1 : MaxRngScopeDepth - 1;
+                return stack[idx].ScopeId != 0UL;
+            }
+        }
+
+        internal static void PushRngScope(ulong scopeId, RngDomainTag domain)
+        {
+            var stack = _rngScopeStack;
+            if (stack == null)
+            {
+                stack = new RngScopeFrame[MaxRngScopeDepth];
+                _rngScopeStack = stack;
+            }
+            int idx = _rngScopeDepth;
+            _rngScopeDepth = idx + 1;
+            if (idx < MaxRngScopeDepth)
+            {
+                stack[idx] = new RngScopeFrame
+                {
+                    ScopeId = scopeId,
+                    DrawCounter = 0u,
+                    Domain = domain
+                };
+            }
+        }
+
+        internal static void PopRngScope()
+        {
+            int depth = _rngScopeDepth;
+            if (depth <= 0) return;
+            depth--;
+            _rngScopeDepth = depth;
+            if (depth < MaxRngScopeDepth && _rngScopeStack != null)
+                _rngScopeStack[depth] = default;
+        }
 
         public static void EnterEntityBehaviourRngScope(ulong entityId)
         {
-            _currentBehaviourEntityId = entityId;
-            _currentBehaviourRngCounter = 0u;
+            PushRngScope(entityId, RngDomainTag.BehaviourRun);
         }
 
         public static void ExitEntityBehaviourRngScope()
         {
-            _currentBehaviourEntityId = 0UL;
+            PopRngScope();
         }
 
-        public static bool TryNextEntityBehaviourRandomUInt(out uint value)
+        internal static bool TryNextScopedRandomUInt(out uint value)
         {
-            ulong entityId = _currentBehaviourEntityId;
-            if (entityId == 0UL || InAudioContext || InVisualVfxContext || LoadingLevel)
+            int depth = _rngScopeDepth;
+            if (depth <= 0 || InAudioContext || InVisualVfxContext || LoadingLevel)
+            {
+                value = 0u;
+                return false;
+            }
+            var stack = _rngScopeStack;
+            if (stack == null)
+            {
+                value = 0u;
+                return false;
+            }
+            int idx = depth <= MaxRngScopeDepth ? depth - 1 : MaxRngScopeDepth - 1;
+            ulong scopeId = stack[idx].ScopeId;
+            if (scopeId == 0UL)
             {
                 value = 0u;
                 return false;
             }
 
-            uint drawIdx = ++_currentBehaviourRngCounter;
+            uint drawIdx = ++stack[idx].DrawCounter;
+            ulong domainTag = (ulong)stack[idx].Domain << 56;
             uint tick = (uint)(DXGame.Current?.IAIterationInt ?? 0);
-            ulong z = entityId
+            ulong z = (scopeId ^ domainTag)
                 + ((ulong)unchecked((uint)_syncedRandomSeed) << 32)
                 + (ulong)tick * 0x9E3779B97F4A7C15UL
                 + (ulong)drawIdx * 0xBF58476D1CE4E5B9UL;
@@ -522,6 +619,11 @@ namespace TABCoopMod.Determinism
             z = z ^ (z >> 31);
             value = (uint)(z >> 32);
             return true;
+        }
+
+        public static bool TryNextEntityBehaviourRandomUInt(out uint value)
+        {
+            return TryNextScopedRandomUInt(out value);
         }
 
         private static uint MixTickSeed(int baseSeed, int tick, uint streamSalt)
@@ -718,6 +820,8 @@ namespace TABCoopMod.Determinism
             _lastReanchoredSimTick = -1;
             DXRandomCtorPatch.ResetCounter();
             DeterministicPathfindingPatch.InvalidatePathCache();
+            CMovableSpriteProgressSyncPatch.ResetCache();
+            InvalidateAllStage4Caches();
         }
 
         /// <summary>
@@ -750,6 +854,7 @@ namespace TABCoopMod.Determinism
             if (snapshotCounter > _syncedEntityIdCounter)
                 _syncedEntityIdCounter = snapshotCounter;
             RenderVisualInterpolationPatch.Reset();
+            InvalidateAllStage4Caches();
             LoadingLevel = false;
 
             GameBridge.SortEntitiesById();
@@ -1135,6 +1240,7 @@ namespace TABCoopMod.Determinism
                 }
             }
 
+            LockstepClock.SyncedDynamicBodyCount = dynTotal;
             if (samplePerf)
             {
                 DeterministicSandboxPatches.DiagPhysQuantTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
@@ -1155,7 +1261,27 @@ namespace TABCoopMod.Determinism
         private struct CrossedBodyWrite
         {
             public DXPhysicBody Body;
+            public DXEntity Ent;
             public bool HighBitVfx;
+            public bool DidMoveStep;
+            public bool WriteNativePos;
+            public bool WriteNativeVel;
+            public bool WritePosComp;
+            public bool WriteLastComp;
+            public bool WriteEntLastPos;
+            public bool WriteManagedVel;
+            public PointF TargetPos;
+            public PointF TargetVel;
+            public PointF EntPos;
+            public PointF NewLastComp;
+            public PointF NewEntLastPos;
+            public bool AnyChanged;
+        }
+
+        internal struct PullCandidate
+        {
+            public DXEntity Ent;
+            public object CSprite;
         }
 
         private const int MaxPhysicsWorkers = 8;
@@ -1168,8 +1294,371 @@ namespace TABCoopMod.Determinism
         private static Func<DXEntity, Point> _physGetRawCell;
         private static List<NativePhysWrite>[] _physNativeQueues;
         private static List<CrossedBodyWrite>[] _physCrossedQueues;
+        private static List<PullCandidate>[] _physPullCandidateQueues;
+        internal static int _physPullWorkerCount;
+        internal static DXLevel _physPullLevel;
         private static int[] _physModCounts;
         private static int[] _physDynCounts;
+
+        internal static unsafe class NativePhysicsDirectAccessor
+        {
+            private const string NativeDll = "DXPhysicsNative.dll";
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern IntPtr Space_Create(float gravityX, float gravityY, int iterations);
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern void Space_Dispose(IntPtr space);
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern void Space_Step(IntPtr space, float timeStep);
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern IntPtr Body_CreateCircle(IntPtr space, float mass, float x, float y, float radius);
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern void Body_Dispose(IntPtr body);
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern float Body_GetMass(IntPtr body);
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern PointF Body_GetPosition(IntPtr body);
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern void Body_SetPosition(IntPtr body, float x, float y);
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern PointF Body_GetVelocity(IntPtr body);
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern void Body_SetVelocity(IntPtr body, float x, float y);
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern PointF Body_GetForce(IntPtr body);
+
+            [DllImport(NativeDll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern void Body_SetForce(IntPtr body, float x, float y);
+
+            // Verified x64 Chipmunk offsets in DXPhysicsNative.dll (0xB8-byte cpBody, 0x1B8-byte cpSpace)
+            private const int SpaceIterationsOffset = 0x00;
+            private const int BodyStructSize = 0xB8;
+            private const int BodyMassOffset = 0x10;
+            private const int BodyCogOffset = 0x20;
+            private const int BodyPosOffset = 0x28;
+            private const int BodyVelOffset = 0x30;
+            private const int BodyForceOffset = 0x38;
+            private const int BodyAngleOffset = 0x40;
+            private const int BodyRotOffset = 0x4C;      // 4 floats: a, b, c, d (identity = 1, 0, 0, 1)
+            private const int BodyTxOffset = 0x5C;       // 2 floats: tx, ty (== p when cog == (0,0))
+            private const int BodyArbiterListOffset = 0x90;
+            private const int BodyConstraintListOffset = 0x98;
+            private const int BodySleepingRootOffset = 0xA0;
+            private const int BodyIdleTimeOffset = 0xB0;
+            private const int ArbiterBodyAOffset = 0x28;
+            private const int ArbiterBodyBOffset = 0x30;
+            private const int ArbiterNextAOffset = 0x38;
+            private const int ArbiterNextBOffset = 0x48;
+
+            private static readonly bool _disabledByEnv =
+                string.Equals(Environment.GetEnvironmentVariable("TABCOOP_DISABLE_DIRECT_PHYS"), "1", StringComparison.Ordinal);
+
+            private static readonly object _verifyLock = new object();
+            private static volatile bool _verifiedAttempted;
+            private static volatile bool _enabled;
+
+            internal static bool IsEnabled => _enabled;
+
+            internal static bool TryVerifyAndEnable()
+            {
+                if (_enabled) return true;
+                if (_verifiedAttempted || _disabledByEnv) return false;
+                lock (_verifyLock)
+                {
+                    if (_verifiedAttempted) return _enabled;
+                    _verifiedAttempted = true;
+                    _enabled = RunSandboxVerification();
+                    return _enabled;
+                }
+            }
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            internal static PointF ReadPos(IntPtr handle) => *(PointF*)((byte*)handle + BodyPosOffset);
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            internal static PointF ReadVel(IntPtr handle) => *(PointF*)((byte*)handle + BodyVelOffset);
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            internal static bool TryDirectWritePhase1LockFree(
+                IntPtr handle,
+                bool writePos,
+                PointF pos,
+                bool writeVel,
+                PointF vel)
+            {
+                byte* b = (byte*)handle;
+                if (*(IntPtr*)(b + BodySleepingRootOffset) != IntPtr.Zero) return false;
+                if (*(IntPtr*)(b + BodyArbiterListOffset) != IntPtr.Zero) return false;
+                if (*(IntPtr*)(b + BodyConstraintListOffset) != IntPtr.Zero) return false;
+                if (*(float*)(b + BodyMassOffset) >= float.PositiveInfinity) return false;
+                if (*(float*)(b + BodyIdleTimeOffset) >= float.PositiveInfinity) return false;
+                if (writePos)
+                {
+                    if (*(long*)(b + BodyCogOffset) != 0L) return false;
+                    if (*(float*)(b + BodyAngleOffset) != 0f) return false;
+                    if (*(float*)(b + BodyRotOffset) != 1f
+                        || *(float*)(b + BodyRotOffset + 4) != 0f
+                        || *(float*)(b + BodyRotOffset + 8) != 0f
+                        || *(float*)(b + BodyRotOffset + 12) != 1f)
+                        return false;
+                    *(PointF*)(b + BodyPosOffset) = pos;
+                    *(PointF*)(b + BodyTxOffset) = pos;
+                }
+                if (writeVel)
+                {
+                    *(PointF*)(b + BodyVelOffset) = vel;
+                }
+                *(float*)(b + BodyIdleTimeOffset) = 0f;
+                return true;
+            }
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            internal static bool TryDirectWriteSequential(
+                IntPtr handle,
+                bool writePos,
+                PointF pos,
+                bool writeVel,
+                PointF vel)
+            {
+                if (handle == IntPtr.Zero) return false;
+                byte* b = (byte*)handle;
+                if (*(IntPtr*)(b + BodySleepingRootOffset) != IntPtr.Zero) return false;
+                if (*(IntPtr*)(b + BodyConstraintListOffset) != IntPtr.Zero) return false;
+                if (*(float*)(b + BodyMassOffset) >= float.PositiveInfinity) return false;
+                if (*(float*)(b + BodyIdleTimeOffset) >= float.PositiveInfinity) return false;
+                if (writePos)
+                {
+                    if (*(long*)(b + BodyCogOffset) != 0L) return false;
+                    if (*(float*)(b + BodyAngleOffset) != 0f) return false;
+                    if (*(float*)(b + BodyRotOffset) != 1f
+                        || *(float*)(b + BodyRotOffset + 4) != 0f
+                        || *(float*)(b + BodyRotOffset + 8) != 0f
+                        || *(float*)(b + BodyRotOffset + 12) != 1f)
+                        return false;
+                }
+
+                // Walk arbiterList only to verify all dynamic neighbors are awake; if any neighbor
+                // were sleeping we fall back cleanly to native Body_SetPosition / Body_SetVelocity.
+                IntPtr arb = *(IntPtr*)(b + BodyArbiterListOffset);
+                if (arb != IntPtr.Zero)
+                {
+                    int hops = 0;
+                    while (arb != IntPtr.Zero)
+                    {
+                        if (++hops > 1024) return false;
+                        byte* aPtr = (byte*)arb;
+                        IntPtr bodyA = *(IntPtr*)(aPtr + ArbiterBodyAOffset);
+                        IntPtr other = (bodyA == handle) ? *(IntPtr*)(aPtr + ArbiterBodyBOffset) : bodyA;
+                        if (other == IntPtr.Zero) return false;
+                        byte* oPtr = (byte*)other;
+                        if (*(IntPtr*)(oPtr + BodySleepingRootOffset) != IntPtr.Zero) return false;
+                        arb = (bodyA == handle) ? *(IntPtr*)(aPtr + ArbiterNextAOffset) : *(IntPtr*)(aPtr + ArbiterNextBOffset);
+                    }
+                    // Second pass: clear dynamic neighbor idleTime (exact match to cpBodyActivate).
+                    arb = *(IntPtr*)(b + BodyArbiterListOffset);
+                    while (arb != IntPtr.Zero)
+                    {
+                        byte* aPtr = (byte*)arb;
+                        IntPtr bodyA = *(IntPtr*)(aPtr + ArbiterBodyAOffset);
+                        IntPtr other = (bodyA == handle) ? *(IntPtr*)(aPtr + ArbiterBodyBOffset) : bodyA;
+                        byte* oPtr = (byte*)other;
+                        if (*(float*)(oPtr + BodyIdleTimeOffset) < float.PositiveInfinity)
+                            *(float*)(oPtr + BodyIdleTimeOffset) = 0f;
+                        arb = (bodyA == handle) ? *(IntPtr*)(aPtr + ArbiterNextAOffset) : *(IntPtr*)(aPtr + ArbiterNextBOffset);
+                    }
+                }
+
+                if (writePos)
+                {
+                    *(PointF*)(b + BodyPosOffset) = pos;
+                    *(PointF*)(b + BodyTxOffset) = pos;
+                }
+                if (writeVel)
+                {
+                    *(PointF*)(b + BodyVelOffset) = vel;
+                }
+                *(float*)(b + BodyIdleTimeOffset) = 0f;
+                return true;
+            }
+
+            internal static bool TrySetSpaceIterations(IntPtr spaceHandle, int iterations)
+            {
+                if (!_enabled || spaceHandle == IntPtr.Zero || iterations <= 0) return false;
+                *(int*)((byte*)spaceHandle + SpaceIterationsOffset) = iterations;
+                return true;
+            }
+
+            private static bool RunSandboxVerification()
+            {
+                IntPtr sp = IntPtr.Zero;
+                IntPtr b1 = IntPtr.Zero;
+                IntPtr b2 = IntPtr.Zero;
+                try
+                {
+                    sp = Space_Create(1.25f, -2.5f, 10);
+                    if (sp == IntPtr.Zero)
+                    {
+                        ModLogger.Warn("[Perf] NativePhysicsDirectAccessor disabled: Space_Create returned null.");
+                        return false;
+                    }
+                    byte* spPtr = (byte*)sp;
+                    if (*(int*)(spPtr + SpaceIterationsOffset) != 10
+                        || *(float*)(spPtr + 4) != 1.25f
+                        || *(float*)(spPtr + 8) != -2.5f)
+                    {
+                        ModLogger.Warn("[Perf] NativePhysicsDirectAccessor disabled: cpSpace layout mismatch.");
+                        return false;
+                    }
+
+                    b1 = Body_CreateCircle(sp, 2.5f, 12.25f, 34.75f, 0.5f);
+                    b2 = Body_CreateCircle(sp, 2.5f, 12.75f, 34.75f, 0.5f);
+                    if (b1 == IntPtr.Zero || b2 == IntPtr.Zero)
+                    {
+                        ModLogger.Warn("[Perf] NativePhysicsDirectAccessor disabled: Body_CreateCircle returned null.");
+                        return false;
+                    }
+
+                    Body_SetVelocity(b1, -1.5f, 2.25f);
+                    Body_SetForce(b1, 7.0f, -8.5f);
+                    byte* p1 = (byte*)b1;
+
+                    PointF gp = Body_GetPosition(b1);
+                    PointF gv = Body_GetVelocity(b1);
+                    PointF gf = Body_GetForce(b1);
+                    float gm = Body_GetMass(b1);
+                    if (gm != 2.5f || *(float*)(p1 + BodyMassOffset) != gm
+                        || *(long*)(p1 + BodyCogOffset) != 0L
+                        || gp.X != 12.25f || gp.Y != 34.75f
+                        || *(float*)(p1 + BodyPosOffset) != gp.X || *(float*)(p1 + BodyPosOffset + 4) != gp.Y
+                        || gv.X != -1.5f || gv.Y != 2.25f
+                        || *(float*)(p1 + BodyVelOffset) != gv.X || *(float*)(p1 + BodyVelOffset + 4) != gv.Y
+                        || gf.X != 7.0f || gf.Y != -8.5f
+                        || *(float*)(p1 + BodyForceOffset) != gf.X || *(float*)(p1 + BodyForceOffset + 4) != gf.Y
+                        || *(float*)(p1 + BodyAngleOffset) != 0f
+                        || *(IntPtr*)(p1 + BodyArbiterListOffset) != IntPtr.Zero
+                        || *(IntPtr*)(p1 + BodyConstraintListOffset) != IntPtr.Zero
+                        || *(IntPtr*)(p1 + BodySleepingRootOffset) != IntPtr.Zero
+                        || *(float*)(p1 + BodyIdleTimeOffset) != 0f)
+                    {
+                        ModLogger.Warn("[Perf] NativePhysicsDirectAccessor disabled: cpBody field offset verification failed.");
+                        return false;
+                    }
+
+                    // 1. Snapshot diff of Body_SetVelocity across all 0xB8 cpBody bytes
+                    *(float*)(p1 + BodyIdleTimeOffset) = 1.25f;
+                    byte[] before = new byte[BodyStructSize];
+                    byte[] after = new byte[BodyStructSize];
+                    Marshal.Copy(b1, before, 0, BodyStructSize);
+                    Body_SetVelocity(b1, 4.75f, -3.125f);
+                    Marshal.Copy(b1, after, 0, BodyStructSize);
+                    for (int i = 0; i < BodyStructSize; i++)
+                    {
+                        if (before[i] == after[i]) continue;
+                        bool allowed = (i >= BodyVelOffset && i < BodyVelOffset + 8)
+                            || (i >= BodyIdleTimeOffset && i < BodyIdleTimeOffset + 4);
+                        if (!allowed)
+                        {
+                            ModLogger.Warn($"[Perf] NativePhysicsDirectAccessor disabled: unexpected SetVelocity write at +0x{i:X2}.");
+                            return false;
+                        }
+                    }
+                    if (*(float*)(p1 + BodyIdleTimeOffset) != 0f)
+                    {
+                        ModLogger.Warn("[Perf] NativePhysicsDirectAccessor disabled: SetVelocity did not clear idleTime.");
+                        return false;
+                    }
+
+                    // 2. Snapshot diff of Body_SetPosition across all 0xB8 cpBody bytes
+                    *(float*)(p1 + BodyIdleTimeOffset) = 2.5f;
+                    Marshal.Copy(b1, before, 0, BodyStructSize);
+                    Body_SetPosition(b1, 99.5f, 123.75f);
+                    Marshal.Copy(b1, after, 0, BodyStructSize);
+                    for (int i = 0; i < BodyStructSize; i++)
+                    {
+                        if (before[i] == after[i]) continue;
+                        bool allowed = (i >= BodyPosOffset && i < BodyPosOffset + 8)
+                            || (i >= BodyTxOffset && i < BodyTxOffset + 8)
+                            || (i >= BodyIdleTimeOffset && i < BodyIdleTimeOffset + 4);
+                        if (!allowed)
+                        {
+                            ModLogger.Warn($"[Perf] NativePhysicsDirectAccessor disabled: unexpected SetPosition write at +0x{i:X2}.");
+                            return false;
+                        }
+                    }
+                    if (*(float*)(p1 + BodyPosOffset) != 99.5f || *(float*)(p1 + BodyPosOffset + 4) != 123.75f
+                        || *(float*)(p1 + BodyTxOffset) != 99.5f || *(float*)(p1 + BodyTxOffset + 4) != 123.75f
+                        || *(float*)(p1 + BodyRotOffset) != 1f || *(float*)(p1 + BodyRotOffset + 4) != 0f
+                        || *(float*)(p1 + BodyRotOffset + 8) != 0f || *(float*)(p1 + BodyRotOffset + 12) != 1f
+                        || *(float*)(p1 + BodyIdleTimeOffset) != 0f)
+                    {
+                        ModLogger.Warn("[Perf] NativePhysicsDirectAccessor disabled: SetPosition transform check failed.");
+                        return false;
+                    }
+
+                    // Verify direct write produces bit-identical memory vs Body_SetPosition
+                    if (!TryDirectWritePhase1LockFree(b1, true, new PointF(-45.25f, 77.125f), true, new PointF(-0.5f, 1.25f)))
+                    {
+                        ModLogger.Warn("[Perf] NativePhysicsDirectAccessor disabled: TryDirectWritePhase1LockFree rejected test body.");
+                        return false;
+                    }
+                    Marshal.Copy(b1, before, 0, BodyStructSize);
+                    Body_SetPosition(b1, -45.25f, 77.125f);
+                    Body_SetVelocity(b1, -0.5f, 1.25f);
+                    Marshal.Copy(b1, after, 0, BodyStructSize);
+                    for (int i = 0; i < BodyStructSize; i++)
+                    {
+                        if (before[i] != after[i])
+                        {
+                            ModLogger.Warn($"[Perf] NativePhysicsDirectAccessor disabled: direct vs P/Invoke mismatch at +0x{i:X2}.");
+                            return false;
+                        }
+                    }
+
+                    // 3. Verify arbiterList neighbor activation loop after Space_Step collision
+                    Body_SetPosition(b1, 12.25f, 34.75f);
+                    Space_Step(sp, 1f / 12f);
+                    if (*(IntPtr*)(p1 + BodyArbiterListOffset) == IntPtr.Zero)
+                    {
+                        ModLogger.Warn("[Perf] NativePhysicsDirectAccessor disabled: overlapping Space_Step produced no arbiter.");
+                        return false;
+                    }
+                    byte* p2 = (byte*)b2;
+                    *(float*)(p1 + BodyIdleTimeOffset) = 2.0f;
+                    *(float*)(p2 + BodyIdleTimeOffset) = 3.5f;
+                    if (!TryDirectWriteSequential(b1, true, new PointF(12.375f, 34.875f), true, new PointF(0.25f, -0.25f))
+                        || *(float*)(p1 + BodyIdleTimeOffset) != 0f
+                        || *(float*)(p2 + BodyIdleTimeOffset) != 0f)
+                    {
+                        ModLogger.Warn("[Perf] NativePhysicsDirectAccessor disabled: sequential arbiter neighbor activation verification failed.");
+                        return false;
+                    }
+
+                    ModLogger.Info("[Perf] NativePhysicsDirectAccessor self-check VERIFIED (0xB8 cpBody + 0x1B8 cpSpace bit-exact).");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[Perf] NativePhysicsDirectAccessor verification exception (falling back to P/Invoke): {ex.Message}");
+                    return false;
+                }
+                finally
+                {
+                    if (b1 != IntPtr.Zero) try { Body_Dispose(b1); } catch { }
+                    if (b2 != IntPtr.Zero) try { Body_Dispose(b2); } catch { }
+                    if (sp != IntPtr.Zero) try { Space_Dispose(sp); } catch { }
+                }
+            }
+        }
 
         private static bool EnsureMergedPhysicsAccessors()
         {
@@ -1177,6 +1666,7 @@ namespace TABCoopMod.Determinism
             _mergedPhysAccessorsTried = true;
             try
             {
+                NativePhysicsDirectAccessor.TryVerifyAndEnable();
                 var fPos = typeof(DXEntity).GetField("_Position", BindingFlags.NonPublic | BindingFlags.Instance);
                 var fLastPos = typeof(DXEntity).GetField("_LastPosition", BindingFlags.NonPublic | BindingFlags.Instance);
                 var fCell = typeof(DXEntity).GetField("_Cell", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -1217,10 +1707,12 @@ namespace TABCoopMod.Determinism
 
                 _physNativeQueues = new List<NativePhysWrite>[MaxPhysicsWorkers];
                 _physCrossedQueues = new List<CrossedBodyWrite>[MaxPhysicsWorkers];
+                _physPullCandidateQueues = new List<PullCandidate>[MaxPhysicsWorkers];
                 for (int w = 0; w < MaxPhysicsWorkers; w++)
                 {
                     _physNativeQueues[w] = new List<NativePhysWrite>(256);
                     _physCrossedQueues[w] = new List<CrossedBodyWrite>(64);
+                    _physPullCandidateQueues[w] = new List<PullCandidate>(64);
                 }
                 _physModCounts = new int[MaxPhysicsWorkers];
                 _physDynCounts = new int[MaxPhysicsWorkers];
@@ -1320,12 +1812,17 @@ namespace TABCoopMod.Determinism
             double scale,
             double invScale,
             int nCells,
-            float maxCoord)
+            float maxCoord,
+            bool collectPull,
+            bool pullColdScan,
+            HashSet<DXEntity> activePullSet)
         {
             var nativeQ = _physNativeQueues[workerIdx];
             var crossedQ = _physCrossedQueues[workerIdx];
+            var pullQ = _physPullCandidateQueues[workerIdx];
             nativeQ.Clear();
             crossedQ.Clear();
+            pullQ.Clear();
             int modCount = 0;
             int dynCount = 0;
 
@@ -1334,11 +1831,14 @@ namespace TABCoopMod.Determinism
             var getLastPos = _physGetRawLastPos;
             var setLastPos = _physSetRawLastPos;
             var getCell = _physGetRawCell;
+            bool directPhys = NativePhysicsDirectAccessor.IsEnabled;
 
             for (int i = sliceStart; i < sliceEnd; i++)
             {
                 DXPhysicBody body = bodies[i];
-                if (body == null || body.Handle == IntPtr.Zero) continue;
+                if (body == null) continue;
+                IntPtr h = body.Handle;
+                if (h == IntPtr.Zero) continue;
 
                 DXEntity ent = body.GameEntity;
                 if (ent == null || ent.Disposed) continue;
@@ -1346,7 +1846,7 @@ namespace TABCoopMod.Determinism
 
                 if ((ent.ID & 0x8000000000000000UL) != 0UL)
                 {
-                    crossedQ.Add(new CrossedBodyWrite { Body = body, HighBitVfx = true });
+                    crossedQ.Add(new CrossedBodyWrite { Body = body, Ent = ent, HighBitVfx = true });
                     continue;
                 }
 
@@ -1354,7 +1854,7 @@ namespace TABCoopMod.Determinism
 
                 PointF entPos = getPos(ent);
                 PointF entLastPos = getLastPos(ent);
-                PointF rawPhysPos = body.PhysicPosition;
+                PointF rawPhysPos = directPhys ? NativePhysicsDirectAccessor.ReadPos(h) : body.PhysicPosition;
                 bool didMoveStep = !(entPos == rawPhysPos) || !(entLastPos == rawPhysPos);
 
                 PointF managedVel = body.Velocity;
@@ -1368,6 +1868,11 @@ namespace TABCoopMod.Determinism
                             && QuantizeScalar(oldPosComp.X, scale, invScale) == oldPosComp.X
                             && QuantizeScalar(oldPosComp.Y, scale, invScale) == oldPosComp.Y))
                     {
+                        if (collectPull && (pullColdScan || (activePullSet != null && activePullSet.Contains(ent))))
+                        {
+                            if (CSpritePullIsolationPatch.TryPreparePullCandidate(ent, out object cs))
+                                pullQ.Add(new PullCandidate { Ent = ent, CSprite = cs });
+                        }
                         continue;
                     }
                 }
@@ -1388,7 +1893,7 @@ namespace TABCoopMod.Determinism
                     qPos = new PointF(qx, qy);
                 }
 
-                PointF rawPhysVel = body.PhysicVelocity;
+                PointF rawPhysVel = directPhys ? NativePhysicsDirectAccessor.ReadVel(h) : body.PhysicVelocity;
                 bool velValid = IsFinite(rawPhysVel.X) && IsFinite(rawPhysVel.Y);
                 PointF qVel = rawPhysVel;
                 if (scaleInt > 0 && velValid)
@@ -1401,22 +1906,13 @@ namespace TABCoopMod.Determinism
                 PointF targetPos = (scaleInt > 0 && posValid) ? qPos : rawPhysPos;
                 PointF targetVel = (scaleInt > 0 && velValid) ? qVel : rawPhysVel;
 
-                // Non-one-cell dynamic entities or any entity crossing a grid cell between entPos -> rawPhysPos / targetPos
-                // are deferred to Phase 2 so DXWorldGrid.SetNewCellFor executes strictly in ascending body index order.
-                bool touchesGrid = targetPos != entPos || (didMoveStep && rawPhysPos != entPos);
-                if (touchesGrid)
+                if (collectPull)
                 {
-                    if (!ent.IsOneCellSize)
+                    PointF pullVel = (didMoveStep || (scaleInt > 0 && velValid)) ? targetVel : managedVel;
+                    if (pullColdScan || pullVel.X * pullVel.X + pullVel.Y * pullVel.Y > 0.04f || (activePullSet != null && activePullSet.Contains(ent)))
                     {
-                        crossedQ.Add(new CrossedBodyWrite { Body = body, HighBitVfx = false });
-                        continue;
-                    }
-                    Point curCell = getCell(ent);
-                    if ((int)targetPos.X != curCell.X || (int)targetPos.Y != curCell.Y
-                        || (didMoveStep && ((int)rawPhysPos.X != curCell.X || (int)rawPhysPos.Y != curCell.Y)))
-                    {
-                        crossedQ.Add(new CrossedBodyWrite { Body = body, HighBitVfx = false });
-                        continue;
+                        if (CSpritePullIsolationPatch.TryPreparePullCandidate(ent, out object cs))
+                            pullQ.Add(new PullCandidate { Ent = ent, CSprite = cs });
                     }
                 }
 
@@ -1424,11 +1920,19 @@ namespace TABCoopMod.Determinism
                 bool writeNativeVel = scaleInt > 0 && velValid && (rawPhysVel.X != qVel.X || rawPhysVel.Y != qVel.Y);
                 bool anyChanged = writeNativePos || writeNativeVel;
 
+                bool wasStationary;
+                PointF newLastComp;
+                PointF newEntLastPos;
+                bool writePosComp = false;
+                bool writeLastComp = false;
+                bool writeEntLastPos = false;
+                bool writeManagedVel = false;
+
                 if (didMoveStep)
                 {
-                    bool wasStationary = scaleInt > 0 && posValid && oldPosComp == rawPhysPos;
-                    PointF newLastComp = wasStationary ? targetPos : oldPosComp;
-                    PointF newEntLastPos = wasStationary ? targetPos : entPos;
+                    wasStationary = scaleInt > 0 && posValid && oldPosComp == rawPhysPos;
+                    newLastComp = wasStationary ? targetPos : oldPosComp;
+                    newEntLastPos = wasStationary ? targetPos : entPos;
 
                     if (scaleInt > 0 && posValid && (rawPhysPos.X != qPos.X || rawPhysPos.Y != qPos.Y))
                         anyChanged = true;
@@ -1437,56 +1941,117 @@ namespace TABCoopMod.Determinism
                     if (scaleInt > 0 && velValid && (rawPhysVel.X != qVel.X || rawPhysVel.Y != qVel.Y))
                         anyChanged = true;
 
-                    body.Velocity = targetVel;
-                    body.LastPositionComputed = newLastComp;
-                    body.PositionComputed = targetPos;
-                    setLastPos(ent, newEntLastPos);
-                    if (targetPos.X != entPos.X || targetPos.Y != entPos.Y)
-                        setPos(ent, targetPos);
+                    writeManagedVel = true;
+                    writeLastComp = true;
+                    writePosComp = true;
+                    writeEntLastPos = true;
                 }
                 else
                 {
-                    bool wasStationary = scaleInt > 0 && posValid && oldLastComp == oldPosComp && oldPosComp == rawPhysPos;
+                    wasStationary = scaleInt > 0 && posValid && oldLastComp == oldPosComp && oldPosComp == rawPhysPos;
+                    newLastComp = qPos;
+                    newEntLastPos = qPos;
                     if (scaleInt > 0 && posValid)
                     {
                         if (oldPosComp.X != qPos.X || oldPosComp.Y != qPos.Y)
                         {
-                            body.PositionComputed = qPos;
+                            writePosComp = true;
                             anyChanged = true;
                         }
                         if (wasStationary && (oldLastComp.X != qPos.X || oldLastComp.Y != qPos.Y))
-                            body.LastPositionComputed = qPos;
+                            writeLastComp = true;
                         if (entPos.X != qPos.X || entPos.Y != qPos.Y)
-                        {
-                            setPos(ent, qPos);
                             anyChanged = true;
-                        }
                         if (wasStationary && (entLastPos.X != qPos.X || entLastPos.Y != qPos.Y))
-                            setLastPos(ent, qPos);
+                            writeEntLastPos = true;
                     }
                     if (scaleInt > 0 && velValid && (managedVel.X != qVel.X || managedVel.Y != qVel.Y))
                     {
-                        body.Velocity = qVel;
+                        writeManagedVel = true;
                         anyChanged = true;
                     }
                 }
 
+                // Non-one-cell dynamic entities or any entity crossing a grid cell between entPos -> rawPhysPos / targetPos
+                // are deferred to Phase 2 so DXWorldGrid.SetNewCellFor executes strictly in ascending body index order.
+                bool touchesGrid = targetPos != entPos || (didMoveStep && rawPhysPos != entPos);
+                if (touchesGrid)
+                {
+                    bool deferToCrossed = !ent.IsOneCellSize;
+                    if (!deferToCrossed)
+                    {
+                        Point curCell = getCell(ent);
+                        deferToCrossed = (int)targetPos.X != curCell.X || (int)targetPos.Y != curCell.Y
+                            || (didMoveStep && ((int)rawPhysPos.X != curCell.X || (int)rawPhysPos.Y != curCell.Y));
+                    }
+                    if (deferToCrossed)
+                    {
+                        crossedQ.Add(new CrossedBodyWrite
+                        {
+                            Body = body,
+                            Ent = ent,
+                            HighBitVfx = false,
+                            DidMoveStep = didMoveStep,
+                            WriteNativePos = writeNativePos,
+                            WriteNativeVel = writeNativeVel,
+                            WritePosComp = writePosComp,
+                            WriteLastComp = writeLastComp,
+                            WriteEntLastPos = writeEntLastPos,
+                            WriteManagedVel = writeManagedVel,
+                            TargetPos = targetPos,
+                            TargetVel = targetVel,
+                            EntPos = entPos,
+                            NewLastComp = newLastComp,
+                            NewEntLastPos = newEntLastPos,
+                            AnyChanged = anyChanged
+                        });
+                        continue;
+                    }
+                }
+
+                if (writeManagedVel) body.Velocity = targetVel;
+                if (writeLastComp) body.LastPositionComputed = newLastComp;
+                if (writePosComp) body.PositionComputed = targetPos;
+                if (writeEntLastPos) setLastPos(ent, newEntLastPos);
+                if (targetPos.X != entPos.X || targetPos.Y != entPos.Y)
+                    setPos(ent, targetPos);
+
                 if (writeNativePos || writeNativeVel)
                 {
-                    nativeQ.Add(new NativePhysWrite
+                    if (!directPhys || !didMoveStep
+                        || !NativePhysicsDirectAccessor.TryDirectWritePhase1LockFree(h, writeNativePos, qPos, writeNativeVel, qVel))
                     {
-                        Body = body,
-                        WritePos = writeNativePos,
-                        Pos = qPos,
-                        WriteVel = writeNativeVel,
-                        Vel = qVel
-                    });
+                        nativeQ.Add(new NativePhysWrite
+                        {
+                            Body = body,
+                            WritePos = writeNativePos,
+                            Pos = qPos,
+                            WriteVel = writeNativeVel,
+                            Vel = qVel
+                        });
+                    }
                 }
                 if (anyChanged) modCount++;
             }
 
             _physModCounts[workerIdx] = modCount;
             _physDynCounts[workerIdx] = dynCount;
+        }
+
+        internal static bool TryConsumeMergedPullCandidates(out List<PullCandidate>[] queues, out int workerCount)
+        {
+            workerCount = _physPullWorkerCount;
+            _physPullWorkerCount = 0;
+            if (workerCount > 0 && object.ReferenceEquals(_physPullLevel, DXLevel.Current) && _physPullCandidateQueues != null)
+            {
+                _physPullLevel = null;
+                queues = _physPullCandidateQueues;
+                return true;
+            }
+            _physPullLevel = null;
+            queues = null;
+            workerCount = 0;
+            return false;
         }
 
         internal static bool TryRunMergedPhysicsReadbackAndQuantize(int start, int end)
@@ -1498,9 +2063,13 @@ namespace TABCoopMod.Determinism
             if (!EnsureMergedPhysicsAccessors())
                 return false;
 
+            _physPullWorkerCount = 0;
+            _physPullLevel = null;
+
             int total = end - start;
             if (total == 0)
             {
+                LockstepClock.SyncedDynamicBodyCount = 0;
                 MergedPhysicsReadbackHandled = true;
                 return true;
             }
@@ -1512,13 +2081,15 @@ namespace TABCoopMod.Determinism
             int nCells = DXWorldGrid.NCells;
             float maxCoord = nCells > 1 ? nCells - (float)invScale : float.MaxValue;
 
+            bool collectPull = CSpritePullIsolationPatch.TryBeginMergedPullCollection(out bool pullColdScan, out HashSet<DXEntity> activePullSet);
+
             int workerCount = total >= 512 ? Testing.TestHarnessConfig.ParallelWorkers : 1;
             if (workerCount > MaxPhysicsWorkers) workerCount = MaxPhysicsWorkers;
             if (workerCount < 1) workerCount = 1;
 
             if (workerCount == 1)
             {
-                ProcessPhysicsReadbackWorker(0, bodies, start, end, scaleInt, scale, invScale, nCells, maxCoord);
+                ProcessPhysicsReadbackWorker(0, bodies, start, end, scaleInt, scale, invScale, nCells, maxCoord, collectPull, pullColdScan, activePullSet);
             }
             else
             {
@@ -1526,14 +2097,23 @@ namespace TABCoopMod.Determinism
                 {
                     int wStart = start + (int)(((long)total * w) / workerCount);
                     int wEnd = start + (int)(((long)total * (w + 1)) / workerCount);
-                    ProcessPhysicsReadbackWorker(w, bodies, wStart, wEnd, scaleInt, scale, invScale, nCells, maxCoord);
+                    ProcessPhysicsReadbackWorker(w, bodies, wStart, wEnd, scaleInt, scale, invScale, nCells, maxCoord, collectPull, pullColdScan, activePullSet);
                 });
+            }
+
+            if (collectPull)
+            {
+                _physPullWorkerCount = workerCount;
+                _physPullLevel = DXLevel.Current;
             }
 
             int totalModified = 0;
             int totalDyn = 0;
+            var setLastPos = _physSetRawLastPos;
 
-            // Phase 2: Sequential commit in ascending worker + body index order for Chipmunk cpBody writes & DXWorldGrid cell updates.
+            // Phase 2A: Drain ALL remaining native non-crossed Chipmunk writes in ascending body index order first,
+            // matching workerCount==1 ordering before any CrossedBodyWrite (which invokes ent.Position / grid updates).
+            bool directPhysSeq = NativePhysicsDirectAccessor.IsEnabled;
             for (int w = 0; w < workerCount; w++)
             {
                 totalModified += _physModCounts[w];
@@ -1543,26 +2123,50 @@ namespace TABCoopMod.Determinism
                 for (int i = 0; i < nq.Count; i++)
                 {
                     var item = nq[i];
-                    if (item.Body.Handle == IntPtr.Zero) continue;
+                    IntPtr h = item.Body.Handle;
+                    if (h == IntPtr.Zero) continue;
+                    if (directPhysSeq && NativePhysicsDirectAccessor.TryDirectWriteSequential(h, item.WritePos, item.Pos, item.WriteVel, item.Vel))
+                        continue;
                     if (item.WritePos) item.Body.PhysicPosition = item.Pos;
                     if (item.WriteVel) item.Body.PhysicVelocity = item.Vel;
                 }
                 nq.Clear();
+            }
 
+            // Phase 2B: Drain ALL crossed writes (Chipmunk + managed ent.Position / DXWorldGrid.SetNewCellFor)
+            // sequentially in ascending worker + body index order.
+            for (int w = 0; w < workerCount; w++)
+            {
                 var cq = _physCrossedQueues[w];
                 for (int i = 0; i < cq.Count; i++)
                 {
                     var c = cq[i];
                     var b = c.Body;
-                    if (b == null || b.Handle == IntPtr.Zero || b.GameEntity == null || b.GameEntity.Disposed) continue;
-                    b.OnNewPositionComputed();
-                    if (!c.HighBitVfx && scaleInt > 0 && ApplyQuantizeSingleBody(b, scaleInt, scale, invScale, nCells, maxCoord))
-                        totalModified++;
+                    if (b == null || b.Handle == IntPtr.Zero || c.Ent == null || c.Ent.Disposed) continue;
+                    if (c.HighBitVfx || scaleInt <= 0)
+                    {
+                        b.OnNewPositionComputed();
+                        continue;
+                    }
+                    if ((c.WriteNativePos || c.WriteNativeVel)
+                        && (!directPhysSeq || !NativePhysicsDirectAccessor.TryDirectWriteSequential(b.Handle, c.WriteNativePos, c.TargetPos, c.WriteNativeVel, c.TargetVel)))
+                    {
+                        if (c.WriteNativePos) b.PhysicPosition = c.TargetPos;
+                        if (c.WriteNativeVel) b.PhysicVelocity = c.TargetVel;
+                    }
+                    if (c.WriteManagedVel) b.Velocity = c.TargetVel;
+                    if (c.WriteLastComp) b.LastPositionComputed = c.NewLastComp;
+                    if (c.WritePosComp) b.PositionComputed = c.TargetPos;
+                    if (c.WriteEntLastPos) setLastPos(c.Ent, c.NewEntLastPos);
+                    if (c.TargetPos.X != c.EntPos.X || c.TargetPos.Y != c.EntPos.Y)
+                        c.Ent.Position = c.TargetPos;
+                    if (c.AnyChanged) totalModified++;
                 }
                 cq.Clear();
             }
 
             MergedPhysicsReadbackHandled = true;
+            LockstepClock.SyncedDynamicBodyCount = totalDyn;
             if (samplePerf)
             {
                 DeterministicSandboxPatches.DiagPhysQuantModified += totalModified;
@@ -1627,8 +2231,6 @@ namespace TABCoopMod.Determinism
         {
             if (!LockstepClock.IsDeterministicModeActive)
                 return true;
-            if (DiagPerfSamplingActive)
-                System.Threading.Interlocked.Increment(ref DiagRngGlobalCalls);
 
             // DXRandom.Global is [ThreadStatic] and seeded from new Random()/real ticks, so it must
             // never be handed out while the sandbox is active. Only the logic worker and the level-
@@ -1641,10 +2243,18 @@ namespace TABCoopMod.Determinism
             if (LockstepClock.InAudioContext || LockstepClock.InVisualVfxContext)
                 __result = LockstepClock.GetRenderGlobalRandom();
             else if (LockstepClock.IsPhysicsThreadActive())
+            {
+                if (DiagPerfSamplingActive && !LockstepClock.HasActiveRngScope)
+                    System.Threading.Interlocked.Increment(ref DiagRngGlobalCalls);
                 __result = LockstepClock.GetAuxGlobalRandom();
+            }
             else if (LockstepClock.InDeterministicContext || LockstepClock.IsLogicWorkerActive()
                 || (LockstepClock.LoadingLevel && !onMain))
+            {
+                if (DiagPerfSamplingActive && !LockstepClock.HasActiveRngScope)
+                    System.Threading.Interlocked.Increment(ref DiagRngGlobalCalls);
                 __result = LockstepClock.GetSyncedGlobalRandom();
+            }
             else
                 __result = LockstepClock.GetRenderGlobalRandom();
             return false;
@@ -1654,6 +2264,8 @@ namespace TABCoopMod.Determinism
         private static readonly MethodInfo _mUpdatePhysics = AccessTools.Method(typeof(DXGame), "UpdatePhysics");
         private static readonly MethodInfo _mWaitForGameLogic = AccessTools.Method(typeof(DXGame), "WaitForGameLogic");
         private static readonly FieldInfo _fTaskLogic = AccessTools.Field(typeof(DXGame), "_TaskLogic");
+        private static Action<DXGame> _fastRunLogicLambda;
+        private static bool _fastRunLogicLambdaTried;
         [ThreadStatic] private static bool _inSingleTickStep;
 
         private static bool _asyncTickInFlight;
@@ -1668,9 +2280,174 @@ namespace TABCoopMod.Determinism
         private static readonly object _deferredAsyncLock = new object();
         private static readonly List<Action> _deferredAsyncPostMethods = new List<Action>();
 
+        // Persistent high-priority dedicated worker thread executing sequential deterministic logic
+        // + UpdatePhysics control plane so Core 1 never competes with shared ThreadPool tasks.
+        private static Thread _dedicatedSimThread;
+        private static readonly ManualResetEventSlim _simWorkReady = new ManualResetEventSlim(false);
+        private static readonly ManualResetEventSlim _simWorkDone = new ManualResetEventSlim(true);
+        private static readonly object _simWorkerLifecycleLock = new object();
+        private static volatile bool _simWorkerStopRequested;
+        private static volatile bool _dedicatedAsyncActive;
+        private static DXGame _dedicatedPendingGame;
+        private static TaskCompletionSource<object> _dedicatedTcs;
+
+        private static Action<DXGame> EnsureFastLogicLambdaCompiled()
+        {
+            if (_fastRunLogicLambdaTried) return _fastRunLogicLambda;
+            _fastRunLogicLambdaTried = true;
+            try
+            {
+                const BindingFlags F = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+                MethodInfo target = null;
+                foreach (var m in typeof(DXGame).GetMethods(F))
+                {
+                    if (m.Name.StartsWith("<UpdateGameLogic>b__", StringComparison.Ordinal)
+                        && m.GetParameters().Length == 0
+                        && m.ReturnType == typeof(void))
+                    {
+                        target = m;
+                        break;
+                    }
+                }
+                if (target != null)
+                {
+                    var dm = new DynamicMethod("TABCoop_FastRunLogicBody", typeof(void),
+                        new[] { typeof(DXGame) }, typeof(DeterministicSandboxPatches).Module, skipVisibility: true);
+                    var il = dm.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Call, target);
+                    il.Emit(OpCodes.Ret);
+                    _fastRunLogicLambda = (Action<DXGame>)dm.CreateDelegate(typeof(Action<DXGame>));
+                    ModLogger.Info($"[Perf] Compiled DynamicMethod TABCoop_FastRunLogicBody -> {target.Name}.");
+                }
+            }
+            catch (Exception ex)
+            {
+                _fastRunLogicLambda = null;
+                ModLogger.Warn($"[LockstepClock] Failed to bind DXGame logic body (using ThreadPool Task fallback): {ex.Message}");
+            }
+            return _fastRunLogicLambda;
+        }
+
+        internal static void EnsureDedicatedSimWorkerStarted()
+        {
+            EnsureFastLogicLambdaCompiled();
+            if (_fastRunLogicLambda == null) return;
+            lock (_simWorkerLifecycleLock)
+            {
+                if (_dedicatedSimThread != null && _dedicatedSimThread.IsAlive)
+                    return;
+                _simWorkerStopRequested = false;
+                _simWorkReady.Reset();
+                _simWorkDone.Set();
+                _dedicatedSimThread = new Thread(DedicatedSimWorkerLoop)
+                {
+                    Name = "TABCoop.DedicatedSimWorker",
+                    IsBackground = true,
+                    Priority = ThreadPriority.AboveNormal
+                };
+                _dedicatedSimThread.Start();
+            }
+        }
+
+        internal static void StopDedicatedSimWorker()
+        {
+            if (_dedicatedAsyncActive)
+            {
+                try { _simWorkDone.Wait(2000); } catch { }
+            }
+            Thread t;
+            lock (_simWorkerLifecycleLock)
+            {
+                t = _dedicatedSimThread;
+                if (t == null) return;
+                _simWorkerStopRequested = true;
+                _simWorkReady.Set();
+            }
+            try { t.Join(500); } catch { }
+            lock (_simWorkerLifecycleLock)
+            {
+                if (!t.IsAlive)
+                    _dedicatedSimThread = null;
+                _simWorkerStopRequested = false;
+            }
+        }
+
+        private static void DedicatedSimWorkerLoop()
+        {
+            double swMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            while (!_simWorkerStopRequested)
+            {
+                _simWorkReady.Wait();
+                if (_simWorkerStopRequested) break;
+                _simWorkReady.Reset();
+
+                DXGame game = _dedicatedPendingGame;
+                var tcs = _dedicatedTcs;
+                _dedicatedPendingGame = null;
+                _dedicatedTcs = null;
+
+                try
+                {
+                    if (game != null && !game.Disposing && _fastRunLogicLambda != null)
+                    {
+                        long launchTs = _asyncLaunchTs;
+                        try
+                        {
+                            _fastRunLogicLambda(game);
+                        }
+                        finally
+                        {
+                            PrecomputedPerceptionManager.EndWatchWindow();
+                        }
+                        double workerMs = (System.Diagnostics.Stopwatch.GetTimestamp() - launchTs) * swMs;
+                        _diagWorkerLogicMs = _diagWorkerLogicMs <= 0.0 ? workerMs : _diagWorkerLogicMs * 0.9 + workerMs * 0.1;
+                        DiagAvgTickLogicMs = _diagWorkerLogicMs;
+
+                        if (DXGame.IsIADeterministic && _mUpdatePhysics != null
+                            && !game.Disposing
+                            && !LockstepClock.LoadingLevel && !LockstepClock.PausedBySession
+                            && DXScene.Current != null && DXScene.Current.RootObject is DXIsometricGridObject)
+                        {
+                            double tPhysStart = System.Diagnostics.Stopwatch.GetTimestamp() * swMs;
+                            _asyncPhysicsChained = true;
+                            LockstepClock.AllowPhysicsThisFrame = true;
+                            _mUpdatePhysics.Invoke(game, null);
+                            LockstepClock.AllowPhysicsThisFrame = false;
+                            double pMs = System.Diagnostics.Stopwatch.GetTimestamp() * swMs - tPhysStart;
+                            if (pMs > 0.2)
+                            {
+                                DiagAvgPhysicsMs = DiagAvgPhysicsMs <= 0.0 ? pMs : DiagAvgPhysicsMs * 0.9 + pMs * 0.1;
+                                DiagPhysStepWindowCount++;
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[LockstepClock] DedicatedSimWorker error: {ex}");
+                }
+                finally
+                {
+                    LockstepClock.AllowPhysicsThisFrame = false;
+                    LockstepClock.LogicTickActive = false;
+                    LockstepClock.LogicThreadId = 0;
+                    _simWorkDone.Set();
+                    try { tcs?.TrySetResult(null); } catch { }
+                }
+            }
+        }
+
         internal static void ResetAsyncTickState()
         {
+            if (_dedicatedAsyncActive)
+            {
+                try { _simWorkDone.Wait(2000); } catch { }
+            }
             _asyncTickInFlight = false;
+            _dedicatedAsyncActive = false;
+            _dedicatedPendingGame = null;
+            _dedicatedTcs = null;
             _asyncPhysicsChained = false;
             _asyncPhysicsStepped = false;
             _inFinalizeAsyncTick = false;
@@ -1679,7 +2456,11 @@ namespace TABCoopMod.Determinism
             _diagAsyncWaitMs = 0.0;
             _diagWorkerLogicMs = 0.0;
             lock (_deferredAsyncLock) { _deferredAsyncPostMethods.Clear(); }
+            LockstepClock._physPullWorkerCount = 0;
+            LockstepClock._physPullLevel = null;
+            CMovableSpriteProgressSyncPatch.ResetCache();
             RenderVisualInterpolationPatch.Reset();
+            LockstepClock.InvalidateAllStage4Caches();
         }
 
         internal static void EnqueueDeferredAsyncPostMethod(Action action)
@@ -1721,10 +2502,20 @@ namespace TABCoopMod.Determinism
         internal static long DiagPhysQuantModified;
         internal static long DiagPhysQuantDynTotal;
         internal static long DiagRngGlobalCalls;
+        internal static long DiagRngScopedCalls;
         internal static long DiagRngGenCalls;
         internal static long DiagRngCtorCalls;
         internal static long DiagGuidCalls;
         internal static long DiagPostWrapCalls;
+        internal static long DiagTickWatcherBypassed;
+        internal static long DiagTickWatcherTicks;
+        internal static long DiagTickWatcherCalls;
+        internal static long DiagTickWatcherPrecompHits;
+        internal static long DiagTickPrecompTicks;
+        internal static long DiagTickPrecompBuilt;
+        internal static long DiagTickPath1uBypassed;
+        internal static int DiagActiveUpdateEntitiesCount;
+        internal static int DiagTotalEntitiesCount;
         internal static int DiagTickWindowCount;
         internal static int DiagPhysStepWindowCount;
         private static readonly double _swTickToMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
@@ -1845,6 +2636,10 @@ namespace TABCoopMod.Determinism
 
             int maxTicksThisFrame = 1;
             bool isHost = inCoop && Sync.CoopSessionManager.Transport != null && Sync.CoopSessionManager.Transport.IsHost;
+            bool isHeavySingleTick = __instance.GameSpeed <= 1.05
+                && !Testing.TestHarnessConfig.DisableAsyncTick
+                && !Testing.DeterministicReplayVerifier.IsRunning
+                && (DiagAvgTickLogicMs >= 15.0 || (DiagAvgTickLogicMs + DiagAvgPhysicsMs * 0.4) >= 16.0);
             if (inCoop)
             {
                 if (isHost)
@@ -1857,7 +2652,12 @@ namespace TABCoopMod.Determinism
                     }
                     else
                     {
-                        maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, hostMaxTicks, hostPaceMult);
+                        // Keep Host 1-tick async overlap alive when a single tick already takes >= 16ms
+                        // at 1x speed (same protection Client uses below): otherwise maxTicksThisFrame=2
+                        // disables canOverlapAsync, falls back to the 18ms sync loop (which breaks after 1 tick),
+                        // and serializes ~48ms Sim + ~30ms Render on the main thread (~78ms frame).
+                        int effectiveHostMax = isHeavySingleTick ? 1 : hostMaxTicks;
+                        maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, effectiveHostMax, hostPaceMult);
                     }
                 }
                 else
@@ -1903,7 +2703,7 @@ namespace TABCoopMod.Determinism
                             }
                             // Keep async 1-tick overlap alive whenever lag is mild (<=3t) OR a single tick
                             // already exceeds 16ms (while still recovering if lag grows >=12t).
-                            else if (behind <= 3 || (DiagAvgTickLogicMs > 16.0 && behind < 12))
+                            else if (behind <= 3 || (isHeavySingleTick && behind < 12))
                             {
                                 maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(clientSpeed, 1, paceMultiplier: 0.72);
                                 if (maxTicksThisFrame < 1) maxTicksThisFrame = 1;
@@ -1920,6 +2720,12 @@ namespace TABCoopMod.Determinism
                     }
                 }
             }
+            else if (Testing.TestHarnessConfig.SoloDeterministicMode && !Testing.DeterministicReplayVerifier.IsRunning)
+            {
+                double soloSpeed = __instance.GameSpeed;
+                int soloMax = soloSpeed > 1.05 ? Math.Max(2, (int)Math.Ceiling(soloSpeed)) : 1;
+                maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(soloSpeed, soloMax);
+            }
             else
             {
                 LockstepClock.ResetHostTickPacing();
@@ -1934,10 +2740,10 @@ namespace TABCoopMod.Determinism
 
             DiagLastWantedTicks = maxTicksThisFrame;
 
-            // Pipeline 1 tick asynchronously in _TaskLogic while RenderFrame/Present runs on MainThread
+            // Pipeline 1 tick asynchronously on our dedicated high-priority secondary core while RenderFrame/Present runs on MainThread
             // ONLY when running 1 tick this frame; multi-tick catchup must execute synchronously so
             // slow late-game clients are not permanently capped to 1 tick per render frame.
-            bool canOverlapAsync = inCoop
+            bool canOverlapAsync = (inCoop || Testing.TestHarnessConfig.SoloDeterministicMode)
                 && !Testing.TestHarnessConfig.DisableAsyncTick
                 && !Testing.DeterministicReplayVerifier.IsRunning
                 && __instance.GameSpeed <= 1.05
@@ -1954,7 +2760,33 @@ namespace TABCoopMod.Determinism
                     {
                         if (maxTicksThisFrame > 1)
                             LockstepClock.RefundHostRealTimeTicks(__instance.GameSpeed, maxTicksThisFrame - 1);
+
+                        EnsureDedicatedSimWorkerStarted();
+                        if (_fastRunLogicLambda != null && _dedicatedSimThread != null && _dedicatedSimThread.IsAlive)
+                        {
+                            _simWorkDone.Wait();
+                            _asyncTickInFlight = true;
+                            _dedicatedAsyncActive = true;
+                            _asyncPhysicsChained = false;
+                            _asyncPhysicsStepped = false;
+                            _asyncLaunchTs = System.Diagnostics.Stopwatch.GetTimestamp();
+                            LockstepClock.LogicTickActive = true;
+                            LockstepClock.InDeterministicContext = false;
+                            LockstepClock.AllowPhysicsThisFrame = false;
+                            LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate + LockstepClock.MsPerLogicTick);
+                            DiagLastRanTicks = 1;
+
+                            var tcs = new TaskCompletionSource<object>();
+                            _fTaskLogic?.SetValue(__instance, tcs.Task);
+                            _dedicatedPendingGame = __instance;
+                            _dedicatedTcs = tcs;
+                            _simWorkDone.Reset();
+                            _simWorkReady.Set();
+                            return false;
+                        }
+
                         _asyncTickInFlight = true;
+                        _dedicatedAsyncActive = false;
                         _asyncPhysicsChained = false;
                         _asyncPhysicsStepped = false;
                         _asyncLaunchTs = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1974,6 +2806,7 @@ namespace TABCoopMod.Determinism
                 return false;
             }
 
+            EnsureFastLogicLambdaCompiled();
             int ticksRan = 0;
             // After running at least 1 tick, allow a wider budget when catching up multiple ticks
             // (especially late-game Client catchup where 1 tick alone takes >10ms).
@@ -1995,17 +2828,51 @@ namespace TABCoopMod.Determinism
                 if (LockstepClock.TickGate != null && !LockstepClock.TickGate.IsTickReady(nextTick))
                     break;
 
-                if (_mUpdateGameLogic == null) break;
+                if (_mUpdateGameLogic == null && _fastRunLogicLambda == null) break;
 
                 double tLogicStart = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs;
-                _inSingleTickStep = true;
-                try
+                if (_fastRunLogicLambda != null)
                 {
-                    _mUpdateGameLogic.Invoke(__instance, null);
+                    if (inCoop)
+                    {
+                        Sync.CoopSessionManager.OnSimulationTickStarting(nextTick);
+                        Sync.CoopSessionManager.FlushDueTurnCommands(nextTick);
+                    }
+                    if (LockstepClock.PausedBySession)
+                    {
+                        LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate);
+                        LockstepClock.AllowPhysicsThisFrame = false;
+                        break;
+                    }
+
+                    LockstepClock.LogicTickActive = true;
+                    LockstepClock.InDeterministicContext = true;
+                    LockstepClock.AllowPhysicsThisFrame = true;
+                    LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate + LockstepClock.MsPerLogicTick);
+                    try
+                    {
+                        _fastRunLogicLambda(__instance);
+                    }
+                    finally
+                    {
+                        PrecomputedPerceptionManager.EndWatchWindow();
+                        LockstepClock.LogicTickActive = false;
+                        LockstepClock.LogicThreadId = 0;
+                        LockstepClock.InDeterministicContext = false;
+                    }
                 }
-                finally
+                else
                 {
-                    _inSingleTickStep = false;
+                    _inSingleTickStep = true;
+                    try
+                    {
+                        _mUpdateGameLogic.Invoke(__instance, null);
+                    }
+                    finally
+                    {
+                        PrecomputedPerceptionManager.EndWatchWindow();
+                        _inSingleTickStep = false;
+                    }
                 }
                 double tLogicEnd = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs;
                 double lMs = tLogicEnd - tLogicStart;
@@ -2097,17 +2964,20 @@ namespace TABCoopMod.Determinism
                 double pQuantMs = DiagPhysQuantTicks * _swTickToMs / Math.Max(1, DiagPhysStepWindowCount);
                 long pQuantMod = DiagPhysQuantModified / Math.Max(1, DiagPhysStepWindowCount);
                 long pQuantDyn = DiagPhysQuantDynTotal / Math.Max(1, DiagPhysStepWindowCount);
+                double watchMs = DiagTickWatcherTicks * _swTickToMs / tc;
+                double preMs = DiagTickPrecompTicks * _swTickToMs / tc;
                 ModLogger.Info($"[Perf] tick={game.IAIterationInt} frame={DiagAvgFrameMs:F1}ms logic={DiagAvgTickLogicMs:F1}ms(wait={_diagAsyncWaitMs:F1}ms) phys={DiagAvgPhysicsMs:F1}ms(x{DiagPhysStepWindowCount}/60t) " +
                     $"| movSync={movMs:F2}ms({DiagTickMovableSyncCalls / tc}/t) pullSync={pullMs:F2}ms({DiagTickPullSyncCalls / Math.Max(1, DiagPhysStepWindowCount)}/p) " +
-                    $"physFor1={pFor1Ms:F2}ms physFor2={pFor2Ms:F2}ms quant={pQuantMs:F2}ms({pQuantMod}/{pQuantDyn}) path={pathMs:F2}ms({DiagTickPathfindCalls / tc}/t,hit={DiagTickPathfindCacheHits / tc}/t) coopTick={hashMs:F2}ms drain={drainMs:F2}ms " +
-                    $"| calls/t: rngG={DiagRngGlobalCalls / tc} gen={DiagRngGenCalls / tc} ctor={DiagRngCtorCalls / tc} guid={DiagGuidCalls / tc} post={DiagPostWrapCalls / tc} want={DiagLastWantedTicks} ran={ranThisFrame}");
-                if (!Testing.TestHarnessConfig.Enabled)
+                    $"physFor1={pFor1Ms:F2}ms physFor2={pFor2Ms:F2}ms quant={pQuantMs:F2}ms({pQuantMod}/{pQuantDyn}) pIter={AdaptivePhysicsStepPatch.CurrentIterations} path={pathMs:F2}ms({DiagTickPathfindCalls / tc}/t,hit={DiagTickPathfindCacheHits / tc}/t) p1uFast={DiagTickPath1uBypassed / tc}/t " +
+                    $"watch={watchMs:F2}ms({DiagTickWatcherCalls / tc}/t,pre={DiagTickWatcherPrecompHits / tc}/t,skip={DiagTickWatcherBypassed / tc}/t) precomp={preMs:F2}ms({DiagTickPrecompBuilt / tc}/t) actEnt={DiagActiveUpdateEntitiesCount}/{DiagTotalEntitiesCount} coopTick={hashMs:F2}ms drain={drainMs:F2}ms " +
+                    $"| calls/t: rngG={DiagRngGlobalCalls / tc} scoped={DiagRngScopedCalls / tc} gen={DiagRngGenCalls / tc} ctor={DiagRngCtorCalls / tc} guid={DiagGuidCalls / tc} post={DiagPostWrapCalls / tc} want={DiagLastWantedTicks} ran={ranThisFrame}");
+                if (!Testing.TestHarnessConfig.Enabled && !Testing.TestHarnessConfig.ForcePerfDiag)
                 {
                     DiagPerfSamplingActive = false;
                     _diagSlowSampleCooldownUntilMs = nowMs + 30000.0;
                 }
             }
-            else if (Testing.TestHarnessConfig.Enabled)
+            else if (Testing.TestHarnessConfig.Enabled || Testing.TestHarnessConfig.ForcePerfDiag)
             {
                 DiagPerfSamplingActive = true;
             }
@@ -2122,8 +2992,27 @@ namespace TABCoopMod.Determinism
             DiagPhysFor1Ticks = 0; DiagPhysFor2Ticks = 0;
             DiagPhysQuantTicks = 0; DiagPhysQuantModified = 0;
             DiagPhysQuantDynTotal = 0;
-            DiagRngGlobalCalls = 0; DiagRngGenCalls = 0; DiagRngCtorCalls = 0; DiagGuidCalls = 0; DiagPostWrapCalls = 0;
+            DiagRngGlobalCalls = 0; DiagRngScopedCalls = 0; DiagRngGenCalls = 0; DiagRngCtorCalls = 0; DiagGuidCalls = 0; DiagPostWrapCalls = 0;
+            DiagTickWatcherBypassed = 0; DiagTickPath1uBypassed = 0;
+            DiagTickWatcherTicks = 0; DiagTickWatcherCalls = 0; DiagTickWatcherPrecompHits = 0; DiagTickPrecompTicks = 0; DiagTickPrecompBuilt = 0;
             DiagTickWindowCount = 0; DiagPhysStepWindowCount = 0;
+        }
+
+        internal static void ResetPerfWindowCounters(bool enableSampling)
+        {
+            DiagTickMovableSyncTicks = 0; DiagTickMovableSyncCalls = 0;
+            DiagTickPullSyncTicks = 0; DiagTickPullSyncCalls = 0;
+            DiagTickPathfindTicks = 0; DiagTickPathfindCalls = 0; DiagTickPathfindCacheHits = 0;
+            DiagTickHashTicks = 0; DiagTickPostDrainTicks = 0;
+            DiagPhysFor1Ticks = 0; DiagPhysFor2Ticks = 0;
+            DiagPhysQuantTicks = 0; DiagPhysQuantModified = 0;
+            DiagPhysQuantDynTotal = 0;
+            DiagRngGlobalCalls = 0; DiagRngScopedCalls = 0; DiagRngGenCalls = 0; DiagRngCtorCalls = 0; DiagGuidCalls = 0; DiagPostWrapCalls = 0;
+            DiagTickWatcherBypassed = 0; DiagTickPath1uBypassed = 0;
+            DiagTickWatcherTicks = 0; DiagTickWatcherCalls = 0; DiagTickWatcherPrecompHits = 0; DiagTickPrecompTicks = 0; DiagTickPrecompBuilt = 0;
+            DiagActiveUpdateEntitiesCount = 0; DiagTotalEntitiesCount = 0;
+            DiagTickWindowCount = 0; DiagPhysStepWindowCount = 0;
+            DiagPerfSamplingActive = enableSampling;
         }
 
         [HarmonyPatch(typeof(DXGame), "UpdateGameLogic")]
@@ -2131,6 +3020,8 @@ namespace TABCoopMod.Determinism
         public static void UpdateGameLogic_Postfix(DXGame __instance)
         {
             if (!LockstepClock.IsDeterministicModeActive) return;
+
+            if (_dedicatedAsyncActive) return;
 
             // Async overlapped tick continues running in _TaskLogic (and chained UpdatePhysics)
             // across RenderFrame/Present and is finalized by StartFrame -> FlushPendingAsyncTick
@@ -2192,10 +3083,15 @@ namespace TABCoopMod.Determinism
 
         [HarmonyPatch(typeof(DXGame), "WaitForGameLogic")]
         [HarmonyPrefix]
-        public static void WaitForGameLogic_Prefix()
+        public static void WaitForGameLogic_Prefix(DXGame __instance)
         {
             if (_asyncTickInFlight && !_inFinalizeAsyncTick)
                 _asyncWaitStartTs = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_dedicatedAsyncActive && !_inFinalizeAsyncTick)
+            {
+                _simWorkDone.Wait();
+                _fTaskLogic?.SetValue(__instance, null);
+            }
         }
 
         [HarmonyPatch(typeof(DXGame), "WaitForGameLogic")]
@@ -2209,6 +3105,7 @@ namespace TABCoopMod.Determinism
                 bool didChainedPhysics = _asyncPhysicsChained;
                 bool didAsyncPhysStep = _asyncPhysicsStepped;
                 _asyncTickInFlight = false;
+                _dedicatedAsyncActive = false;
                 _asyncPhysicsChained = false;
                 _asyncPhysicsStepped = false;
                 double swFreqMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
@@ -2326,6 +3223,7 @@ namespace TABCoopMod.Determinism
             if (!LockstepClock.AllowPhysicsThisFrame || LockstepClock.LoadingLevel || LockstepClock.PausedBySession)
                 return false;
 
+            PrecomputedPerceptionManager.EndWatchWindow();
             __state = DXPhysicWorld.NUpdates;
             LockstepClock.AllowPhysicsThisFrame = false;
             LockstepClock.PhysicsThreadId = Thread.CurrentThread.ManagedThreadId;
@@ -2333,6 +3231,8 @@ namespace TABCoopMod.Determinism
             LockstepClock.InPhysicsStep = true;
             LockstepClock.InPhysicsReadback = false;
             LockstepClock.MergedPhysicsReadbackHandled = false;
+            LockstepClock._physPullWorkerCount = 0;
+            LockstepClock._physPullLevel = null;
             return true;
         }
 
@@ -2363,6 +3263,7 @@ namespace TABCoopMod.Determinism
                 {
                     if (!mergedHandled)
                         LockstepClock.QuantizePhysicsBodiesPostStep();
+                    RenderVisualInterpolationPatch.PublishSnapshot();
                     if (_asyncTickInFlight)
                     {
                         _asyncPhysicsStepped = true;
@@ -2445,6 +3346,23 @@ namespace TABCoopMod.Determinism
             public float OffsetY;
             public long StartTimestamp;
         }
+
+        private struct VisualInterpItem
+        {
+            public DXEntity Entity;
+            public PointF LastPos;
+            public PointF CurPos;
+        }
+
+        private const int InitialInterpBufferCap = 4096;
+        private static VisualInterpItem[][] _interpBuffers =
+        {
+            new VisualInterpItem[InitialInterpBufferCap],
+            new VisualInterpItem[InitialInterpBufferCap]
+        };
+        private static readonly int[] _interpCounts = new int[2];
+        private static int _activeReadInterpIdx;
+        [ThreadStatic] private static HashSet<ulong> _projectedSnapEntityIds;
 
         private const double VisualSnapExpireMs = 600.0;
         private const double VisualSnapTauMs = 180.0;
@@ -2583,6 +3501,76 @@ namespace TABCoopMod.Determinism
             _inSetCamera = false;
             _inVisualSceneUpdate = false;
             _hasSavedVisualGameTime = false;
+            Volatile.Write(ref _interpCounts[0], 0);
+            Volatile.Write(ref _interpCounts[1], 0);
+            Volatile.Write(ref _activeReadInterpIdx, 0);
+        }
+
+        internal static void PublishSnapshot()
+        {
+            if (!LockstepClock.IsDeterministicModeActive
+                || Testing.DeterministicReplayVerifier.IsRunning
+                || LockstepClock.LoadingLevel
+                || DXGame.IsInDesigner)
+                return;
+
+            bool physLockTaken = false;
+            try
+            {
+                Monitor.TryEnter(DXPhysicWorld.Sync, ref physLockTaken);
+                if (!physLockTaken) return;
+
+                var bodies = DXPhysicWorld.Bodies;
+                int writeIdx = 1 - Volatile.Read(ref _activeReadInterpIdx);
+                if (bodies == null || bodies.Count == 0)
+                {
+                    Volatile.Write(ref _interpCounts[writeIdx], 0);
+                    Volatile.Write(ref _activeReadInterpIdx, writeIdx);
+                    return;
+                }
+
+                VisualInterpItem[] buf = _interpBuffers[writeIdx];
+                int count = bodies.Count;
+                int outCount = 0;
+
+                for (int i = 0; i < count; i++)
+                {
+                    if (i >= bodies.Count) break;
+                    var body = bodies[i];
+                    if (body == null || body.Handle == IntPtr.Zero) continue;
+                    var ent = body.GameEntity;
+                    if (ent == null || ent.Disposed || ent.PhysicalType != DXBodyType.Dynamic) continue;
+                    if (ent.SceneObject == null) continue;
+
+                    PointF lastPos = body.LastPositionComputed;
+                    PointF curPos = body.PositionComputed;
+                    if (lastPos == curPos) continue;
+
+                    if (outCount >= buf.Length)
+                    {
+                        int nextCap = Math.Max(buf.Length * 2, count);
+                        var grown = new VisualInterpItem[nextCap];
+                        Array.Copy(buf, grown, outCount);
+                        buf = grown;
+                        Volatile.Write(ref _interpBuffers[writeIdx], buf);
+                    }
+
+                    buf[outCount++] = new VisualInterpItem
+                    {
+                        Entity = ent,
+                        LastPos = lastPos,
+                        CurPos = curPos
+                    };
+                }
+
+                Volatile.Write(ref _interpCounts[writeIdx], outCount);
+                Volatile.Write(ref _activeReadInterpIdx, writeIdx);
+            }
+            finally
+            {
+                if (physLockTaken)
+                    Monitor.Exit(DXPhysicWorld.Sync);
+            }
         }
 
         internal static void OnLogicTickCompleted(int ticksRan)
@@ -2708,6 +3696,9 @@ namespace TABCoopMod.Determinism
             EnsureRawPosAccessors();
             if (_fastGetRawPos == null || _fastSetRawPos == null) return;
 
+            if (_inVisualSceneUpdate)
+                ExitVisualSceneUpdate(game);
+
             _inVisualSceneUpdate = true;
             _hasSavedVisualGameTime = false;
             if (!LockstepClock.PausedBySession && !game.Paused && game.GameSpeed > 0.001 && _visualGameTimeRemainderMs >= 1.0)
@@ -2720,38 +3711,38 @@ namespace TABCoopMod.Determinism
             float alpha = _frameInterpAlpha;
             if (alpha < 0f) return;
 
-            bool physLockTaken = false;
-            try
+            int readIdx = Volatile.Read(ref _activeReadInterpIdx);
+            int count = Volatile.Read(ref _interpCounts[readIdx]);
+            VisualInterpItem[] snapBuf = Volatile.Read(ref _interpBuffers[readIdx]);
+            bool hasSnaps = _hasVisualSnapOffsets;
+            if (count <= 0 && !hasSnaps) return;
+
+            _projectedRestoreList.Clear();
+            long nowTs = _currentFrameTimestamp;
+            HashSet<ulong> seenSnapIds = null;
+            if (hasSnaps)
             {
-                // DXPhysicWorld.Clear() / UnloadLevel runs on a background loader thread under
-                // DXPhysicWorld.Sync while Window_Paint can still pump SetCamera fade frames.
-                // Never stall teardown or race against Bodies shrinking mid-iteration.
-                Monitor.TryEnter(DXPhysicWorld.Sync, ref physLockTaken);
-                if (!physLockTaken) return;
+                seenSnapIds = _projectedSnapEntityIds ?? (_projectedSnapEntityIds = new HashSet<ulong>());
+                seenSnapIds.Clear();
+            }
 
-                var bodies = DXPhysicWorld.Bodies;
-                if (bodies == null || bodies.Count == 0) return;
-
-                _projectedRestoreList.Clear();
-                bool hasSnaps = _hasVisualSnapOffsets;
-                long nowTs = _currentFrameTimestamp;
-                int count = bodies.Count;
-
-                for (int i = 0; i < count; i++)
+            if (snapBuf != null && count > 0)
+            {
+                int safeCount = Math.Min(count, snapBuf.Length);
+                for (int i = 0; i < safeCount; i++)
                 {
-                    if (i >= bodies.Count) break;
-                    var body = bodies[i];
-                    if (body == null || body.Handle == IntPtr.Zero) continue;
-                    var ent = body.GameEntity;
-                    if (ent == null || ent.Disposed || ent.PhysicalType != DXBodyType.Dynamic) continue;
-                    if (ent.SceneObject == null) continue;
+                    VisualInterpItem item = snapBuf[i];
+                    var ent = item.Entity;
+                    if (ent == null || ent.Disposed || ent.PhysicalType != DXBodyType.Dynamic || ent.SceneObject == null)
+                        continue;
 
-                    PointF lastPos = body.LastPositionComputed;
-                    PointF curPos = body.PositionComputed;
+                    PointF lastPos = item.LastPos;
+                    PointF curPos = item.CurPos;
 
                     float snapOffX = 0f, snapOffY = 0f;
                     if (hasSnaps && _visualSnapOffsets.TryGetValue(ent.ID, out var snap))
                     {
+                        seenSnapIds.Add(ent.ID);
                         double ageMs = (nowTs - snap.StartTimestamp) * _swToMs;
                         if (ageMs < 0.0) ageMs = 0.0;
                         if (ageMs < VisualSnapExpireMs)
@@ -2782,10 +3773,32 @@ namespace TABCoopMod.Determinism
                     _fastSetRawPos(ent, interpPos);
                 }
             }
-            finally
+
+            if (hasSnaps)
             {
-                if (physLockTaken)
-                    Monitor.Exit(DXPhysicWorld.Sync);
+                foreach (var kv in _visualSnapOffsets)
+                {
+                    if (seenSnapIds.Contains(kv.Key)) continue;
+                    double ageMs = (nowTs - kv.Value.StartTimestamp) * _swToMs;
+                    if (ageMs < 0.0) ageMs = 0.0;
+                    if (ageMs >= VisualSnapExpireMs) continue;
+
+                    DXEntity ent = game.GetEntityByID(kv.Key);
+                    if (ent == null || ent.Disposed || ent.PhysicalType != DXBodyType.Dynamic || ent.SceneObject == null)
+                        continue;
+
+                    float decay = (float)Math.Exp(-ageMs / VisualSnapTauMs);
+                    float snapOffX = kv.Value.OffsetX * decay;
+                    float snapOffY = kv.Value.OffsetY * decay;
+                    if (snapOffX == 0f && snapOffY == 0f) continue;
+
+                    PointF origPos = _fastGetRawPos(ent);
+                    PointF interpPos = new PointF(origPos.X + snapOffX, origPos.Y + snapOffY);
+                    if (interpPos == origPos) continue;
+
+                    _projectedRestoreList.Add(new RestoreState { Entity = ent, OrigPos = origPos });
+                    _fastSetRawPos(ent, interpPos);
+                }
             }
         }
 
@@ -3011,6 +4024,7 @@ namespace TABCoopMod.Determinism
             public Point Start;
             public Point End;
             public uint Mask;
+            public int? MaxNodes;
         }
 
         private delegate List<Point> FindPath8Delegate(
@@ -3032,11 +4046,678 @@ namespace TABCoopMod.Determinism
         private static int _cachedGridVersion = -1;
         private static readonly Dictionary<PathCacheKey, List<Point>> _exactPathCache =
             new Dictionary<PathCacheKey, List<Point>>(512);
-        private const int MaxExactPathCacheEntries = 2048;
+        private const int MaxExactPathCacheEntries = 32768;
 
         private static readonly object _prewarmPfLock = new object();
         private static readonly Dictionary<int, uint[,]> _cachedGridRefs = new Dictionary<int, uint[,]>(4);
         private static readonly Dictionary<int, Algorithms.PathFinderFast[]> _parallelPfs = new Dictionary<int, Algorithms.PathFinderFast[]>(4);
+
+        private struct CompCacheKey : IEquatable<CompCacheKey>
+        {
+            public int CellSize;
+            public uint Mask;
+            public bool Equals(CompCacheKey o) => CellSize == o.CellSize && Mask == o.Mask;
+            public override bool Equals(object obj) => obj is CompCacheKey o && Equals(o);
+            public override int GetHashCode() => (CellSize * 397) ^ (int)Mask;
+        }
+
+        private sealed class CompMapEntry
+        {
+            public uint[,] GridRef;
+            public int Width;
+            public int Height;
+            public int[] CompIds;
+            public int[] CompSizes;
+        }
+
+        private static readonly object _compCacheLock = new object();
+        private static int _cachedCompVersion = -1;
+        private static readonly Dictionary<CompCacheKey, CompMapEntry> _compCache = new Dictionary<CompCacheKey, CompMapEntry>(8);
+        private static int[] _compQueueScratch;
+        private static int[] _compSizesScratch;
+
+        private struct FlowKey : IEquatable<FlowKey>
+        {
+            public int CellSize;
+            public int TargetX;
+            public int TargetY;
+            public uint Mask;
+            public bool NearPath;
+
+            public bool Equals(FlowKey o) =>
+                CellSize == o.CellSize && TargetX == o.TargetX && TargetY == o.TargetY
+                && Mask == o.Mask && NearPath == o.NearPath;
+
+            public override bool Equals(object obj) => obj is FlowKey o && Equals(o);
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    int h = CellSize;
+                    h = (h * 397) ^ TargetX;
+                    h = (h * 397) ^ TargetY;
+                    h = (h * 397) ^ (int)Mask;
+                    h = (h * 397) ^ (NearPath ? 1 : 0);
+                    return h;
+                }
+            }
+        }
+
+        private sealed class FlowFieldEntry
+        {
+            public uint[,] GridRef;
+            public int Width;
+            public int Height;
+            public int[] NextIdx;
+            public int[] Dist;
+        }
+
+        private static readonly object _flowCacheLock = new object();
+        private static int _cachedFlowVersion = -1;
+        private static readonly Dictionary<FlowKey, FlowFieldEntry> _flowCache = new Dictionary<FlowKey, FlowFieldEntry>(16);
+        private static readonly Dictionary<FlowKey, int> _targetQueryCounts = new Dictionary<FlowKey, int>(64);
+        private const int MaxFlowCacheEntries = 32;
+
+        private static void PushHeap(ref ulong[] heap, ref int count, ulong val)
+        {
+            if (count == heap.Length)
+                Array.Resize(ref heap, heap.Length * 2);
+            int i = count++;
+            while (i > 0)
+            {
+                int p = (i - 1) >> 1;
+                if (heap[p] <= val) break;
+                heap[i] = heap[p];
+                i = p;
+            }
+            heap[i] = val;
+        }
+
+        private static ulong PopHeap(ulong[] heap, ref int count)
+        {
+            ulong top = heap[0];
+            int n = --count;
+            if (n > 0)
+            {
+                ulong last = heap[n];
+                int i = 0;
+                int half = n >> 1;
+                while (i < half)
+                {
+                    int child = (i << 1) + 1;
+                    int right = child + 1;
+                    if (right < n && heap[right] < heap[child])
+                        child = right;
+                    if (last <= heap[child]) break;
+                    heap[i] = heap[child];
+                    i = child;
+                }
+                heap[i] = last;
+            }
+            return top;
+        }
+
+        private static FlowFieldEntry BuildFlowFieldCore(uint[,] grid, uint mask, Point target, bool nearPath)
+        {
+            if (grid == null) return null;
+            int gw = grid.GetLength(0);
+            int gh = grid.GetLength(1);
+            if ((uint)target.X >= (uint)gw || (uint)target.Y >= (uint)gh) return null;
+            int total = gw * gh;
+            if (total <= 0 || total >= (1 << 20)) return null;
+
+            var dist = new int[total];
+            var nextIdx = new int[total];
+            for (int i = 0; i < total; i++)
+            {
+                dist[i] = int.MaxValue;
+                nextIdx[i] = -1;
+            }
+
+            var heap = new ulong[Math.Min(Math.Max(1024, gw * 8), total)];
+            int heapCount = 0;
+
+            bool targetOpen = (grid[target.X, target.Y] & mask) == 0u;
+            if (targetOpen)
+            {
+                int rootIdx = target.Y * gw + target.X;
+                dist[rootIdx] = 0;
+                nextIdx[rootIdx] = rootIdx;
+                PushHeap(ref heap, ref heapCount, ((ulong)0 << 20) | (uint)rootIdx);
+            }
+            else if (!nearPath)
+            {
+                return new FlowFieldEntry { GridRef = grid, Width = gw, Height = gh, NextIdx = nextIdx, Dist = dist };
+            }
+            else
+            {
+                // Seed all walkable cells directly abutting the contiguous blocked footprint of target (7x7 max radius).
+                var bQueue = new int[49];
+                var bVisited = new bool[49];
+                int bHead = 0, bTail = 0;
+                bVisited[3 * 7 + 3] = true;
+                bQueue[bTail++] = (target.Y << 16) | (target.X & 0xFFFF);
+
+                while (bHead < bTail)
+                {
+                    int packed = bQueue[bHead++];
+                    int bx = (short)(packed & 0xFFFF);
+                    int by = packed >> 16;
+
+                    for (int dir = 0; dir < 4; dir++)
+                    {
+                        int nx = bx + (dir == 0 ? 1 : dir == 1 ? -1 : 0);
+                        int ny = by + (dir == 2 ? 1 : dir == 3 ? -1 : 0);
+                        if ((uint)nx >= (uint)gw || (uint)ny >= (uint)gh) continue;
+
+                        if ((grid[nx, ny] & mask) == 0u)
+                        {
+                            int sIdx = ny * gw + nx;
+                            if (nextIdx[sIdx] != sIdx)
+                            {
+                                int dx = nx - target.X;
+                                int dy = ny - target.Y;
+                                int seedDist = (int)Math.Round(Math.Sqrt(dx * dx + dy * dy) * 100.0);
+                                dist[sIdx] = seedDist;
+                                nextIdx[sIdx] = sIdx;
+                                PushHeap(ref heap, ref heapCount, ((ulong)(uint)seedDist << 20) | (uint)sIdx);
+                            }
+                        }
+                        else
+                        {
+                            int lx = nx - target.X + 3;
+                            int ly = ny - target.Y + 3;
+                            if ((uint)lx < 7u && (uint)ly < 7u)
+                            {
+                                int vi = ly * 7 + lx;
+                                if (!bVisited[vi])
+                                {
+                                    bVisited[vi] = true;
+                                    bQueue[bTail++] = (ny << 16) | (nx & 0xFFFF);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (heapCount == 0)
+                {
+                    for (int r = 1; r <= 6 && heapCount == 0; r++)
+                    {
+                        int minY = Math.Max(0, target.Y - r);
+                        int maxY = Math.Min(gh - 1, target.Y + r);
+                        int minX = Math.Max(0, target.X - r);
+                        int maxX = Math.Min(gw - 1, target.X + r);
+                        for (int ty = minY; ty <= maxY; ty++)
+                        {
+                            for (int tx = minX; tx <= maxX; tx++)
+                            {
+                                if ((grid[tx, ty] & mask) != 0u) continue;
+                                int sIdx = ty * gw + tx;
+                                int dx = tx - target.X;
+                                int dy = ty - target.Y;
+                                int seedDist = (int)Math.Round(Math.Sqrt(dx * dx + dy * dy) * 100.0);
+                                dist[sIdx] = seedDist;
+                                nextIdx[sIdx] = sIdx;
+                                PushHeap(ref heap, ref heapCount, ((ulong)(uint)seedDist << 20) | (uint)sIdx);
+                            }
+                        }
+                    }
+                }
+
+                if (heapCount == 0)
+                    return null;
+            }
+
+            // Reverse Dijkstra with exact PathFinderFast octile costs (100 cardinal, 141 diagonal)
+            // and symmetric non-corner-cutting diagonal walkability checks.
+            while (heapCount > 0)
+            {
+                ulong top = PopHeap(heap, ref heapCount);
+                int dCur = (int)(top >> 20);
+                int cur = (int)(top & 0xFFFFFUL);
+                if (dCur != dist[cur]) continue;
+
+                int cy = cur / gw;
+                int cx = cur - cy * gw;
+
+                bool openPosX = cx + 1 < gw && (grid[cx + 1, cy] & mask) == 0u;
+                bool openNegX = cx > 0 && (grid[cx - 1, cy] & mask) == 0u;
+                bool openPosY = cy + 1 < gh && (grid[cx, cy + 1] & mask) == 0u;
+                bool openNegY = cy > 0 && (grid[cx, cy - 1] & mask) == 0u;
+
+                int orthoDist = dCur + 100;
+                if (openPosX)
+                {
+                    int ni = cur + 1;
+                    if (orthoDist < dist[ni]) { dist[ni] = orthoDist; nextIdx[ni] = cur; PushHeap(ref heap, ref heapCount, ((ulong)(uint)orthoDist << 20) | (uint)ni); }
+                }
+                if (openNegX)
+                {
+                    int ni = cur - 1;
+                    if (orthoDist < dist[ni]) { dist[ni] = orthoDist; nextIdx[ni] = cur; PushHeap(ref heap, ref heapCount, ((ulong)(uint)orthoDist << 20) | (uint)ni); }
+                }
+                if (openPosY)
+                {
+                    int ni = cur + gw;
+                    if (orthoDist < dist[ni]) { dist[ni] = orthoDist; nextIdx[ni] = cur; PushHeap(ref heap, ref heapCount, ((ulong)(uint)orthoDist << 20) | (uint)ni); }
+                }
+                if (openNegY)
+                {
+                    int ni = cur - gw;
+                    if (orthoDist < dist[ni]) { dist[ni] = orthoDist; nextIdx[ni] = cur; PushHeap(ref heap, ref heapCount, ((ulong)(uint)orthoDist << 20) | (uint)ni); }
+                }
+
+                int diagDist = dCur + 141;
+                if (openPosX && openPosY && (grid[cx + 1, cy + 1] & mask) == 0u)
+                {
+                    int ni = cur + gw + 1;
+                    if (diagDist < dist[ni]) { dist[ni] = diagDist; nextIdx[ni] = cur; PushHeap(ref heap, ref heapCount, ((ulong)(uint)diagDist << 20) | (uint)ni); }
+                }
+                if (openPosX && openNegY && (grid[cx + 1, cy - 1] & mask) == 0u)
+                {
+                    int ni = cur - gw + 1;
+                    if (diagDist < dist[ni]) { dist[ni] = diagDist; nextIdx[ni] = cur; PushHeap(ref heap, ref heapCount, ((ulong)(uint)diagDist << 20) | (uint)ni); }
+                }
+                if (openNegX && openPosY && (grid[cx - 1, cy + 1] & mask) == 0u)
+                {
+                    int ni = cur + gw - 1;
+                    if (diagDist < dist[ni]) { dist[ni] = diagDist; nextIdx[ni] = cur; PushHeap(ref heap, ref heapCount, ((ulong)(uint)diagDist << 20) | (uint)ni); }
+                }
+                if (openNegX && openNegY && (grid[cx - 1, cy - 1] & mask) == 0u)
+                {
+                    int ni = cur - gw - 1;
+                    if (diagDist < dist[ni]) { dist[ni] = diagDist; nextIdx[ni] = cur; PushHeap(ref heap, ref heapCount, ((ulong)(uint)diagDist << 20) | (uint)ni); }
+                }
+            }
+
+            return new FlowFieldEntry
+            {
+                GridRef = grid,
+                Width = gw,
+                Height = gh,
+                NextIdx = nextIdx,
+                Dist = dist
+            };
+        }
+
+        private static FlowFieldEntry GetOrBuildFlowField(int cellSize, uint mask, Point target, bool nearPath, uint[,] grid, int gridVersion)
+        {
+            if (grid == null) return null;
+            var fk = new FlowKey { CellSize = cellSize, TargetX = target.X, TargetY = target.Y, Mask = mask, NearPath = nearPath };
+            lock (_flowCacheLock)
+            {
+                if (_cachedFlowVersion != gridVersion)
+                {
+                    _flowCache.Clear();
+                    _targetQueryCounts.Clear();
+                    _cachedFlowVersion = gridVersion;
+                }
+                if (_flowCache.TryGetValue(fk, out var existing) && existing != null && ReferenceEquals(existing.GridRef, grid))
+                    return existing;
+            }
+
+            var built = BuildFlowFieldCore(grid, mask, target, nearPath);
+            if (built == null) return null;
+
+            lock (_flowCacheLock)
+            {
+                if (_cachedFlowVersion != gridVersion)
+                {
+                    _flowCache.Clear();
+                    _targetQueryCounts.Clear();
+                    _cachedFlowVersion = gridVersion;
+                }
+                if (_flowCache.TryGetValue(fk, out var race) && race != null && ReferenceEquals(race.GridRef, grid))
+                    return race;
+                if (_flowCache.Count >= MaxFlowCacheEntries)
+                    _flowCache.Clear();
+                _flowCache[fk] = built;
+                return built;
+            }
+        }
+
+        private static bool TryExtractFlowPath(
+            FlowFieldEntry flow, uint[,] grid, uint mask,
+            Point p1, Point p2, bool nearPath,
+            out List<Point> path)
+        {
+            path = null;
+            if (flow == null || grid == null || !ReferenceEquals(flow.GridRef, grid))
+                return false;
+
+            int gw = flow.Width, gh = flow.Height;
+            if ((uint)p1.X >= (uint)gw || (uint)p1.Y >= (uint)gh)
+                return false;
+
+            if (p1 == p2)
+            {
+                path = new List<Point>(1) { p2 };
+                return true;
+            }
+
+            int startIdx = p1.Y * gw + p1.X;
+            int stepIdx = flow.NextIdx[startIdx];
+
+            if (stepIdx < 0 && (grid[p1.X, p1.Y] & mask) != 0u)
+            {
+                int bestNb = -1;
+                int bestDist = int.MaxValue;
+                for (int dir = 0; dir < 4; dir++)
+                {
+                    int nx = p1.X + (dir == 0 ? 1 : dir == 1 ? -1 : 0);
+                    int ny = p1.Y + (dir == 2 ? 1 : dir == 3 ? -1 : 0);
+                    if ((uint)nx >= (uint)gw || (uint)ny >= (uint)gh) continue;
+                    int ni = ny * gw + nx;
+                    if (flow.NextIdx[ni] >= 0 && flow.Dist[ni] < bestDist)
+                    {
+                        bestDist = flow.Dist[ni];
+                        bestNb = ni;
+                    }
+                }
+                stepIdx = bestNb;
+            }
+
+            if (stepIdx < 0)
+            {
+                if (!nearPath)
+                {
+                    path = null;
+                    return true;
+                }
+                return false;
+            }
+
+            if (stepIdx == startIdx)
+            {
+                path = new List<Point>(1) { p1 };
+                return true;
+            }
+
+            var pts = new List<Point>(48);
+            int prevX = p1.X, prevY = p1.Y;
+            int curIdx = stepIdx;
+            int cy = curIdx / gw;
+            int cx = curIdx - cy * gw;
+            int guard = gw * gh;
+
+            while (guard-- > 0)
+            {
+                int nxtIdx = flow.NextIdx[curIdx];
+                if (nxtIdx < 0)
+                {
+                    path = null;
+                    return false;
+                }
+                if (nxtIdx == curIdx)
+                {
+                    pts.Add(new Point(cx, cy));
+                    break;
+                }
+
+                int ny = nxtIdx / gw;
+                int nx = nxtIdx - ny * gw;
+                if (nx - cx != cx - prevX || ny - cy != cy - prevY)
+                    pts.Add(new Point(cx, cy));
+
+                prevX = cx;
+                prevY = cy;
+                curIdx = nxtIdx;
+                cx = nx;
+                cy = ny;
+            }
+
+            path = pts;
+            return true;
+        }
+
+        private static CompMapEntry GetOrBuildComponentMap(int cellSize, uint mask, uint[,] grid, int gridVersion)
+        {
+            if (grid == null) return null;
+            int gw = grid.GetLength(0);
+            int gh = grid.GetLength(1);
+            if (gw <= 0 || gh <= 0) return null;
+
+            var key = new CompCacheKey { CellSize = cellSize, Mask = mask };
+            lock (_compCacheLock)
+            {
+                if (_cachedCompVersion != gridVersion)
+                {
+                    _compCache.Clear();
+                    _cachedCompVersion = gridVersion;
+                }
+
+                if (_compCache.TryGetValue(key, out var existing) && existing != null && ReferenceEquals(existing.GridRef, grid))
+                    return existing;
+
+                int total = gw * gh;
+                if (_compQueueScratch == null || _compQueueScratch.Length < total)
+                    _compQueueScratch = new int[total];
+                if (_compSizesScratch == null || _compSizesScratch.Length < 1024)
+                    _compSizesScratch = new int[1024];
+
+                var compIds = new int[total];
+                int[] q = _compQueueScratch;
+                int compCount = 0;
+
+                // 4-connected BFS is mathematically exact for PathFinderFast walkability because
+                // diagonal moves in PathFinderFast require both adjacent cardinal cells to be open.
+                for (int y = 0; y < gh; y++)
+                {
+                    int rowBase = y * gw;
+                    for (int x = 0; x < gw; x++)
+                    {
+                        int startIdx = rowBase + x;
+                        if (compIds[startIdx] != 0 || (grid[x, y] & mask) != 0u)
+                            continue;
+
+                        compCount++;
+                        compIds[startIdx] = compCount;
+                        int qHead = 0, qTail = 0;
+                        q[qTail++] = startIdx;
+                        int size = 0;
+
+                        while (qHead < qTail)
+                        {
+                            int cur = q[qHead++];
+                            size++;
+                            int cy = cur / gw;
+                            int cx = cur - cy * gw;
+
+                            if (cx > 0)
+                            {
+                                int n = cur - 1;
+                                if (compIds[n] == 0 && (grid[cx - 1, cy] & mask) == 0u)
+                                {
+                                    compIds[n] = compCount;
+                                    q[qTail++] = n;
+                                }
+                            }
+                            if (cx + 1 < gw)
+                            {
+                                int n = cur + 1;
+                                if (compIds[n] == 0 && (grid[cx + 1, cy] & mask) == 0u)
+                                {
+                                    compIds[n] = compCount;
+                                    q[qTail++] = n;
+                                }
+                            }
+                            if (cy > 0)
+                            {
+                                int n = cur - gw;
+                                if (compIds[n] == 0 && (grid[cx, cy - 1] & mask) == 0u)
+                                {
+                                    compIds[n] = compCount;
+                                    q[qTail++] = n;
+                                }
+                            }
+                            if (cy + 1 < gh)
+                            {
+                                int n = cur + gw;
+                                if (compIds[n] == 0 && (grid[cx, cy + 1] & mask) == 0u)
+                                {
+                                    compIds[n] = compCount;
+                                    q[qTail++] = n;
+                                }
+                            }
+                        }
+
+                        if (compCount >= _compSizesScratch.Length)
+                            Array.Resize(ref _compSizesScratch, _compSizesScratch.Length * 2);
+                        _compSizesScratch[compCount] = size;
+                    }
+                }
+
+                var finalSizes = new int[compCount + 1];
+                Array.Copy(_compSizesScratch, finalSizes, compCount + 1);
+                var created = new CompMapEntry
+                {
+                    GridRef = grid,
+                    Width = gw,
+                    Height = gh,
+                    CompIds = compIds,
+                    CompSizes = finalSizes
+                };
+                _compCache[key] = created;
+                return created;
+            }
+        }
+
+        private static bool MatchesAnyComp(int candidate, int c0, int c1, int c2, int c3) =>
+            candidate != 0 && (candidate == c0 || candidate == c1 || candidate == c2 || candidate == c3);
+
+        private static void GetStartCompIds(
+            CompMapEntry comp, Point p1,
+            out int c0, out int c1, out int c2, out int c3, out int maxCompSize)
+        {
+            c0 = c1 = c2 = c3 = 0;
+            maxCompSize = 0;
+            int gw = comp.Width, gh = comp.Height;
+            if ((uint)p1.X >= (uint)gw || (uint)p1.Y >= (uint)gh) return;
+
+            int direct = comp.CompIds[p1.Y * gw + p1.X];
+            if (direct > 0)
+            {
+                c0 = direct;
+                maxCompSize = comp.CompSizes[direct];
+                return;
+            }
+
+            // If p1 sits on a blocked boundary cell, collect walkable cardinal entry neighbors
+            // (all enterable diagonal neighbors are also reachable via their two open cardinal sides).
+            int rowBase = p1.Y * gw;
+            if (p1.X > 0)
+            {
+                int c = comp.CompIds[rowBase + p1.X - 1];
+                if (c > 0) { c0 = c; if (comp.CompSizes[c] > maxCompSize) maxCompSize = comp.CompSizes[c]; }
+            }
+            if (p1.X + 1 < gw)
+            {
+                int c = comp.CompIds[rowBase + p1.X + 1];
+                if (c > 0 && c != c0) { c1 = c; if (comp.CompSizes[c] > maxCompSize) maxCompSize = comp.CompSizes[c]; }
+            }
+            if (p1.Y > 0)
+            {
+                int c = comp.CompIds[(p1.Y - 1) * gw + p1.X];
+                if (c > 0 && c != c0 && c != c1) { c2 = c; if (comp.CompSizes[c] > maxCompSize) maxCompSize = comp.CompSizes[c]; }
+            }
+            if (p1.Y + 1 < gh)
+            {
+                int c = comp.CompIds[(p1.Y + 1) * gw + p1.X];
+                if (c > 0 && c != c0 && c != c1 && c != c2) { c3 = c; if (comp.CompSizes[c] > maxCompSize) maxCompSize = comp.CompSizes[c]; }
+            }
+        }
+
+        private static bool TryResolveTargetWithComp(
+            CompMapEntry comp, uint[,] grid, uint mask,
+            Point p1, Point p2, bool nearPath,
+            out Point resolvedEnd, out bool resolvedNearPath)
+        {
+            resolvedEnd = p2;
+            resolvedNearPath = nearPath;
+            if (comp == null || grid == null) return false;
+            int gw = comp.Width, gh = comp.Height;
+            if ((uint)p2.X >= (uint)gw || (uint)p2.Y >= (uint)gh) return false;
+            if ((uint)p1.X >= (uint)gw || (uint)p1.Y >= (uint)gh) return false;
+
+            GetStartCompIds(comp, p1, out int c0, out int c1, out int c2c, out int c3, out int _);
+            if (c0 == 0 && p1 != p2)
+                return true; // Completely boxed in with no walkable cardinal neighbor -> fast null
+
+            bool p2Blocked = (grid[p2.X, p2.Y] & mask) != 0u;
+            int targetComp = p2Blocked ? 0 : comp.CompIds[p2.Y * gw + p2.X];
+
+            if (!nearPath)
+            {
+                if (p1 != p2 && (p2Blocked || !MatchesAnyComp(targetComp, c0, c1, c2c, c3)))
+                    return true; // Unreachable -> fast null
+                resolvedEnd = p2;
+                resolvedNearPath = false;
+                return false;
+            }
+
+            if (!p2Blocked && MatchesAnyComp(targetComp, c0, c1, c2c, c3))
+            {
+                // Directly reachable -> skip second nearPath pass cleanly
+                resolvedEnd = p2;
+                resolvedNearPath = false;
+                return false;
+            }
+
+            // When target cell itself is blocked (e.g. CommandCenter / building / wall center)
+            // or behind an open-edge building, resolve deterministically to the closest walkable
+            // perimeter cell in the starter component so A* avoids a 200k-node full-map flood fill.
+            if (p2Blocked)
+            {
+                bool found = false;
+                int bestX = 0, bestY = 0;
+                long bestD2End = long.MaxValue, bestD2Start = long.MaxValue;
+                int[] ids = comp.CompIds;
+
+                for (int r = 1; r <= 6; r++)
+                {
+                    if (found && (long)r * r > bestD2End)
+                        break;
+                    int minY = Math.Max(0, p2.Y - r);
+                    int maxY = Math.Min(gh - 1, p2.Y + r);
+                    int minX = Math.Max(0, p2.X - r);
+                    int maxX = Math.Min(gw - 1, p2.X + r);
+                    for (int ty = minY; ty <= maxY; ty++)
+                    {
+                        bool onEdgeY = (ty == p2.Y - r || ty == p2.Y + r);
+                        int rowOff = ty * gw;
+                        for (int tx = minX; tx <= maxX; tx++)
+                        {
+                            if (!onEdgeY && tx != p2.X - r && tx != p2.X + r)
+                                continue;
+                            int cc = ids[rowOff + tx];
+                            if (!MatchesAnyComp(cc, c0, c1, c2c, c3))
+                                continue;
+                            long dxE = tx - p2.X, dyE = ty - p2.Y;
+                            long d2End = dxE * dxE + dyE * dyE;
+                            long dxS = tx - p1.X, dyS = ty - p1.Y;
+                            long d2Start = dxS * dxS + dyS * dyS;
+                            if (!found || d2End < bestD2End || (d2End == bestD2End && d2Start < bestD2Start))
+                            {
+                                found = true;
+                                bestX = tx; bestY = ty;
+                                bestD2End = d2End; bestD2Start = d2Start;
+                            }
+                        }
+                    }
+                }
+
+                if (found)
+                {
+                    resolvedEnd = new Point(bestX, bestY);
+                    resolvedNearPath = false;
+                    return false;
+                }
+            }
+
+            return false;
+        }
 
         private static void EnsureFindPath8Bound()
         {
@@ -3156,19 +4837,68 @@ namespace TABCoopMod.Determinism
             return path;
         }
 
+        private static Point TryClusterOrigin(int safeCellSize, Point p1, Point p2, uint mask, Dictionary<int, uint[,]> grids)
+        {
+            if (safeCellSize != 1 || grids == null)
+                return p1;
+            int dist = p1.DistanceMaxAxis(p2);
+            if (dist < 24)
+                return p1;
+            if (!grids.TryGetValue(1, out uint[,] grid) || grid == null)
+                return p1;
+
+            int gw = grid.GetLength(0);
+            int gh = grid.GetLength(1);
+
+            if (dist >= 64)
+            {
+                int b4x = p1.X & ~3;
+                int b4y = p1.Y & ~3;
+                if (b4x >= 0 && b4y >= 0 && b4x + 3 < gw && b4y + 3 < gh)
+                {
+                    bool open4 = true;
+                    for (int dx = 0; dx < 4 && open4; dx++)
+                    {
+                        for (int dy = 0; dy < 4; dy++)
+                        {
+                            if ((grid[b4x + dx, b4y + dy] & mask) != 0u)
+                            {
+                                open4 = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (open4)
+                        return new Point(b4x, b4y);
+                }
+            }
+
+            int bx = p1.X & ~1;
+            int by = p1.Y & ~1;
+            if (bx < 0 || by < 0 || bx + 1 >= gw || by + 1 >= gh)
+                return p1;
+
+            if ((grid[bx, by] & mask) == 0u
+                && (grid[bx + 1, by] & mask) == 0u
+                && (grid[bx, by + 1] & mask) == 0u
+                && (grid[bx + 1, by + 1] & mask) == 0u)
+            {
+                return new Point(bx, by);
+            }
+            return p1;
+        }
+
         public static void PrewarmUniquePathsParallel(List<PathPrewarmItem> items)
         {
             if (!LockstepClock.IsDeterministicModeActive || items == null || items.Count < 4)
                 return;
 
             int workers = Testing.TestHarnessConfig.ParallelWorkers;
-            if (workers <= 1) return;
+            if (workers < 1) workers = 1;
 
             EnsureFindPath8Bound();
             var grids = _fastGetGrids?.Invoke();
             if (grids == null) return;
-
-            long t0 = DeterministicSandboxPatches.DiagPerfSamplingActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
 
             int curVer = System.Threading.Volatile.Read(ref _gridMutationVersion);
             if (_cachedGridVersion != curVer || _exactPathCache.Count >= MaxExactPathCacheEntries)
@@ -3189,16 +4919,17 @@ namespace TABCoopMod.Determinism
                 if (!grids.ContainsKey(safeCellSize))
                     continue;
 
+                Point startPt = TryClusterOrigin(safeCellSize, it.Start, it.End, it.Mask, grids);
                 var key = new PathCacheKey
                 {
                     CellSize = safeCellSize,
-                    X1 = it.Start.X,
-                    Y1 = it.Start.Y,
+                    X1 = startPt.X,
+                    Y1 = startPt.Y,
                     X2 = it.End.X,
                     Y2 = it.End.Y,
                     Mask = it.Mask,
                     NearPath = true,
-                    MaxNodes = -1
+                    MaxNodes = it.MaxNodes ?? -1
                 };
                 if (!_exactPathCache.ContainsKey(key) && seenKeys.Add(key))
                     toCompute.Add(key);
@@ -3237,30 +4968,110 @@ namespace TABCoopMod.Determinism
             var results = new List<Point>[toCompute.Count];
             int total = toCompute.Count;
 
+            // Collect (CellSize, Mask, Target) FlowKeys shared by >= 3 unique queries (or already cached)
+            // so reverse Dijkstra FlowFields match RunSyncPathfinding's exact deterministic >= 3 threshold
+            // regardless of worker count (1 vs 4).
+            var flowKeyCounts = new Dictionary<FlowKey, int>(8);
+            var flowKeysList = new List<FlowKey>(8);
+            var flowTargets = new Dictionary<FlowKey, FlowFieldEntry>(8);
+            for (int i = 0; i < total; i++)
+            {
+                var k = toCompute[i];
+                if (k.MaxNodes >= 0) continue; // Default unbounded searches use exact reverse flow fields
+                var fk = new FlowKey { CellSize = k.CellSize, TargetX = k.X2, TargetY = k.Y2, Mask = k.Mask, NearPath = true };
+                flowKeyCounts.TryGetValue(fk, out int cnt);
+                flowKeyCounts[fk] = cnt + 1;
+            }
+            foreach (var kv in flowKeyCounts)
+            {
+                bool alreadyCached = false;
+                lock (_flowCacheLock)
+                {
+                    if (_cachedFlowVersion == curVer && _flowCache.ContainsKey(kv.Key))
+                        alreadyCached = true;
+                }
+                if (kv.Value >= 3 || alreadyCached)
+                    flowKeysList.Add(kv.Key);
+            }
+
+            var flowSw = System.Diagnostics.Stopwatch.StartNew();
+            if (flowKeysList.Count > 0)
+            {
+                var builtFlows = new FlowFieldEntry[flowKeysList.Count];
+                int flowWorkers = Math.Min(activeWorkers, flowKeysList.Count);
+                Parallel.For(0, flowWorkers, w =>
+                {
+                    for (int fi = w; fi < flowKeysList.Count; fi += flowWorkers)
+                    {
+                        var fk = flowKeysList[fi];
+                        if (grids.TryGetValue(fk.CellSize, out var g) && g != null)
+                            builtFlows[fi] = GetOrBuildFlowField(fk.CellSize, fk.Mask, new Point(fk.TargetX, fk.TargetY), fk.NearPath, g, curVer);
+                    }
+                });
+                for (int fi = 0; fi < flowKeysList.Count; fi++)
+                {
+                    if (builtFlows[fi] != null)
+                        flowTargets[flowKeysList[fi]] = builtFlows[fi];
+                }
+            }
+            long flowMs = flowSw.ElapsedMilliseconds;
+
+            var compByKey = new Dictionary<CompCacheKey, CompMapEntry>(4);
+            int flowHits = 0;
+            int fallbackCount = 0;
+
             Parallel.For(0, activeWorkers, w =>
             {
+                int localFlowHits = 0;
+                int localFallback = 0;
                 int s = (total * w) / activeWorkers;
                 int e = (total * (w + 1)) / activeWorkers;
                 for (int i = s; i < e; i++)
                 {
                     var k = toCompute[i];
+                    Point p1 = new Point(k.X1, k.Y1);
+                    Point p2 = new Point(k.X2, k.Y2);
+                    grids.TryGetValue(k.CellSize, out var g);
+
+                    if (k.MaxNodes < 0 && flowTargets.TryGetValue(
+                        new FlowKey { CellSize = k.CellSize, TargetX = k.X2, TargetY = k.Y2, Mask = k.Mask, NearPath = true },
+                        out var flow)
+                        && TryExtractFlowPath(flow, g, k.Mask, p1, p2, true, out var flowSolved))
+                    {
+                        results[i] = flowSolved;
+                        localFlowHits++;
+                        continue;
+                    }
+
                     if (!pfByCellSize.TryGetValue(k.CellSize, out var pfArr)) continue;
                     var pf = pfArr[w];
-                    results[i] = SolveSimplifiedPathPure(pf, new Point(k.X1, k.Y1), new Point(k.X2, k.Y2), k.Mask, true, null);
+                    int? maxNodesOpt = k.MaxNodes >= 0 ? k.MaxNodes : (int?)null;
+                    CompMapEntry comp = null;
+                    if (g != null)
+                        comp = GetOrBuildComponentMap(k.CellSize, k.Mask, g, curVer);
+
+                    if (TryResolveTargetWithComp(comp, g, k.Mask, p1, p2, true, out Point resEnd, out bool resNear))
+                        results[i] = null;
+                    else
+                        results[i] = SolveSimplifiedPathPure(pf, p1, resEnd, k.Mask, resNear, maxNodesOpt);
+                    localFallback++;
                 }
+                System.Threading.Interlocked.Add(ref flowHits, localFlowHits);
+                System.Threading.Interlocked.Add(ref fallbackCount, localFallback);
             });
 
-            if (_exactPathCache.Count + total < MaxExactPathCacheEntries)
-            {
-                for (int i = 0; i < total; i++)
-                {
-                    var p = results[i];
-                    _exactPathCache[toCompute[i]] = p != null ? new List<Point>(p) : null;
-                }
-            }
+            if (total >= 64)
+                ModLogger.Info($"[Pathfinding] PrewarmUniquePathsParallel solved uniqueKeys={total} (rawItems={items.Count}, flowHits={flowHits}, fallback={fallbackCount}, flowFields={flowTargets.Count}, flowMs={flowMs}, workers={activeWorkers}).");
 
-            if (t0 != 0L)
-                System.Threading.Interlocked.Add(ref DeterministicSandboxPatches.DiagTickPathfindTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
+            if (_exactPathCache.Count + total >= MaxExactPathCacheEntries)
+                _exactPathCache.Clear();
+
+            int limit = Math.Min(total, MaxExactPathCacheEntries - _exactPathCache.Count);
+            for (int i = 0; i < limit; i++)
+            {
+                var p = results[i];
+                _exactPathCache[toCompute[i]] = p != null ? new List<Point>(p) : null;
+            }
         }
 
         internal static void InvalidatePathCache()
@@ -3358,10 +5169,14 @@ namespace TABCoopMod.Determinism
                 _cachedGridVersion = curVer;
             }
 
+            EnsureFindPath8Bound();
+            var grids = _fastGetGrids?.Invoke();
+            Point clusteredP1 = TryClusterOrigin(safeCellSize, p1, p2, mask, grids);
+
             var key = new PathCacheKey
             {
                 CellSize = safeCellSize,
-                X1 = p1.X, Y1 = p1.Y,
+                X1 = clusteredP1.X, Y1 = clusteredP1.Y,
                 X2 = p2.X, Y2 = p2.Y,
                 Mask = mask,
                 NearPath = nearPath,
@@ -3376,23 +5191,95 @@ namespace TABCoopMod.Determinism
             }
             else
             {
-                EnsureFindPath8Bound();
-                List<Point> solved;
-                var pfDict = _fastGetPathFinders?.Invoke();
-                if (_fastFindPath8 != null &&
-                    pfDict != null &&
-                    pfDict.TryGetValue(safeCellSize, out var pfArr) &&
-                    pfArr != null &&
-                    pfArr.Length > 0 &&
-                    pfArr[0] != null)
+                List<Point> solved = null;
+                bool solvedByFlow = false;
+                Point queryEnd = p2;
+                bool queryNear = nearPath;
+                bool fastUnreachable = false;
+
+                uint[,] grid = null;
+                bool hasGrid = grids != null && grids.TryGetValue(safeCellSize, out grid) && grid != null;
+                if (hasGrid && (uint)p2.X < (uint)grid.GetLength(0) && (uint)p2.Y < (uint)grid.GetLength(1))
                 {
-                    // Use the 8-arg internal DXWorldGrid.FindPath overload so maxNodes (pf.SearchLimit)
-                    // is honored instead of silently dropped by the 6-arg overload.
-                    solved = _fastFindPath8(safeCellSize, pfArr[0], p1, p2, mask, nearPath, maxNodes, false);
+                    bool p2Blocked = (grid[p2.X, p2.Y] & mask) != 0u;
+
+                    if (!maxNodes.HasValue)
+                    {
+                        var fk = new FlowKey { CellSize = safeCellSize, TargetX = p2.X, TargetY = p2.Y, Mask = mask, NearPath = nearPath };
+                        FlowFieldEntry flow = null;
+                        lock (_flowCacheLock)
+                        {
+                            if (_cachedFlowVersion != curVer)
+                            {
+                                _flowCache.Clear();
+                                _targetQueryCounts.Clear();
+                                _cachedFlowVersion = curVer;
+                            }
+                            if (!_flowCache.TryGetValue(fk, out flow) || flow == null || !ReferenceEquals(flow.GridRef, grid))
+                            {
+                                flow = null;
+                                if (p2Blocked || clusteredP1.DistanceMaxAxis(p2) >= 24)
+                                {
+                                    _targetQueryCounts.TryGetValue(fk, out int qc);
+                                    _targetQueryCounts[fk] = qc + 1;
+                                }
+                            }
+                        }
+
+                        if (flow == null && (p2Blocked || clusteredP1.DistanceMaxAxis(p2) >= 24))
+                        {
+                            int qc;
+                            lock (_flowCacheLock) { _targetQueryCounts.TryGetValue(fk, out qc); }
+                            if (qc >= 3)
+                                flow = GetOrBuildFlowField(safeCellSize, mask, p2, nearPath, grid, curVer);
+                        }
+
+                        if (flow != null && TryExtractFlowPath(flow, grid, mask, clusteredP1, p2, nearPath, out var flowPath))
+                        {
+                            solved = flowPath;
+                            solvedByFlow = true;
+                        }
+                    }
+
+                    if (!solvedByFlow)
+                    {
+                        if (!nearPath && p2Blocked && clusteredP1 != p2)
+                        {
+                            fastUnreachable = true;
+                        }
+                        else if (p2Blocked || clusteredP1.DistanceMaxAxis(p2) >= 24)
+                        {
+                            var comp = GetOrBuildComponentMap(safeCellSize, mask, grid, curVer);
+                            fastUnreachable = TryResolveTargetWithComp(comp, grid, mask, clusteredP1, p2, nearPath, out queryEnd, out queryNear);
+                        }
+                    }
                 }
-                else
+
+                if (!solvedByFlow)
                 {
-                    solved = DXWorldGrid.FindPath(safeCellSize, p1, p2, mask, nearPath, maxNodes);
+                    if (fastUnreachable)
+                    {
+                        solved = null;
+                    }
+                    else
+                    {
+                        var pfDict = _fastGetPathFinders?.Invoke();
+                        if (_fastFindPath8 != null &&
+                            pfDict != null &&
+                            pfDict.TryGetValue(safeCellSize, out var pfArr) &&
+                            pfArr != null &&
+                            pfArr.Length > 0 &&
+                            pfArr[0] != null)
+                        {
+                            // Use the 8-arg internal DXWorldGrid.FindPath overload so maxNodes (pf.SearchLimit)
+                            // is honored instead of silently dropped by the 6-arg overload.
+                            solved = _fastFindPath8(safeCellSize, pfArr[0], clusteredP1, queryEnd, mask, queryNear, maxNodes, false);
+                        }
+                        else
+                        {
+                            solved = DXWorldGrid.FindPath(safeCellSize, clusteredP1, queryEnd, mask, queryNear, maxNodes);
+                        }
+                    }
                 }
                 _exactPathCache[key] = solved != null ? new List<Point>(solved) : null;
                 req.Path = solved;
@@ -3518,7 +5405,18 @@ namespace TABCoopMod.Determinism
         [HarmonyPostfix]
         public static void Postfix()
         {
+            DeterministicSandboxPatches.ResetPerfWindowCounters(
+                Testing.TestHarnessConfig.Enabled || Testing.TestHarnessConfig.ForcePerfDiag);
+            Testing.CommandCenterInvulnerability.OnNewLevelLoaded();
+            if (!Sync.CoopSessionManager.IsSessionActive
+                && Testing.TestHarnessConfig.SoloDeterministicMode
+                && !LockstepClock.IsDeterministicModeActive)
+            {
+                Sync.FactionOwnershipTracker.TryLoadFromLevelScriptVariables();
+                LockstepClock.CalibrateEntityIdCounterFromLoadedLevel(20261109);
+            }
             LockstepClock.OnLevelLoadComplete();
+            LockstepClock.InvalidateAllStage4Caches();
             Testing.DeterministicReplayVerifier.OnLevelLoadComplete();
             Sync.CoopSessionManager.OnLevelLoadComplete();
         }
@@ -3551,6 +5449,22 @@ namespace TABCoopMod.Determinism
                 var game = DXGame.Current;
                 if (game != null)
                     LockstepClock.ReanchorSimulationRngForTick(game.IAIterationInt);
+            }
+        }
+
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            if (LockstepClock.IsDeterministicModeActive && !LockstepClock.LoadingLevel)
+            {
+                var game = DXGame.Current;
+                if (game != null)
+                {
+                    ZombieWatcherCoarseGrid.RebuildForTick(game);
+                    Physics1uGrid.EnsureSynced(game);
+                    ActiveUpdateEntityManager.PrepareForTick(game);
+                    PrecomputedPerceptionManager.PrecomputeForTick(game);
+                }
             }
         }
     }
@@ -3718,7 +5632,8 @@ namespace TABCoopMod.Determinism
     [HarmonyPatch]
     public static class CMovableSpriteProgressSyncPatch
     {
-        private static bool _metaInit;
+        private static volatile bool _metaInit;
+        private static readonly object _metaLock = new object();
         private static MethodInfo _mGetSprite;
         private static FieldInfo _fCurAnim;
         private static PropertyInfo _pTimeAnimStart;
@@ -3726,31 +5641,40 @@ namespace TABCoopMod.Determinism
         private static MethodInfo _mAnimProgress;
         private static Action<object, int> _fastSync;
 
+        internal static void ResetCache()
+        {
+            EnsureMeta();
+        }
+
         private static void EnsureMeta()
         {
             if (_metaInit) return;
-            _metaInit = true;
-            var asm = GameBridge.GameAssembly;
-            if (asm == null) return;
-
-            Type tEntity = GameBridge.TypeZXEntity;
-            Type tSprite = asm.GetType("ZX.Components.CSprite");
-            Type tSpriteAnim = asm.GetType("ZX.Components.SpriteAnimation");
-            Type tMovable = asm.GetType("ZX.Components.CMovable");
-
-            if (tEntity != null)
-                _mGetSprite = AccessTools.Method(tEntity, "#=zbkLIvkCtqwewx0xa2A==", Type.EmptyTypes);
-            if (tSprite != null)
+            lock (_metaLock)
             {
-                const BindingFlags F = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
-                _fCurAnim = tSprite.GetField("#=za7pUzvqbWjrs", F);
-                _pTimeAnimStart = tSprite.GetProperty("TimeAnimationStart", F);
-                _fAnimProgress = tSprite.GetField("#=zbBN4HvXVWuDv", F);
-            }
-            if (tSpriteAnim != null)
-                _mAnimProgress = AccessTools.Method(tSpriteAnim, "#=z_y5dBgkM5Q4t", new[] { typeof(int) });
+                if (_metaInit) return;
+                var asm = GameBridge.GameAssembly;
+                if (asm == null) return;
 
-            _fastSync = TryCompileFastSync(tMovable, tEntity, tSprite, tSpriteAnim);
+                Type tEntity = GameBridge.TypeZXEntity;
+                Type tSprite = asm.GetType("ZX.Components.CSprite");
+                Type tSpriteAnim = asm.GetType("ZX.Components.SpriteAnimation");
+                Type tMovable = asm.GetType("ZX.Components.CMovable");
+
+                if (tEntity != null)
+                    _mGetSprite = AccessTools.Method(tEntity, "#=zbkLIvkCtqwewx0xa2A==", Type.EmptyTypes);
+                if (tSprite != null)
+                {
+                    const BindingFlags F = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                    _fCurAnim = tSprite.GetField("#=za7pUzvqbWjrs", F);
+                    _pTimeAnimStart = tSprite.GetProperty("TimeAnimationStart", F);
+                    _fAnimProgress = tSprite.GetField("#=zbBN4HvXVWuDv", F);
+                }
+                if (tSpriteAnim != null)
+                    _mAnimProgress = AccessTools.Method(tSpriteAnim, "#=z_y5dBgkM5Q4t", new[] { typeof(int) });
+
+                _fastSync = TryCompileFastSync(tMovable, tEntity, tSprite, tSpriteAnim);
+                _metaInit = true;
+            }
         }
 
         private static Action<object, int> TryCompileFastSync(Type tMovable, Type tEntity, Type tSprite, Type tSpriteAnim)
@@ -3878,10 +5802,14 @@ namespace TABCoopMod.Determinism
             var game = DXGame.Current;
             if (game == null) return;
 
-            EnsureMeta();
             int simTimeInt = DXGame.LastGameTimeIAUpdate > 0.0
                 ? (int)DXGame.LastGameTimeIAUpdate
                 : game.GameTimeInt;
+
+            // Always recompute sprite progress without any cross-thread/process-dependent cache:
+            // Loop 1 (StartUpdatePhysics) invokes this concurrently across workers, and CSprite.#=zHT0zbX8=
+            // may switch Walk->Run animation duration within the same simTimeInt tick between IA and Physics.
+            EnsureMeta();
             if (_fastSync != null)
             {
                 _fastSync(__instance, simTimeInt);
@@ -3928,11 +5856,25 @@ namespace TABCoopMod.Determinism
         public static bool Prefix(DXRandom __instance, ref uint __result)
         {
             if (!LockstepClock.IsDeterministicModeActive) return true;
-            if (DeterministicSandboxPatches.DiagPerfSamplingActive)
+            bool samplePerf = DeterministicSandboxPatches.DiagPerfSamplingActive;
+            if (samplePerf)
                 System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagRngGenCalls);
-            if (LockstepClock.TryNextEntityBehaviourRandomUInt(out uint entityRand))
+
+            if (LockstepClock.InAudioContext || LockstepClock.InVisualVfxContext)
             {
-                __result = entityRand;
+                var renderRng = LockstepClock.GetRenderGlobalRandom();
+                if (object.ReferenceEquals(__instance, renderRng))
+                    return true;
+                __result = renderRng.NextUInt();
+                return false;
+            }
+
+            if (!object.ReferenceEquals(__instance, LockstepClock.RenderGlobalRandomRaw)
+                && LockstepClock.TryNextScopedRandomUInt(out uint scopedRand))
+            {
+                if (samplePerf)
+                    System.Threading.Interlocked.Increment(ref DeterministicSandboxPatches.DiagRngScopedCalls);
+                __result = scopedRand;
                 return false;
             }
             if (!object.ReferenceEquals(__instance, _sceneGlobalSentinel)) return true;
@@ -4328,8 +6270,9 @@ namespace TABCoopMod.Determinism
         private static bool _fastCompiled;
         private static readonly HashSet<DXEntity> _activePullEntities = new HashSet<DXEntity>();
         private static DXLevel _lastColdScanLevel;
-        private static readonly System.Collections.Generic.Dictionary<Type, bool> _canPullCache =
-            new System.Collections.Generic.Dictionary<Type, bool>();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<RuntimeTypeHandle, bool> _canPullByTypeHandle =
+            new System.Collections.Concurrent.ConcurrentDictionary<RuntimeTypeHandle, bool>();
+        private static readonly object _canPullMetaLock = new object();
 
         private static MethodBase TargetMethod()
         {
@@ -4378,6 +6321,58 @@ namespace TABCoopMod.Determinism
             }
         }
 
+        internal static bool TryBeginMergedPullCollection(out bool coldScan, out HashSet<DXEntity> activeSet)
+        {
+            coldScan = false;
+            activeSet = null;
+            if (_pullMethod == null || _cspriteType == null)
+                return false;
+
+            EnsureFastDelegates();
+            var curLevel = DXLevel.Current;
+            coldScan = !object.ReferenceEquals(_lastColdScanLevel, curLevel);
+            if (coldScan)
+                _activePullEntities.Clear();
+            else if (_activePullEntities.Count > 0)
+                _activePullEntities.RemoveWhere(ent => ent == null || ent.Disposed);
+
+            activeSet = _activePullEntities;
+            return true;
+        }
+
+        internal static bool TryPreparePullCandidate(DXEntity e, out object csprite)
+        {
+            csprite = null;
+            if (e == null) return false;
+            RuntimeTypeHandle handle = e.GetType().TypeHandle;
+            if (_canPullByTypeHandle.TryGetValue(handle, out bool knownCanPull))
+            {
+                if (!knownCanPull) return false;
+                csprite = e.GetComponent(_cspriteTypeId);
+                return csprite != null;
+            }
+
+            csprite = e.GetComponent(_cspriteTypeId);
+            if (csprite == null)
+            {
+                _canPullByTypeHandle.TryAdd(handle, false);
+                return false;
+            }
+
+            lock (_canPullMetaLock)
+            {
+                if (_canPullByTypeHandle.TryGetValue(handle, out knownCanPull))
+                    return knownCanPull;
+                var p = _paramsProp?.GetValue(csprite);
+                if (p == null) return false;
+                if (_canBePulledProp == null)
+                    _canBePulledProp = AccessTools.Property(p.GetType(), "CanBePulled");
+                knownCanPull = (bool)(_canBePulledProp?.GetValue(p) ?? false);
+                _canPullByTypeHandle.TryAdd(handle, knownCanPull);
+                return knownCanPull;
+            }
+        }
+
         [HarmonyPrefix]
         public static bool Prefix()
         {
@@ -4386,8 +6381,7 @@ namespace TABCoopMod.Determinism
 
         public static void RunDeterministicPullUpdates(DXGame game)
         {
-            var bodies = DXPhysicWorld.Bodies;
-            if (bodies == null || _pullMethod == null || _cspriteType == null)
+            if (_pullMethod == null || _cspriteType == null)
                 return;
 
             EnsureFastDelegates();
@@ -4396,20 +6390,54 @@ namespace TABCoopMod.Determinism
             int calls = 0;
 
             var curLevel = DXLevel.Current;
-            bool coldScan = !object.ReferenceEquals(_lastColdScanLevel, curLevel);
-            if (coldScan)
-            {
-                _lastColdScanLevel = curLevel;
-                _activePullEntities.Clear();
-            }
-            else if (_activePullEntities.Count > 0)
-            {
-                _activePullEntities.RemoveWhere(ent => ent == null || ent.Disposed);
-            }
-
             LockstepClock.AllowCSpritePullUpdate = true;
             try
             {
+                if (LockstepClock.TryConsumeMergedPullCandidates(out var mergedQueues, out int workerCount))
+                {
+                    _lastColdScanLevel = curLevel;
+                    for (int w = 0; w < workerCount; w++)
+                    {
+                        var q = mergedQueues[w];
+                        for (int i = 0; i < q.Count; i++)
+                        {
+                            var cand = q[i];
+                            if (cand.Ent == null || cand.Ent.Disposed || cand.CSprite == null) continue;
+
+                            if (_fastPull != null)
+                                _fastPull(cand.CSprite);
+                            else
+                                _pullMethod.Invoke(cand.CSprite, null);
+
+                            bool nowPulled = _fastIsPulled != null
+                                ? _fastIsPulled(cand.CSprite)
+                                : (_isPulledGetter != null && (bool)_isPulledGetter.Invoke(cand.CSprite, null));
+                            if (nowPulled)
+                                _activePullEntities.Add(cand.Ent);
+                            else
+                                _activePullEntities.Remove(cand.Ent);
+
+                            calls++;
+                        }
+                        q.Clear();
+                    }
+                    return;
+                }
+
+                var bodies = DXPhysicWorld.Bodies;
+                if (bodies == null) return;
+
+                bool coldScan = !object.ReferenceEquals(_lastColdScanLevel, curLevel);
+                if (coldScan)
+                {
+                    _lastColdScanLevel = curLevel;
+                    _activePullEntities.Clear();
+                }
+                else if (_activePullEntities.Count > 0)
+                {
+                    _activePullEntities.RemoveWhere(ent => ent == null || ent.Disposed);
+                }
+
                 int bodyCount = bodies.Count;
                 for (int i = 0; i < bodyCount; i++)
                 {
@@ -4425,28 +6453,8 @@ namespace TABCoopMod.Determinism
                             continue;
                     }
 
-                    Type entType = e.GetType();
-                    bool knownCanPull;
-                    if (_canPullCache.TryGetValue(entType, out knownCanPull) && !knownCanPull)
+                    if (!TryPreparePullCandidate(e, out object csprite))
                         continue;
-
-                    var csprite = e.GetComponent(_cspriteTypeId);
-                    if (csprite == null)
-                    {
-                        _canPullCache[entType] = false;
-                        continue;
-                    }
-
-                    if (!_canPullCache.ContainsKey(entType))
-                    {
-                        var p = _paramsProp?.GetValue(csprite);
-                        if (p == null) continue;
-                        if (_canBePulledProp == null)
-                            _canBePulledProp = AccessTools.Property(p.GetType(), "CanBePulled");
-                        knownCanPull = (bool)(_canBePulledProp?.GetValue(p) ?? false);
-                        _canPullCache[entType] = knownCanPull;
-                        if (!knownCanPull) continue;
-                    }
 
                     if (_fastPull != null)
                         _fastPull(csprite);
@@ -4543,7 +6551,78 @@ namespace TABCoopMod.Determinism
                     : -1;
                 DXPhysicWorld.Init(10);
                 DXPool.Clear();
+                LockstepClock.SyncedDynamicBodyCount = 0;
+                AdaptivePhysicsStepPatch.Reset();
                 ModLogger.Info($"[LockstepClock] DXPhysicWorld.Clear -> reset cpSpace and DXPool (prevPhysIdCnt={prevIdCnt}, newSpace=0x{DXPhysicWorld.Handle.ToInt64():X}).");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Stage 4D-1: Opt-in deterministic Chipmunk2D solver iteration reduction (TABCOOP_ADAPTIVE_PHYS_ITER=1)
+    /// driven strictly by SyncedDynamicBodyCount from the prior completed physics step.
+    /// </summary>
+    [HarmonyPatch(typeof(DXPhysicWorld), nameof(DXPhysicWorld.Step))]
+    public static class AdaptivePhysicsStepPatch
+    {
+        private const int HighBodyThresholdEnter = 22000;
+        private const int HighBodyThresholdExit = 20500;
+        private const int MedBodyThresholdEnter = 16500;
+        private const int MedBodyThresholdExit = 15500;
+
+        private static IntPtr _lastSpaceHandle = IntPtr.Zero;
+        internal static int CurrentIterations { get; private set; } = 10;
+
+        internal static void Reset()
+        {
+            _lastSpaceHandle = IntPtr.Zero;
+            CurrentIterations = 10;
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix()
+        {
+            IntPtr h = DXPhysicWorld.Handle;
+            if (h == IntPtr.Zero) return;
+
+            if (_lastSpaceHandle != h)
+            {
+                _lastSpaceHandle = h;
+                CurrentIterations = 10;
+            }
+
+            bool allowAdaptive = Sync.CoopSessionManager.IsInSyncedLevel
+                ? Sync.CoopSessionManager.SyncedAdaptivePhysicsIterations
+                : Testing.TestHarnessConfig.AdaptivePhysicsIterations;
+            if (!LockstepClock.IsDeterministicModeActive || LockstepClock.LoadingLevel || !allowAdaptive)
+            {
+                if (CurrentIterations != 10 && LockstepClock.NativePhysicsDirectAccessor.TrySetSpaceIterations(h, 10))
+                    CurrentIterations = 10;
+                return;
+            }
+
+            int dyn = LockstepClock.SyncedDynamicBodyCount;
+            int target = CurrentIterations;
+            if (CurrentIterations == 10)
+            {
+                if (dyn >= HighBodyThresholdEnter) target = 5;
+                else if (dyn >= MedBodyThresholdEnter) target = 7;
+            }
+            else if (CurrentIterations == 7)
+            {
+                if (dyn >= HighBodyThresholdEnter) target = 5;
+                else if (dyn < MedBodyThresholdExit) target = 10;
+            }
+            else
+            {
+                if (dyn < MedBodyThresholdExit) target = 10;
+                else if (dyn < HighBodyThresholdExit) target = 7;
+            }
+
+            if (target != CurrentIterations && LockstepClock.NativePhysicsDirectAccessor.TrySetSpaceIterations(h, target))
+            {
+                ModLogger.Info($"[AdaptivePhys] cpSpace iterations {CurrentIterations} -> {target} (dynBodies={dyn}, tick={LockstepClock.CurrentSimTick}).");
+                CurrentIterations = target;
             }
         }
     }
@@ -4709,16 +6788,231 @@ namespace TABCoopMod.Determinism
         }
 
         [HarmonyPrefix]
-        public static void Prefix(object __instance)
+        public static void Prefix(object __instance, out bool __state)
         {
-            if (!LockstepClock.IsDeterministicModeActive) return;
-            LockstepClock.EnterEntityBehaviourRngScope(ResolveEntityId(__instance));
+            if (!LockstepClock.IsDeterministicModeActive)
+            {
+                __state = false;
+                return;
+            }
+            ulong id = ResolveEntityId(__instance);
+            if (id == 0UL || (id & 0x8000000000000000UL) != 0UL)
+            {
+                __state = false;
+                return;
+            }
+            LockstepClock.PushRngScope(id, LockstepClock.RngDomainTag.BehaviourRun);
+            __state = true;
         }
 
         [HarmonyFinalizer]
-        public static void Finalizer()
+        public static void Finalizer(bool __state)
         {
-            LockstepClock.ExitEntityBehaviourRngScope();
+            if (__state)
+                LockstepClock.PopRngScope();
+        }
+    }
+
+    /// <summary>
+    /// Scopes remaining deterministic entity and component RNG draws (unit generators,
+    /// infection nests, rotating engines, birds, buildings, projectiles, dwellings, trains)
+    /// to stateless SplitMix64 streams keyed by owner Entity.ID.
+    /// </summary>
+    [HarmonyPatch]
+    public static class ScopedEntityAndComponentRngPatch
+    {
+        public static IEnumerable<MethodBase> TargetMethods()
+        {
+            var asm = Core.GameBridge.GameAssembly;
+            if (asm == null) yield break;
+
+            var seen = new HashSet<MethodBase>();
+            void TryAdd(string typeName, string methodName, Type[] paramTypes, List<MethodBase> targetList)
+            {
+                var t = asm.GetType(typeName);
+                if (t == null) return;
+                var m = AccessTools.Method(t, methodName, paramTypes);
+                if (m != null && seen.Add(m))
+                    targetList.Add(m);
+            }
+
+            var list = new List<MethodBase>(16);
+            TryAdd("ZX.Components.CUnitGenerator", "#=zzHXxhbjNa0Zf", Type.EmptyTypes, list);
+            TryAdd("ZX.Components.CInfectionNest", "#=z5GPRaBw=", Type.EmptyTypes, list);
+            TryAdd("ZX.Components.CInfectionNest", "#=zhLBqOyoki5Mmzj47tAxLxu8=", new[] { typeof(float) }, list);
+            TryAdd("ZX.Components.CRotatingEngine", "#=z5GPRaBw=", Type.EmptyTypes, list);
+            TryAdd("ZX.Components.CBird", "#=zxisWwAA=", Type.EmptyTypes, list);
+            TryAdd("ZX.Components.CBird", "#=z4ZFInv$6iTpo", Type.EmptyTypes, list);
+            TryAdd("ZX.Entities.TheInn", "OnUpdate", Type.EmptyTypes, list);
+            TryAdd("ZX.Entities.Proyectile", "#=zxgVr00U=", Type.EmptyTypes, list);
+            TryAdd("ZX.Entities.InfectedHole", "#=zU_6ExxgtTzKNDVbh$g==", Type.EmptyTypes, list);
+            TryAdd("ZX.Entities.Locomotive", "#=zLy9fAtQPdqXfWKLk$RnIUUk=", Type.EmptyTypes, list);
+            TryAdd("ZX.Entities.Dwelling", "#=zc79$InrAZEEj6AnLM9kicU8=", Type.EmptyTypes, list);
+            TryAdd("ZX.Entities.DoomBuildingLarge", "get_EntitiesToCreateOnDestroy", Type.EmptyTypes, list);
+            TryAdd("ZX.Entities.DoomBuildingMedium", "get_EntitiesToCreateOnDestroy", Type.EmptyTypes, list);
+            TryAdd("ZX.Entities.DoomBuildingSmall", "get_EntitiesToCreateOnDestroy", Type.EmptyTypes, list);
+
+            foreach (var m in list)
+                yield return m;
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix(object __instance, out bool __state)
+        {
+            __state = false;
+            if (!LockstepClock.IsDeterministicModeActive || __instance == null)
+                return;
+
+            ulong id = 0UL;
+            if (__instance is DXEntity ent)
+                id = ent.ID;
+            else if (__instance is DXComponent comp)
+                id = comp.Entity != null ? comp.Entity.ID : 0UL;
+
+            if (id == 0UL || (id & 0x8000000000000000UL) != 0UL)
+                return;
+
+            LockstepClock.PushRngScope(id, LockstepClock.RngDomainTag.EntityUpdate);
+            __state = true;
+        }
+
+        [HarmonyFinalizer]
+        public static void Finalizer(bool __state)
+        {
+            if (__state)
+                LockstepClock.PopRngScope();
+        }
+    }
+
+    /// <summary>
+    /// Scopes command effect execution (ZXCommand.#=zPZOGjUTtkdy$ -> #=zEJihvZ1Lcs9a) RNG
+    /// draws to the executor entity's deterministic SplitMix64 stream. Targets the public
+    /// non-virtual wrapper #=zPZOGjUTtkdy$ because protected virtual #=zEJihvZ1Lcs9a contains
+    /// Eazfuscator exception blocks that MonoMod DMD cannot re-emit.
+    /// </summary>
+    [HarmonyPatch]
+    public static class ScopedCommandEffectRngPatch
+    {
+        public static MethodBase TargetMethod()
+        {
+            var tCmd = Core.GameBridge.GameAssembly?.GetType("ZX.Commands.ZXCommand");
+            return tCmd != null
+                ? AccessTools.Method(tCmd, "#=zPZOGjUTtkdy$")
+                : null;
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix(object __0, out bool __state)
+        {
+            __state = false;
+            var executor = __0 as DXEntity;
+            if (!LockstepClock.IsDeterministicModeActive || executor == null)
+                return;
+
+            ulong id = executor.ID;
+            if (id == 0UL || (id & 0x8000000000000000UL) != 0UL)
+                return;
+
+            LockstepClock.PushRngScope(id, LockstepClock.RngDomainTag.CommandReplay);
+            __state = true;
+        }
+
+        [HarmonyFinalizer]
+        public static void Finalizer(bool __state)
+        {
+            if (__state)
+                LockstepClock.PopRngScope();
+        }
+    }
+
+    /// <summary>
+    /// Scopes ZXLevelEvent updates and wave triggers to a deterministic SplitMix64 stream
+    /// keyed by ZXLevelEvent.ID so map events never perturb the shared global PRNG.
+    /// </summary>
+    [HarmonyPatch]
+    public static class ScopedLevelEventRngPatch
+    {
+        private static bool _metaInit;
+        private static Func<object, int> _fastGetEventId;
+        private static PropertyInfo _propEventId;
+
+        private static void EnsureMeta(Type tEvent)
+        {
+            if (_metaInit) return;
+            _metaInit = true;
+            try
+            {
+                _propEventId = AccessTools.Property(tEvent, "ID");
+                var getter = _propEventId?.GetGetMethod(true);
+                if (getter != null)
+                {
+                    var dm = new DynamicMethod("TABCoop_GetLevelEventId", typeof(int), new[] { typeof(object) },
+                        typeof(ScopedLevelEventRngPatch).Module, skipVisibility: true);
+                    var il = dm.GetILGenerator();
+                    var lblZero = il.DefineLabel();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Brfalse_S, lblZero);
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Castclass, tEvent);
+                    il.Emit(OpCodes.Callvirt, getter);
+                    il.Emit(OpCodes.Ret);
+                    il.MarkLabel(lblZero);
+                    il.Emit(OpCodes.Ldc_I4_0);
+                    il.Emit(OpCodes.Ret);
+                    _fastGetEventId = (Func<object, int>)dm.CreateDelegate(typeof(Func<object, int>));
+                }
+            }
+            catch (Exception ex)
+            {
+                _fastGetEventId = null;
+                ModLogger.Warn($"[LockstepClock] ScopedLevelEventRngPatch meta init failed (using reflection): {ex.Message}");
+            }
+        }
+
+        public static IEnumerable<MethodBase> TargetMethods()
+        {
+            var t = Core.GameBridge.GameAssembly?.GetType("ZX.GameSystems.ZXLevelEvent");
+            if (t == null) yield break;
+            EnsureMeta(t);
+
+            string[] names =
+            {
+                "#=zUMCW0sQ=",
+                "#=zHI6D76EGh68R",
+                "#=zEzgd90E=",
+                "#=zrITPs$A=",
+                "#=z6sbTOMQ="
+            };
+            foreach (var name in names)
+            {
+                var m = AccessTools.Method(t, name);
+                if (m != null) yield return m;
+            }
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix(object __instance, out bool __state)
+        {
+            __state = false;
+            if (!LockstepClock.IsDeterministicModeActive || __instance == null)
+                return;
+
+            int evtId = 0;
+            if (_fastGetEventId != null)
+                evtId = _fastGetEventId(__instance);
+            else if (_propEventId != null)
+                evtId = (int)_propEventId.GetValue(__instance);
+
+            ulong scopeId = 0x4C45565400000000UL | unchecked((uint)evtId);
+            LockstepClock.PushRngScope(scopeId, LockstepClock.RngDomainTag.SystemUpdate);
+            __state = true;
+        }
+
+        [HarmonyFinalizer]
+        public static void Finalizer(bool __state)
+        {
+            if (__state)
+                LockstepClock.PopRngScope();
         }
     }
 
@@ -4764,6 +7058,2308 @@ namespace TABCoopMod.Determinism
                 return false;
             }
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Stage 4A (S1): Exact mathematical short-circuit for far-field zombie CEntityWatcher scans.
+    /// Maintains an 8x8-cell dilated coarse presence bitmap (4 KB, L1-resident) of all live entities
+    /// carrying HasPeople (0x8000u) or DeffensiveStructure (0x2000u) masks. When a non-attacked
+    /// zombie with no existing cached target is strictly outside the dilated coarse footprint,
+    /// its CEntityWatcher scan is mathematically guaranteed to yield null with zero RNG/state writes.
+    /// </summary>
+    internal static class ZombieWatcherCoarseGrid
+    {
+        private const int CoarseShift = 3; // 8x8 cells per coarse tile
+        internal const uint WatchInterestMask = 0x8000u | 0x2000u; // HasPeople | DeffensiveStructure
+
+        private static int[] _presenceStamp = new int[64 * 64];
+        private static int[] _dilatedR2Stamp = new int[64 * 64];
+        private static int _coarseDim = 64;
+        private static int _nCells;
+        private static int _currentStamp = 1;
+        private static int _builtSimTick = -1;
+        private static DXLevel _builtLevel;
+
+        private static bool _typesInit;
+        private static Type _tStructure;
+        private static Type _tHuman;
+        private static Func<DXEntity, Point> _getRawCell;
+        private static readonly HashSet<DXEntity> _extraInterestEntities = new HashSet<DXEntity>();
+
+        private static void EnsureTypesAndAccessors()
+        {
+            if (_typesInit) return;
+            _typesInit = true;
+            var asm = GameBridge.GameAssembly;
+            _tStructure = GameBridge.TypeStructure ?? asm?.GetType("ZX.Entities.Structure");
+            _tHuman = asm?.GetType("ZX.Entities.Human");
+            try
+            {
+                var fCell = typeof(DXEntity).GetField("_Cell", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                if (fCell != null && fCell.FieldType == typeof(Point))
+                {
+                    var dm = new DynamicMethod("TABCoop_CoarseGridGetRawCell", typeof(Point), new[] { typeof(DXEntity) },
+                        typeof(ZombieWatcherCoarseGrid).Module, skipVisibility: true);
+                    var il = dm.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Ldfld, fCell);
+                    il.Emit(OpCodes.Ret);
+                    _getRawCell = (Func<DXEntity, Point>)dm.CreateDelegate(typeof(Func<DXEntity, Point>));
+                }
+            }
+            catch { _getRawCell = null; }
+        }
+
+        internal static void Invalidate()
+        {
+            _builtSimTick = -1;
+            _builtLevel = null;
+            _extraInterestEntities.Clear();
+        }
+
+        internal static bool IsStructureOrHuman(DXEntity e)
+        {
+            EnsureTypesAndAccessors();
+            if (e == null) return false;
+            return (_tStructure != null && _tStructure.IsInstanceOfType(e))
+                || (_tHuman != null && _tHuman.IsInstanceOfType(e));
+        }
+
+        internal static void OnEntityBodyMaskRefreshed(DXEntity e)
+        {
+            if (!LockstepClock.IsDeterministicModeActive || e == null || e.Disposed) return;
+            EnsureTypesAndAccessors();
+            uint mask = e._BodyCategoryMask;
+            if ((mask & WatchInterestMask) != 0u)
+            {
+                if (!IsStructureOrHuman(e))
+                    _extraInterestEntities.Add(e);
+
+                var game = DXGame.Current;
+                var curLevel = DXLevel.Current;
+                if (game != null && curLevel != null && ReferenceEquals(_builtLevel, curLevel) && _builtSimTick == game.IAIterationInt)
+                    StampEntity(e, _currentStamp);
+            }
+            else if (_extraInterestEntities.Count > 0)
+            {
+                _extraInterestEntities.Remove(e);
+            }
+        }
+
+        internal static void OnEntityPositionChanging(DXEntity e, PointF newPos)
+        {
+            if (e == null || e.Disposed || (e._BodyCategoryMask & WatchInterestMask) == 0u || !IsReadyForCurrentTick())
+                return;
+            if (!IsStructureOrHuman(e))
+                _extraInterestEntities.Add(e);
+
+            if (e.IsOneCellSize)
+            {
+                Point cell = DXWorldGrid.CellFromPoint(newPos);
+                StampCoarseRange(cell.X >> CoarseShift, cell.Y >> CoarseShift, cell.X >> CoarseShift, cell.Y >> CoarseShift, _currentStamp);
+            }
+            else
+            {
+                Rectangle area = DXWorldGrid.CellAreaFromArea(new RectangleF(newPos.X - e.Width * 0.5f, newPos.Y - e.Height * 0.5f, e.Width, e.Height));
+                StampCoarseRange(area.Left >> CoarseShift, area.Top >> CoarseShift, (area.Right - 1) >> CoarseShift, (area.Bottom - 1) >> CoarseShift, _currentStamp);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void StampEntity(DXEntity e, int stamp)
+        {
+            int cx0, cy0, cx1, cy1;
+            if (e.IsOneCellSize)
+            {
+                Point cell = _getRawCell != null ? _getRawCell(e) : e.Cell;
+                cx0 = cx1 = cell.X >> CoarseShift;
+                cy0 = cy1 = cell.Y >> CoarseShift;
+            }
+            else
+            {
+                Rectangle area = e.CellArea;
+                cx0 = area.Left >> CoarseShift;
+                cy0 = area.Top >> CoarseShift;
+                cx1 = (area.Right - 1) >> CoarseShift;
+                cy1 = (area.Bottom - 1) >> CoarseShift;
+            }
+            StampCoarseRange(cx0, cy0, cx1, cy1, stamp);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void StampCoarseRange(int cx0, int cy0, int cx1, int cy1, int stamp)
+        {
+            int dim = _coarseDim;
+            if (cx1 < 0 || cy1 < 0 || cx0 >= dim || cy0 >= dim) return;
+            if (cx0 < 0) cx0 = 0;
+            if (cy0 < 0) cy0 = 0;
+            if (cx1 >= dim) cx1 = dim - 1;
+            if (cy1 >= dim) cy1 = dim - 1;
+
+            for (int cy = cy0; cy <= cy1; cy++)
+            {
+                int row = cy * dim;
+                for (int cx = cx0; cx <= cx1; cx++)
+                    _presenceStamp[row + cx] = stamp;
+            }
+
+            int dx0 = cx0 - 2; if (dx0 < 0) dx0 = 0;
+            int dy0 = cy0 - 2; if (dy0 < 0) dy0 = 0;
+            int dx1 = cx1 + 2; if (dx1 >= dim) dx1 = dim - 1;
+            int dy1 = cy1 + 2; if (dy1 >= dim) dy1 = dim - 1;
+
+            for (int cy = dy0; cy <= dy1; cy++)
+            {
+                int row = cy * dim;
+                for (int cx = dx0; cx <= dx1; cx++)
+                    _dilatedR2Stamp[row + cx] = stamp;
+            }
+        }
+
+        internal static void RebuildForTick(DXGame game)
+        {
+            if (game == null || LockstepClock.LoadingLevel)
+            {
+                _builtSimTick = -1;
+                return;
+            }
+
+            var level = DXLevel.Current;
+            int nCells = DXWorldGrid.NCells;
+            if (level == null || nCells <= 0)
+            {
+                _builtSimTick = -1;
+                return;
+            }
+
+            EnsureTypesAndAccessors();
+            if (_tStructure == null && _tHuman == null)
+            {
+                _builtSimTick = -1;
+                return;
+            }
+
+            int dim = (nCells + ((1 << CoarseShift) - 1)) >> CoarseShift;
+            int needed = dim * dim;
+            if (_presenceStamp.Length < needed)
+            {
+                _presenceStamp = new int[needed];
+                _dilatedR2Stamp = new int[needed];
+                _currentStamp = 1;
+            }
+            _coarseDim = dim;
+            _nCells = nCells;
+
+            unchecked { _currentStamp++; }
+            if (_currentStamp == 0)
+            {
+                Array.Clear(_presenceStamp, 0, _presenceStamp.Length);
+                Array.Clear(_dilatedR2Stamp, 0, _dilatedR2Stamp.Length);
+                _currentStamp = 1;
+            }
+
+            int stamp = _currentStamp;
+
+            if (_tStructure != null && game.EntitiesOfType(_tStructure) is HashSet<DXEntity> structs)
+            {
+                foreach (DXEntity e in structs)
+                {
+                    if (e != null && !e.Disposed && (e._BodyCategoryMask & WatchInterestMask) != 0u)
+                        StampEntity(e, stamp);
+                }
+            }
+
+            if (_tHuman != null && game.EntitiesOfType(_tHuman) is HashSet<DXEntity> humans)
+            {
+                foreach (DXEntity e in humans)
+                {
+                    if (e != null && !e.Disposed && (e._BodyCategoryMask & WatchInterestMask) != 0u)
+                        StampEntity(e, stamp);
+                }
+            }
+
+            if (_extraInterestEntities.Count > 0)
+            {
+                _extraInterestEntities.RemoveWhere(e => e == null || e.Disposed || (e._BodyCategoryMask & WatchInterestMask) == 0u);
+                foreach (DXEntity e in _extraInterestEntities)
+                    StampEntity(e, stamp);
+            }
+
+            _builtLevel = level;
+            _builtSimTick = game.IAIterationInt;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool IsReadyForCurrentTick()
+        {
+            var game = DXGame.Current;
+            var level = DXLevel.Current;
+            return game != null && level != null
+                && ReferenceEquals(_builtLevel, level)
+                && _builtSimTick == game.IAIterationInt;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool IsAreaEmptyAroundZombie(int cellX, int cellY, float watchRange)
+        {
+            int nCells = _nCells;
+            if ((uint)cellX >= (uint)nCells || (uint)cellY >= (uint)nCells)
+                return false;
+
+            int dim = _coarseDim;
+            int stamp = _currentStamp;
+            int zx = cellX >> CoarseShift;
+            int zy = cellY >> CoarseShift;
+
+            // With +-2 coarse-tile dilation (8 cells/tile), any unstamped coarse tile has
+            // Chebyshev distance >= 17 cells to every registered cell of any 0x8000/0x2000 entity.
+            // Since GetNearestVisibleEntityAtPoint stops at num5 = Ceiling(watchRange) + 1 <= 16 when
+            // watchRange <= 15.0f, a miss in _dilatedR2Stamp guarantees zero targets in range.
+            if (watchRange <= 15.0f)
+                return _dilatedR2Stamp[zy * dim + zx] != stamp;
+
+            if (_dilatedR2Stamp[zy * dim + zx] == stamp)
+                return false;
+
+            int rPad = (int)Math.Ceiling(watchRange) + 2;
+            int cx0 = (cellX - rPad) >> CoarseShift; if (cx0 < 0) cx0 = 0;
+            int cy0 = (cellY - rPad) >> CoarseShift; if (cy0 < 0) cy0 = 0;
+            int cx1 = (cellX + rPad) >> CoarseShift; if (cx1 >= dim) cx1 = dim - 1;
+            int cy1 = (cellY + rPad) >> CoarseShift; if (cy1 >= dim) cy1 = dim - 1;
+
+            for (int cy = cy0; cy <= cy1; cy++)
+            {
+                int row = cy * dim;
+                for (int cx = cx0; cx <= cx1; cx++)
+                {
+                    if (_presenceStamp[row + cx] == stamp)
+                        return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    [HarmonyPatch]
+    public static class EntityRefreshBodyMaskPatch
+    {
+        public static MethodBase TargetMethod()
+        {
+            var t = GameBridge.TypeZXEntity ?? GameBridge.GameAssembly?.GetType("ZX.Entities.ZXEntity");
+            return t != null ? AccessTools.Method(t, ObfuscatedSymbols.Method_ZXEntity_RefreshBodyMask, Type.EmptyTypes) : null;
+        }
+
+        [HarmonyPostfix]
+        public static void Postfix(DXEntity __instance)
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+            {
+                ZombieWatcherCoarseGrid.OnEntityBodyMaskRefreshed(__instance);
+                ActiveUpdateEntityManager.OnEntityMaskOrTeamRefreshed(__instance);
+                if (PrecomputedPerceptionManager.InWatchWindow)
+                    PrecomputedPerceptionManager.NotifyEntityGridOrMaskMutated(__instance);
+            }
+        }
+    }
+
+    [HarmonyPatch]
+    public static class ZombieWatcherFastPathPatch
+    {
+        private delegate bool FastWatcherCheckDelegate(object watcher, out float watchRange, out int cellX, out int cellY);
+
+        private static bool _metaInit;
+        private static FastWatcherCheckDelegate _fastCheck;
+
+        public static MethodBase TargetMethod()
+        {
+            var tWatcher = GameBridge.GameAssembly?.GetType(ObfuscatedSymbols.Type_CEntityWatcher);
+            if (tWatcher == null) return null;
+            EnsureMeta();
+            return AccessTools.Method(tWatcher, ObfuscatedSymbols.Method_CEntityWatcher_UpdateWatch, new[] { typeof(bool) });
+        }
+
+        private static void EnsureMeta()
+        {
+            if (_metaInit) return;
+            _metaInit = true;
+            try
+            {
+                var asm = GameBridge.GameAssembly;
+                if (asm == null) return;
+
+                Type tWatcher = asm.GetType(ObfuscatedSymbols.Type_CEntityWatcher);
+                Type tZombie = asm.GetType(ObfuscatedSymbols.Type_Zombie);
+                Type tZxEnt = GameBridge.TypeZXEntity ?? asm.GetType("ZX.Entities.ZXEntity");
+                if (tWatcher == null || tZombie == null || tZxEnt == null) return;
+
+                const BindingFlags F = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                var fTargetMask = tWatcher.GetField(ObfuscatedSymbols.Field_CEntityWatcher_TargetMask, F);
+                var fTargetEnt = tWatcher.GetField(ObfuscatedSymbols.Field_CEntityWatcher_TargetEntity, F);
+                var mGetWasAttacked = tWatcher.GetProperty("WasAttacked", F)?.GetGetMethod(true);
+                var mGetCompEntity = typeof(DXComponent).GetProperty("Entity", F)?.GetGetMethod(true);
+                var mGetDisposed = typeof(DXEntity).GetProperty("Disposed", F)?.GetGetMethod(true);
+                var fRawCell = typeof(DXEntity).GetField("_Cell", F);
+                var mGetParams = AccessTools.Method(tZxEnt, ObfuscatedSymbols.Method_ZXEntity_GetParams, Type.EmptyTypes);
+                var mGetRangeBonus = tZxEnt.GetProperty("RangeBonus", F)?.GetGetMethod(true);
+                var tParams = mGetParams?.ReturnType;
+                var mGetWatchRange = tParams != null ? tParams.GetProperty("WatchRange", F)?.GetGetMethod(true) : null;
+                var mPointX = typeof(Point).GetProperty("X")?.GetGetMethod();
+                var mPointY = typeof(Point).GetProperty("Y")?.GetGetMethod();
+
+                if (fTargetMask == null || fTargetEnt == null || mGetWasAttacked == null || mGetCompEntity == null ||
+                    mGetDisposed == null || fRawCell == null || mGetParams == null || mGetRangeBonus == null ||
+                    mGetWatchRange == null || mPointX == null || mPointY == null)
+                    return;
+
+                var dm = new DynamicMethod("TABCoop_TryGetZombieWatcherFastCheck", typeof(bool),
+                    new[] { typeof(object), typeof(float).MakeByRefType(), typeof(int).MakeByRefType(), typeof(int).MakeByRefType() },
+                    typeof(ZombieWatcherFastPathPatch).Module, skipVisibility: true);
+                var il = dm.GetILGenerator();
+
+                var locW = il.DeclareLocal(tWatcher);
+                var locZ = il.DeclareLocal(tZombie);
+                var locParams = il.DeclareLocal(tParams);
+                var locCell = il.DeclareLocal(typeof(Point));
+                var lblRetFalse = il.DefineLabel();
+
+                // if (watcher == null) goto lblRetFalse;
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Brfalse, lblRetFalse);
+
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Castclass, tWatcher);
+                il.Emit(OpCodes.Stloc, locW);
+
+                // if (w._targetMask != 0x8000u) goto lblRetFalse;
+                il.Emit(OpCodes.Ldloc, locW);
+                il.Emit(OpCodes.Ldfld, fTargetMask);
+                il.Emit(OpCodes.Ldc_I4, 0x8000);
+                il.Emit(OpCodes.Bne_Un, lblRetFalse);
+
+                // if (w._targetEntity != null) goto lblRetFalse;
+                il.Emit(OpCodes.Ldloc, locW);
+                il.Emit(OpCodes.Ldfld, fTargetEnt);
+                il.Emit(OpCodes.Brtrue, lblRetFalse);
+
+                // if (w.WasAttacked) goto lblRetFalse;
+                il.Emit(OpCodes.Ldloc, locW);
+                il.Emit(OpCodes.Callvirt, mGetWasAttacked);
+                il.Emit(OpCodes.Brtrue, lblRetFalse);
+
+                // z = w.Entity as Zombie; if (z == null || z.Disposed) goto lblRetFalse;
+                il.Emit(OpCodes.Ldloc, locW);
+                il.Emit(OpCodes.Callvirt, mGetCompEntity);
+                il.Emit(OpCodes.Isinst, tZombie);
+                il.Emit(OpCodes.Stloc, locZ);
+                il.Emit(OpCodes.Ldloc, locZ);
+                il.Emit(OpCodes.Brfalse, lblRetFalse);
+                il.Emit(OpCodes.Ldloc, locZ);
+                il.Emit(OpCodes.Callvirt, mGetDisposed);
+                il.Emit(OpCodes.Brtrue, lblRetFalse);
+
+                // p = z.Params; if (p == null) goto lblRetFalse;
+                il.Emit(OpCodes.Ldloc, locZ);
+                il.Emit(OpCodes.Callvirt, mGetParams);
+                il.Emit(OpCodes.Stloc, locParams);
+                il.Emit(OpCodes.Ldloc, locParams);
+                il.Emit(OpCodes.Brfalse, lblRetFalse);
+
+                // watchRange = (float)p.WatchRange + (float)z.RangeBonus;
+                il.Emit(OpCodes.Ldarg_1);
+                il.Emit(OpCodes.Ldloc, locParams);
+                il.Emit(OpCodes.Callvirt, mGetWatchRange);
+                il.Emit(OpCodes.Conv_R4);
+                il.Emit(OpCodes.Ldloc, locZ);
+                il.Emit(OpCodes.Callvirt, mGetRangeBonus);
+                il.Emit(OpCodes.Conv_R4);
+                il.Emit(OpCodes.Add);
+                il.Emit(OpCodes.Stind_R4);
+
+                // cell = z._Cell; cellX = cell.X; cellY = cell.Y;
+                il.Emit(OpCodes.Ldloc, locZ);
+                il.Emit(OpCodes.Ldfld, fRawCell);
+                il.Emit(OpCodes.Stloc, locCell);
+
+                il.Emit(OpCodes.Ldarg_2);
+                il.Emit(OpCodes.Ldloca, locCell);
+                il.Emit(OpCodes.Call, mPointX);
+                il.Emit(OpCodes.Stind_I4);
+
+                il.Emit(OpCodes.Ldarg_3);
+                il.Emit(OpCodes.Ldloca, locCell);
+                il.Emit(OpCodes.Call, mPointY);
+                il.Emit(OpCodes.Stind_I4);
+
+                il.Emit(OpCodes.Ldc_I4_1);
+                il.Emit(OpCodes.Ret);
+
+                il.MarkLabel(lblRetFalse);
+                il.Emit(OpCodes.Ldarg_1);
+                il.Emit(OpCodes.Ldc_R4, 0f);
+                il.Emit(OpCodes.Stind_R4);
+                il.Emit(OpCodes.Ldarg_2);
+                il.Emit(OpCodes.Ldc_I4_0);
+                il.Emit(OpCodes.Stind_I4);
+                il.Emit(OpCodes.Ldarg_3);
+                il.Emit(OpCodes.Ldc_I4_0);
+                il.Emit(OpCodes.Stind_I4);
+                il.Emit(OpCodes.Ldc_I4_0);
+                il.Emit(OpCodes.Ret);
+
+                _fastCheck = (FastWatcherCheckDelegate)dm.CreateDelegate(typeof(FastWatcherCheckDelegate));
+                ModLogger.Info("[Perf] Compiled DynamicMethod TABCoop_TryGetZombieWatcherFastCheck.");
+            }
+            catch (Exception ex)
+            {
+                _fastCheck = null;
+                ModLogger.Warn($"[Perf] TryGetZombieWatcherFastCheck compile failed: {ex.Message}");
+            }
+        }
+
+        [HarmonyPrefix]
+        public static bool Prefix(object __instance)
+        {
+            if (!LockstepClock.IsDeterministicModeActive || LockstepClock.LoadingLevel || _fastCheck == null)
+                return true;
+            if (!ZombieWatcherCoarseGrid.IsReadyForCurrentTick())
+                return true;
+
+            if (_fastCheck(__instance, out float watchRange, out int cellX, out int cellY)
+                && ZombieWatcherCoarseGrid.IsAreaEmptyAroundZombie(cellX, cellY, watchRange))
+            {
+                if (DeterministicSandboxPatches.DiagPerfSamplingActive)
+                    Interlocked.Increment(ref DeterministicSandboxPatches.DiagTickWatcherBypassed);
+                return false;
+            }
+            return true;
+        }
+    }
+
+    [HarmonyPatch]
+    public static class LevelStateShowFullMapSyncPatch
+    {
+        public static MethodBase TargetMethod()
+        {
+            var t = Core.GameBridge.GameAssembly?.GetType("ZX.ZXLevelState");
+            return t?.GetProperty("ShowFullMap", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetSetMethod(true);
+        }
+
+        [HarmonyPostfix]
+        public static void Postfix([HarmonyArgument(0)] bool value)
+        {
+            Sync.FactionContextManager.OnNativeShowFullMapSet(value);
+        }
+    }
+
+    // =========================================================================
+    // Stage 4B-1: Conservative 2-tier bitmap + supercover DDA fast-pass for
+    // DXEntity.IsFreePhysicPath(destiny, 1u) (Geography / static 1u colliders).
+    // Any cell within 1.05 units of any Chipmunk body with (CategoryMask & 1u) != 0
+    // is ref-counted so open-field string-pull segments skip native Space_RayCast
+    // with 0 false negatives, while near-obstacle segments fall back to Chipmunk.
+    // =========================================================================
+    internal static class Physics1uGrid
+    {
+        private struct CellRect { public int X0, Y0, X1, Y1; public bool Dynamic1u; }
+
+        private const int CoarseShift = 3; // 8x8 cells per coarse tile
+        private static readonly object _sync = new object();
+        private static readonly Dictionary<DXPhysicBody, CellRect> _tracked = new Dictionary<DXPhysicBody, CellRect>(4096);
+        private static ushort[] _cellRefCount = Array.Empty<ushort>();
+        private static ushort[] _coarseRefCount = Array.Empty<ushort>();
+        private static int _nCells;
+        private static int _coarseDim;
+        private static int _dynamic1uCount;
+        private static DXLevel _builtLevel;
+        private static readonly bool _disabledByEnv = string.Equals(Environment.GetEnvironmentVariable("TABCOOP_DISABLE_PHYS1U"), "1", StringComparison.Ordinal);
+        private static bool _needsRebuild = true;
+        private static volatile bool _ready;
+
+        internal static void Invalidate()
+        {
+            lock (_sync)
+            {
+                _tracked.Clear();
+                if (_cellRefCount.Length > 0) Array.Clear(_cellRefCount, 0, _cellRefCount.Length);
+                if (_coarseRefCount.Length > 0) Array.Clear(_coarseRefCount, 0, _coarseRefCount.Length);
+                _dynamic1uCount = 0;
+                _builtLevel = null;
+                _needsRebuild = true;
+                _ready = false;
+            }
+        }
+
+        internal static bool IsReadyForFastQuery()
+        {
+            return !_disabledByEnv && _ready && !_needsRebuild && _dynamic1uCount == 0 && _nCells > 0;
+        }
+
+        private static bool TryComputePaddedBounds(DXPhysicBody body, int nCells, out CellRect rect)
+        {
+            rect = default;
+            if (body == null || body.Handle == IntPtr.Zero || nCells <= 0) return false;
+            if (System.Runtime.InteropServices.Marshal.ReadIntPtr(body.Handle, 0x88) == IntPtr.Zero) return false;
+
+            float left = float.MaxValue, top = float.MaxValue, right = float.MinValue, bottom = float.MinValue;
+            PointF center = body.PositionComputed;
+            SizeF ps = body.PhysicSize;
+            if (ps.Width > 0f && ps.Height > 0f)
+            {
+                left = center.X - ps.Width * 0.5f;
+                right = center.X + ps.Width * 0.5f;
+                top = center.Y - ps.Height * 0.5f;
+                bottom = center.Y + ps.Height * 0.5f;
+            }
+
+            var e = body.GameEntity;
+            bool isDyn = e != null && e.PhysicalType == DXBodyType.Dynamic;
+            if (e != null)
+            {
+                Rectangle cellRect = e.CellArea;
+                if (e.PhysicalType == DXBodyType.Static && e.Template != null)
+                {
+                    if (e.Template.CellAreaMode == DXTypeOfCellAreaMode.MaxArea) cellRect = e.MaxCellArea;
+                    else if (e.Template.CellAreaMode == DXTypeOfCellAreaMode.MinArea) cellRect = e.MinCellArea;
+                }
+                if (cellRect.Width > 0 && cellRect.Height > 0)
+                {
+                    if (cellRect.Left < left) left = cellRect.Left;
+                    if (cellRect.Top < top) top = cellRect.Top;
+                    if (cellRect.Right > right) right = cellRect.Right;
+                    if (cellRect.Bottom > bottom) bottom = cellRect.Bottom;
+                }
+                if (e.PhysicalShape == DXPhysicalShape.Circle || e.PhysicalShape == DXPhysicalShape.None)
+                {
+                    float r = cellRect.Width > 0 ? cellRect.Width * 0.5f : e.Size.Width * 0.5f;
+                    PointF ep = e.Position;
+                    if (ep.X - r < left) left = ep.X - r;
+                    if (ep.Y - r < top) top = ep.Y - r;
+                    if (ep.X + r > right) right = ep.X + r;
+                    if (ep.Y + r > bottom) bottom = ep.Y + r;
+                }
+            }
+
+            if (left > right || top > bottom || float.IsNaN(left) || float.IsInfinity(left))
+                return false;
+
+            // Pad by 1.05 units: guarantees any centerline in unmarked cells stays > 0.90 units away
+            // (covering all entity radii <= 0.90f passed to IsFreePhysicPath).
+            const float pad = 1.05f;
+            int x0 = (int)Math.Floor(left - pad); if (x0 < 0) x0 = 0;
+            int y0 = (int)Math.Floor(top - pad); if (y0 < 0) y0 = 0;
+            int x1 = (int)Math.Floor(right + pad); if (x1 >= nCells) x1 = nCells - 1;
+            int y1 = (int)Math.Floor(bottom + pad); if (y1 >= nCells) y1 = nCells - 1;
+            if (x0 > x1 || y0 > y1) return false;
+
+            rect = new CellRect { X0 = x0, Y0 = y0, X1 = x1, Y1 = y1, Dynamic1u = isDyn };
+            return true;
+        }
+
+        private static void ApplyDelta(in CellRect r, int delta)
+        {
+            int nCells = _nCells;
+            int dim = _coarseDim;
+            for (int y = r.Y0; y <= r.Y1; y++)
+            {
+                int row = y * nCells;
+                int cyRow = (y >> CoarseShift) * dim;
+                for (int x = r.X0; x <= r.X1; x++)
+                {
+                    int idx = row + x;
+                    int next = _cellRefCount[idx] + delta;
+                    _cellRefCount[idx] = (ushort)(next > 0 ? (next <= ushort.MaxValue ? next : ushort.MaxValue) : 0);
+
+                    int cIdx = cyRow + (x >> CoarseShift);
+                    int cNext = _coarseRefCount[cIdx] + delta;
+                    _coarseRefCount[cIdx] = (ushort)(cNext > 0 ? (cNext <= ushort.MaxValue ? cNext : ushort.MaxValue) : 0);
+                }
+            }
+        }
+
+        internal static void EnsureSynced(DXGame game)
+        {
+            if (game == null || LockstepClock.LoadingLevel)
+            {
+                _ready = false;
+                return;
+            }
+            var level = DXLevel.Current;
+            int nCells = DXWorldGrid.NCells;
+            if (level == null || nCells <= 0)
+            {
+                _ready = false;
+                return;
+            }
+            if (_ready && !_needsRebuild && ReferenceEquals(_builtLevel, level) && _nCells == nCells)
+                return;
+
+            lock (_sync)
+            {
+                _tracked.Clear();
+                _dynamic1uCount = 0;
+                _nCells = nCells;
+                _coarseDim = (nCells + ((1 << CoarseShift) - 1)) >> CoarseShift;
+                int cellLen = nCells * nCells;
+                int coarseLen = _coarseDim * _coarseDim;
+                if (_cellRefCount.Length < cellLen) _cellRefCount = new ushort[cellLen];
+                else Array.Clear(_cellRefCount, 0, cellLen);
+                if (_coarseRefCount.Length < coarseLen) _coarseRefCount = new ushort[coarseLen];
+                else Array.Clear(_coarseRefCount, 0, coarseLen);
+
+                var bodies = DXPhysicWorld.Bodies;
+                if (bodies != null)
+                {
+                    for (int i = 0; i < bodies.Count; i++)
+                    {
+                        DXPhysicBody b = bodies[i];
+                        if (b == null || b.Handle == IntPtr.Zero) continue;
+                        if (System.Runtime.InteropServices.Marshal.ReadIntPtr(b.Handle, 0x88) == IntPtr.Zero) continue;
+                        if ((b.CategoryMask & 1u) == 0u) continue;
+                        if (TryComputePaddedBounds(b, nCells, out CellRect r))
+                        {
+                            _tracked[b] = r;
+                            if (r.Dynamic1u) _dynamic1uCount++;
+                            ApplyDelta(in r, +1);
+                        }
+                    }
+                }
+
+                _builtLevel = level;
+                _needsRebuild = false;
+                _ready = true;
+            }
+        }
+
+        internal static void OnBodyCategoryMaskSet(DXPhysicBody body, uint newMask)
+        {
+            if (!_ready || _needsRebuild || body == null || LockstepClock.LoadingLevel) return;
+            bool has1u = (newMask & 1u) != 0u;
+            lock (_sync)
+            {
+                if (!_ready || _needsRebuild) return;
+                bool wasTracked = _tracked.TryGetValue(body, out CellRect oldRect);
+                if (!has1u && !wasTracked) return;
+
+                if (wasTracked)
+                {
+                    ApplyDelta(in oldRect, -1);
+                    if (oldRect.Dynamic1u && _dynamic1uCount > 0) _dynamic1uCount--;
+                    _tracked.Remove(body);
+                }
+                if (has1u && body.Handle != IntPtr.Zero
+                    && System.Runtime.InteropServices.Marshal.ReadIntPtr(body.Handle, 0x88) != IntPtr.Zero
+                    && TryComputePaddedBounds(body, _nCells, out CellRect newRect))
+                {
+                    _tracked[body] = newRect;
+                    if (newRect.Dynamic1u) _dynamic1uCount++;
+                    ApplyDelta(in newRect, +1);
+                }
+            }
+        }
+
+        internal static void OnBodyGeometryChanged(DXPhysicBody body)
+        {
+            if (!_ready || _needsRebuild || body == null || LockstepClock.LoadingLevel) return;
+            uint mask = body.Handle != IntPtr.Zero ? body.CategoryMask : 0u;
+            if ((mask & 1u) == 0u && _tracked.Count == 0) return;
+            OnBodyCategoryMaskSet(body, mask);
+        }
+
+        internal static void OnBodyDisposing(DXPhysicBody body)
+        {
+            if (body == null || _tracked.Count == 0) return;
+            lock (_sync)
+            {
+                if (_tracked.TryGetValue(body, out CellRect oldRect))
+                {
+                    if (_ready && !_needsRebuild)
+                        ApplyDelta(in oldRect, -1);
+                    if (oldRect.Dynamic1u && _dynamic1uCount > 0) _dynamic1uCount--;
+                    _tracked.Remove(body);
+                }
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool IsSegmentClearOf1u(PointF a, PointF b, float radius)
+        {
+            if (!IsReadyForFastQuery() || radius > 0.90f)
+                return false;
+
+            float ax = a.X, ay = a.Y, bx = b.X, by = b.Y;
+            int nCells = _nCells;
+            if (float.IsNaN(ax) || float.IsNaN(ay) || float.IsNaN(bx) || float.IsNaN(by))
+                return false;
+            if (ax < 0f || ay < 0f || bx < 0f || by < 0f || ax >= nCells || ay >= nCells || bx >= nCells || by >= nCells)
+                return false;
+
+            int minX = (int)Math.Floor(ax < bx ? ax : bx);
+            int minY = (int)Math.Floor(ay < by ? ay : by);
+            int maxX = (int)Math.Floor(ax > bx ? ax : bx);
+            int maxY = (int)Math.Floor(ay > by ? ay : by);
+            if (minX < 0 || minY < 0 || maxX >= nCells || maxY >= nCells)
+                return false;
+
+            // Tier 1: 8x8 coarse empty check when segment AABB touches at most 2x2 coarse tiles
+            int cx0 = minX >> CoarseShift;
+            int cy0 = minY >> CoarseShift;
+            int cx1 = maxX >> CoarseShift;
+            int cy1 = maxY >> CoarseShift;
+            if ((cx1 - cx0) <= 1 && (cy1 - cy0) <= 1)
+            {
+                int dim = _coarseDim;
+                ushort[] coarse = _coarseRefCount;
+                bool anyCoarse = false;
+                for (int cy = cy0; cy <= cy1 && !anyCoarse; cy++)
+                {
+                    int cRow = cy * dim;
+                    for (int cx = cx0; cx <= cx1; cx++)
+                    {
+                        if (coarse[cRow + cx] != 0)
+                        {
+                            anyCoarse = true;
+                            break;
+                        }
+                    }
+                }
+                if (!anyCoarse)
+                    return true;
+            }
+
+            // Tier 2: Supercover Amanatides-Woo DDA across conservative _cellRefCount
+            int x = (int)Math.Floor(ax);
+            int y = (int)Math.Floor(ay);
+            int ex = (int)Math.Floor(bx);
+            int ey = (int)Math.Floor(by);
+            ushort[] cells = _cellRefCount;
+            if (cells[y * nCells + x] != 0 || cells[ey * nCells + ex] != 0)
+                return false;
+            if (x == ex && y == ey)
+                return true;
+
+            double dx = (double)bx - ax;
+            double dy = (double)by - ay;
+            int stepX = dx > 0.0 ? 1 : (dx < 0.0 ? -1 : 0);
+            int stepY = dy > 0.0 ? 1 : (dy < 0.0 ? -1 : 0);
+            double tDeltaX = stepX != 0 ? Math.Abs(1.0 / dx) : 1e30;
+            double tDeltaY = stepY != 0 ? Math.Abs(1.0 / dy) : 1e30;
+            double tMaxX = stepX > 0 ? ((x + 1.0 - ax) * tDeltaX) : (stepX < 0 ? ((ax - x) * tDeltaX) : 1e30);
+            double tMaxY = stepY > 0 ? ((y + 1.0 - ay) * tDeltaY) : (stepY < 0 ? ((ay - y) * tDeltaY) : 1e30);
+
+            int maxSteps = Math.Abs(ex - x) + Math.Abs(ey - y) + 4;
+            while ((x != ex || y != ey) && maxSteps-- > 0)
+            {
+                if (x != ex && y != ey)
+                {
+                    double diff = tMaxX - tMaxY;
+                    if (Math.Abs(diff) < 1e-5)
+                    {
+                        int nx = x + stepX;
+                        int ny = y + stepY;
+                        if ((uint)nx >= (uint)nCells || cells[y * nCells + nx] != 0) return false;
+                        if ((uint)ny >= (uint)nCells || cells[ny * nCells + x] != 0) return false;
+                        x = nx;
+                        y = ny;
+                        tMaxX += tDeltaX;
+                        tMaxY += tDeltaY;
+                    }
+                    else if (diff < 0.0)
+                    {
+                        x += stepX;
+                        tMaxX += tDeltaX;
+                    }
+                    else
+                    {
+                        y += stepY;
+                        tMaxY += tDeltaY;
+                    }
+                }
+                else if (x != ex)
+                {
+                    x += stepX;
+                    tMaxX += tDeltaX;
+                }
+                else
+                {
+                    y += stepY;
+                    tMaxY += tDeltaY;
+                }
+                if ((uint)x >= (uint)nCells || (uint)y >= (uint)nCells || cells[y * nCells + x] != 0)
+                    return false;
+            }
+            return x == ex && y == ey;
+        }
+    }
+
+    [HarmonyPatch(typeof(DXPhysicBody), "CategoryMask", MethodType.Setter)]
+    public static class PhysicBodyCategoryMaskPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix(DXPhysicBody __instance, uint value)
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                Physics1uGrid.OnBodyCategoryMaskSet(__instance, value);
+        }
+    }
+
+    [HarmonyPatch(typeof(DXPhysicBody), "PhysicSize", MethodType.Setter)]
+    public static class PhysicBodySize1uPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix(DXPhysicBody __instance)
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                Physics1uGrid.OnBodyGeometryChanged(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(DXPhysicBody), nameof(DXPhysicBody.TeleportTo), new[] { typeof(PointF) })]
+    public static class PhysicBodyTeleport1uPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix(DXPhysicBody __instance)
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                Physics1uGrid.OnBodyGeometryChanged(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(DXPhysicBody), "Dispose")]
+    public static class PhysicBodyDispose1uPatch
+    {
+        [HarmonyPrefix]
+        public static void Prefix(DXPhysicBody __instance)
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                Physics1uGrid.OnBodyDisposing(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(DXPhysicWorld), "Clear")]
+    public static class PhysicWorldClear1uPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            Physics1uGrid.Invalidate();
+        }
+    }
+
+    [HarmonyPatch(typeof(DXEntity), "IsFreePhysicPath", new[] { typeof(PointF), typeof(uint) })]
+    public static class EntityFree1uPathFastPatch
+    {
+        [HarmonyPrefix]
+        public static bool Prefix(DXEntity __instance, PointF destiny, uint mask, ref bool __result)
+        {
+            if (mask != 1u || !LockstepClock.IsDeterministicModeActive || LockstepClock.LoadingLevel || __instance == null)
+                return true;
+
+            float radius = __instance.Size.Width / 3f;
+            if (Physics1uGrid.IsSegmentClearOf1u(__instance.Position, destiny, radius))
+            {
+                if (DeterministicSandboxPatches.DiagPerfSamplingActive)
+                    Interlocked.Increment(ref DeterministicSandboxPatches.DiagTickPath1uBypassed);
+                __result = true;
+                return false;
+            }
+            return true;
+        }
+    }
+
+    // =========================================================================
+    // Stage 4B-2: Order-preserving ActiveUpdateEntities compact list
+    // Skips ~80k inert static terrain/resource entities inside DXGame._Entities
+    // while maintaining exact relative order and handling add/remove/pooling.
+    // =========================================================================
+    internal static class ActiveUpdateEntityManager
+    {
+        private static readonly object _typeLock = new object();
+        private static readonly Dictionary<Type, byte> _typeKindCache = new Dictionary<Type, byte>(128);
+        private static readonly List<DXEntity> _activeEntities = new List<DXEntity>(32768);
+        private static readonly Dictionary<DXEntity, int> _slotByEntity = new Dictionary<DXEntity, int>(32768);
+        private static int _tombstoneCount;
+        private static DXEntity _disposedTombstone;
+
+        private static bool _metaInit;
+        private static Type _tZXEntity;
+        private static MethodInfo _mBaseDxOnUpdate;
+        private static MethodInfo _mBaseZxOnUpdate;
+        private static Func<DXGame, List<DXEntity>> _getRawEntities;
+        private static Func<DXEntity, int> _getRawIndex;
+        private static Func<DXEntity, bool> _hasEventOnUpdate;
+        private static Func<DXEntity, bool> _hasNonNullMinimapColor;
+
+        private static readonly bool _disabledByEnv = string.Equals(Environment.GetEnvironmentVariable("TABCOOP_DISABLE_ACTIVE_UPDATE"), "1", StringComparison.Ordinal);
+        private static DXLevel _builtLevel;
+        private static volatile bool _needsRebuildNextTick = true;
+        private static volatile bool _usingActiveList;
+
+        private static void EnsureMeta()
+        {
+            if (_metaInit) return;
+            _metaInit = true;
+            try
+            {
+                _tZXEntity = Core.GameBridge.TypeZXEntity ?? Core.GameBridge.GameAssembly?.GetType("ZX.Entities.ZXEntity");
+                const BindingFlags F = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+                _mBaseDxOnUpdate = typeof(DXEntity).GetMethod("OnUpdate", F);
+                _mBaseZxOnUpdate = _tZXEntity?.GetMethod("OnUpdate", F);
+
+                var tomb = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(DXEntity)) as DXEntity;
+                if (tomb != null)
+                {
+                    tomb.Flags = DXEntity.DXEntityFlags.Disposed | DXEntity.DXEntityFlags.FreeingToPool;
+                    _disposedTombstone = tomb;
+                }
+
+                var fEntities = typeof(DXGame).GetField("_Entities", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (fEntities != null)
+                {
+                    var dm = new DynamicMethod("TABCoop_GetGameEntitiesList", typeof(List<DXEntity>), new[] { typeof(DXGame) },
+                        typeof(ActiveUpdateEntityManager).Module, skipVisibility: true);
+                    var il = dm.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Ldfld, fEntities);
+                    il.Emit(OpCodes.Ret);
+                    _getRawEntities = (Func<DXGame, List<DXEntity>>)dm.CreateDelegate(typeof(Func<DXGame, List<DXEntity>>));
+                }
+
+                var fIndex = typeof(DXEntity).GetField("_Index", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (fIndex != null)
+                {
+                    var dm = new DynamicMethod("TABCoop_GetEntityIndex", typeof(int), new[] { typeof(DXEntity) },
+                        typeof(ActiveUpdateEntityManager).Module, skipVisibility: true);
+                    var il = dm.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Ldfld, fIndex);
+                    il.Emit(OpCodes.Ret);
+                    _getRawIndex = (Func<DXEntity, int>)dm.CreateDelegate(typeof(Func<DXEntity, int>));
+                }
+
+                FieldInfo fEvtUpd = null;
+                foreach (var fi in typeof(DXEntity).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    if (fi.FieldType == typeof(Action) && fi.Name.IndexOf("EventOnUpdate", StringComparison.Ordinal) >= 0)
+                    {
+                        fEvtUpd = fi;
+                        break;
+                    }
+                }
+                if (fEvtUpd != null)
+                {
+                    var dm = new DynamicMethod("TABCoop_HasEventOnUpdate", typeof(bool), new[] { typeof(DXEntity) },
+                        typeof(ActiveUpdateEntityManager).Module, skipVisibility: true);
+                    var il = dm.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Ldfld, fEvtUpd);
+                    il.Emit(OpCodes.Ldnull);
+                    il.Emit(OpCodes.Cgt_Un);
+                    il.Emit(OpCodes.Ret);
+                    _hasEventOnUpdate = (Func<DXEntity, bool>)dm.CreateDelegate(typeof(Func<DXEntity, bool>));
+                }
+
+                var mGetMm = _tZXEntity?.GetProperty("MinimapColor", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetGetMethod(true);
+                if (mGetMm != null && mGetMm.ReturnType == typeof(Color?))
+                {
+                    var mHasVal = typeof(Color?).GetProperty("HasValue")?.GetGetMethod();
+                    if (mHasVal != null)
+                    {
+                        var dm = new DynamicMethod("TABCoop_HasMinimapColor", typeof(bool), new[] { typeof(DXEntity) },
+                            typeof(ActiveUpdateEntityManager).Module, skipVisibility: true);
+                        var il = dm.GetILGenerator();
+                        var loc = il.DeclareLocal(typeof(Color?));
+                        var lblFalse = il.DefineLabel();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Isinst, _tZXEntity);
+                        il.Emit(OpCodes.Dup);
+                        il.Emit(OpCodes.Brfalse, lblFalse);
+                        il.Emit(OpCodes.Callvirt, mGetMm);
+                        il.Emit(OpCodes.Stloc, loc);
+                        il.Emit(OpCodes.Ldloca, loc);
+                        il.Emit(OpCodes.Call, mHasVal);
+                        il.Emit(OpCodes.Ret);
+                        il.MarkLabel(lblFalse);
+                        il.Emit(OpCodes.Pop);
+                        il.Emit(OpCodes.Ldc_I4_0);
+                        il.Emit(OpCodes.Ret);
+                        _hasNonNullMinimapColor = (Func<DXEntity, bool>)dm.CreateDelegate(typeof(Func<DXEntity, bool>));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[ActiveUpdate] EnsureMeta failed (using full _Entities): {ex.Message}");
+                _getRawEntities = null;
+            }
+        }
+
+        private static byte ClassifyType(Type t)
+        {
+            lock (_typeLock)
+            {
+                if (_typeKindCache.TryGetValue(t, out byte cached))
+                    return cached;
+
+                byte kind = 0;
+                var mOnUp = t.GetMethod("OnUpdate", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (mOnUp != null)
+                {
+                    Type decl = mOnUp.DeclaringType;
+                    if (decl != typeof(DXEntity) && decl != _tZXEntity)
+                        kind = 1; // Subclass overrides OnUpdate beyond ZXEntity
+                    else if (_tZXEntity != null && _tZXEntity.IsAssignableFrom(t))
+                        kind = 2; // ZXEntity.OnUpdate: only active when MinimapColor.HasValue or EventOnUpdate != null
+                }
+                _typeKindCache[t] = kind;
+                return kind;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool ShouldEntityBeUpdated(DXEntity e)
+        {
+            if (e == null) return false;
+            byte kind = ClassifyType(e.GetType());
+            if (kind == 1) return true;
+            if (_hasEventOnUpdate != null && _hasEventOnUpdate(e)) return true;
+            if (kind == 2 && (_hasNonNullMinimapColor == null || _hasNonNullMinimapColor(e))) return true;
+            return false;
+        }
+
+        internal static void Invalidate()
+        {
+            _usingActiveList = false;
+            _needsRebuildNextTick = true;
+            _builtLevel = null;
+            _activeEntities.Clear();
+            _slotByEntity.Clear();
+            _tombstoneCount = 0;
+        }
+
+        internal static void PrepareForTick(DXGame game)
+        {
+            EnsureMeta();
+            if (_disabledByEnv)
+            {
+                _usingActiveList = false;
+                return;
+            }
+            if (game == null || LockstepClock.LoadingLevel || _getRawEntities == null || _disposedTombstone == null || _hasEventOnUpdate == null)
+            {
+                _usingActiveList = false;
+                return;
+            }
+            var level = DXLevel.Current;
+            if (level == null)
+            {
+                _usingActiveList = false;
+                return;
+            }
+
+            List<DXEntity> raw = _getRawEntities(game);
+            if (raw == null)
+            {
+                _usingActiveList = false;
+                return;
+            }
+
+            if (!_usingActiveList || _needsRebuildNextTick || !ReferenceEquals(_builtLevel, level))
+            {
+                _activeEntities.Clear();
+                _slotByEntity.Clear();
+                _tombstoneCount = 0;
+                int count = raw.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    DXEntity e = raw[i];
+                    if (e != null && !_slotByEntity.ContainsKey(e) && ShouldEntityBeUpdated(e))
+                    {
+                        _slotByEntity[e] = _activeEntities.Count;
+                        _activeEntities.Add(e);
+                    }
+                }
+                _builtLevel = level;
+                _needsRebuildNextTick = false;
+                _usingActiveList = true;
+            }
+            else if (_tombstoneCount >= 1024)
+            {
+                int write = 0;
+                int n = _activeEntities.Count;
+                DXEntity tomb = _disposedTombstone;
+                for (int i = 0; i < n; i++)
+                {
+                    DXEntity e = _activeEntities[i];
+                    if (ReferenceEquals(e, tomb)) continue;
+                    _activeEntities[write] = e;
+                    _slotByEntity[e] = write;
+                    write++;
+                }
+                if (write < n)
+                    _activeEntities.RemoveRange(write, n - write);
+                _tombstoneCount = 0;
+            }
+
+            if (DeterministicSandboxPatches.DiagPerfSamplingActive)
+            {
+                DeterministicSandboxPatches.DiagActiveUpdateEntitiesCount = _slotByEntity.Count;
+                DeterministicSandboxPatches.DiagTotalEntitiesCount = raw.Count;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryGetActiveSnapshot(out List<DXEntity> entities, out int count)
+        {
+            if (_usingActiveList && !_needsRebuildNextTick && LockstepClock.IsDeterministicModeActive && !LockstepClock.LoadingLevel)
+            {
+                entities = _activeEntities;
+                count = _activeEntities.Count;
+                return true;
+            }
+            entities = null;
+            count = 0;
+            return false;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryGetSlot(DXEntity entity, out int slot)
+        {
+            if (_usingActiveList && entity != null)
+                return _slotByEntity.TryGetValue(entity, out slot);
+            slot = -1;
+            return false;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static List<DXEntity> GetEntitiesForTick(DXGame game)
+        {
+            // Never switch backing list mid-tick if _needsRebuildNextTick becomes true inside the loop;
+            // keep returning _activeEntities for the whole tick and rebuild cleanly in PrepareForTick.
+            if (_usingActiveList && LockstepClock.IsDeterministicModeActive && !LockstepClock.LoadingLevel)
+                return _activeEntities;
+            if (_getRawEntities == null) EnsureMeta();
+            return _getRawEntities != null ? _getRawEntities(game) : null;
+        }
+
+        internal static void OnEntityAdded(DXEntity entity)
+        {
+            if (!_usingActiveList || entity == null || !LockstepClock.IsDeterministicModeActive || LockstepClock.LoadingLevel)
+                return;
+            if (_getRawIndex != null && _getRawIndex(entity) < 0)
+                return;
+            if (!_slotByEntity.ContainsKey(entity) && ShouldEntityBeUpdated(entity))
+            {
+                _slotByEntity[entity] = _activeEntities.Count;
+                _activeEntities.Add(entity);
+            }
+        }
+
+        internal static void OnEntityRemoved(DXEntity entity)
+        {
+            if (!_usingActiveList || entity == null || _disposedTombstone == null)
+                return;
+            if (_slotByEntity.TryGetValue(entity, out int slot))
+            {
+                if ((uint)slot < (uint)_activeEntities.Count)
+                    _activeEntities[slot] = _disposedTombstone;
+                _slotByEntity.Remove(entity);
+                _tombstoneCount++;
+            }
+        }
+
+        internal static void OnEntityEventOnUpdateSubscribed(DXEntity entity)
+        {
+            if (!_usingActiveList || _needsRebuildNextTick || entity == null || !LockstepClock.IsDeterministicModeActive || LockstepClock.LoadingLevel)
+                return;
+            if ((_getRawIndex == null || _getRawIndex(entity) >= 0) && !_slotByEntity.ContainsKey(entity))
+                _needsRebuildNextTick = true;
+        }
+
+        internal static void OnEntityMaskOrTeamRefreshed(DXEntity entity)
+        {
+            if (!_usingActiveList || _needsRebuildNextTick || entity == null || !LockstepClock.IsDeterministicModeActive || LockstepClock.LoadingLevel)
+                return;
+            if ((_getRawIndex == null || _getRawIndex(entity) >= 0) && !_slotByEntity.ContainsKey(entity) && ShouldEntityBeUpdated(entity))
+                _needsRebuildNextTick = true;
+        }
+    }
+
+    [HarmonyPatch]
+    public static class GameUpdateLogicActiveEntitiesTranspiler
+    {
+        public static MethodBase TargetMethod()
+        {
+            const BindingFlags F = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+            foreach (var m in typeof(DXGame).GetMethods(F))
+            {
+                if (m.Name.StartsWith("<UpdateGameLogic>b__", StringComparison.Ordinal)
+                    && m.GetParameters().Length == 0
+                    && m.ReturnType == typeof(void))
+                    return m;
+            }
+            return null;
+        }
+
+        [HarmonyTranspiler]
+        public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+        {
+            var list = new List<CodeInstruction>(instructions);
+            var fDet = AccessTools.Field(typeof(DXGame), "IsIADeterministic");
+            var fEntities = AccessTools.Field(typeof(DXGame), "_Entities");
+            var mHelper = AccessTools.Method(typeof(ActiveUpdateEntityManager), nameof(ActiveUpdateEntityManager.GetEntitiesForTick), new[] { typeof(DXGame) });
+            if (fDet == null || fEntities == null || mHelper == null)
+                return list;
+
+            bool inDetBranch = false;
+            int replaced = 0;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var ins = list[i];
+                if (!inDetBranch)
+                {
+                    if (ins.opcode == OpCodes.Ldsfld && Equals(ins.operand, fDet))
+                        inDetBranch = true;
+                }
+                else
+                {
+                    if (ins.opcode == OpCodes.Br_S || ins.opcode == OpCodes.Br)
+                    {
+                        if (replaced >= 2) break;
+                    }
+                    if (ins.opcode == OpCodes.Ldfld && Equals(ins.operand, fEntities))
+                    {
+                        ins.opcode = OpCodes.Call;
+                        ins.operand = mHelper;
+                        replaced++;
+                        if (replaced >= 2) break;
+                    }
+                }
+            }
+            ModLogger.Info($"[ActiveUpdate] Transpiled UpdateGameLogic lambda: replaced={replaced} DXGame._Entities loads.");
+            return list;
+        }
+    }
+
+    [HarmonyPatch(typeof(DXGame), "AddEntityToList", new[] { typeof(DXEntity) })]
+    public static class GameAddEntityToListPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix(DXEntity entity)
+        {
+            ActiveUpdateEntityManager.OnEntityAdded(entity);
+        }
+    }
+
+    [HarmonyPatch(typeof(DXGame), "RemoveEntityFromList", new[] { typeof(DXEntity) })]
+    public static class GameRemoveEntityFromListPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix(DXEntity entity)
+        {
+            ActiveUpdateEntityManager.OnEntityRemoved(entity);
+        }
+    }
+
+    [HarmonyPatch(typeof(DXGame), "ClearEntities", new Type[0])]
+    public static class GameClearEntitiesPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            ActiveUpdateEntityManager.Invalidate();
+        }
+    }
+
+    [HarmonyPatch]
+    public static class EntityAddEventOnUpdatePatch
+    {
+        public static MethodBase TargetMethod()
+        {
+            return typeof(DXEntity).GetEvent("EventOnUpdate", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetAddMethod(true);
+        }
+
+        [HarmonyPostfix]
+        public static void Postfix(DXEntity __instance)
+        {
+            ActiveUpdateEntityManager.OnEntityEventOnUpdateSubscribed(__instance);
+        }
+    }
+
+    // =========================================================================
+    // Stage 4D-2: Two-Phase Parallel CEntityWatcher Perception Split
+    // Phase 0 (after OnStartUpdate): parallel read-only DXWorldGrid queries across
+    // fixed ParallelWorkers chunks for active Zombies not pruned by coarse grid.
+    // Phase 1 (sequential entity loop): O(1) validation against mid-tick Human/Wall
+    // grid mutations + exact CEntityWatcher outcome adoption.
+    // =========================================================================
+    internal static class PrecomputedPerceptionManager
+    {
+        private delegate bool GetWatcherConfigDel(DXEntity e, out float watchRange, out bool canJump, out bool canAvoidOverkill, out int priority, out object atkCmd, out int rangeBonus);
+        private delegate bool GetAtkCmdParamsDel(object atkCmd, out float actionRange, out float minDist, out bool usableThruWalls);
+        private delegate bool TryGetMovableTargetDel(DXEntity e, out PointF targetPt);
+
+        private struct PrecomputedEntry
+        {
+            public int SimTick;
+            public object Watcher;
+            public PointF SnapPos;
+            public Point SnapCell;
+            public DXEntity SnapPrevTarget;
+            public object SnapAttackCmd;
+            public int SnapRangeBonus;
+            public float WatchRange;
+            public bool CanJump;
+            public bool EarlyNullReturnFalse;
+            public bool EarlyNullReturnTrue;
+            public DXEntity TargetFalse;
+            public DXEntity TargetTrue;
+        }
+
+        private struct DirtyCellBox
+        {
+            public int MinX;
+            public int MinY;
+            public int MaxX;
+            public int MaxY;
+        }
+
+        private const int MaxExactDirtyBoxes = 16;
+
+        private static readonly object _metaLock = new object();
+        private static volatile bool _metaInit;
+        private static Type _tZXEntity;
+        private static Type _tZombie;
+        private static Type _tWall;
+
+        private static Func<DXEntity, Point> _getRawCell;
+        private static Func<DXEntity, object> _getWatcher;
+        private static Func<object, uint> _getWatcherMask;
+        private static Func<object, DXEntity> _getWatcherTarget;
+        private static Action<object, DXEntity> _setWatcherTarget;
+        private static Func<object, bool> _getWatcherWasAttacked;
+        private static Action<object, bool> _setWatcherWasAttacked;
+        private static Func<object, DXEntity> _getCompEntity;
+        private static Func<DXEntity, bool> _isLifeAlive;
+        private static GetWatcherConfigDel _getWatcherConfig;
+        private static GetAtkCmdParamsDel _getAtkCmdParams;
+        private static Func<object, PointF, int, DXEntity> _callGetBlockerWall;
+        private static Func<DXEntity, bool> _hasZombieWallCheckCond;
+        private static TryGetMovableTargetDel _tryGetMovableTargetPointF;
+
+        private static PrecomputedEntry[] _entries = new PrecomputedEntry[4096];
+        private static int _snapCount;
+        private static int _builtSimTick = -1;
+        private static DXLevel _builtLevel;
+
+        private static volatile bool _watchWindowActive;
+        private static int _midTickDirtyCount;
+        private static bool _allMidTickDirty;
+        private static readonly DirtyCellBox[] _midTickDirtyBoxes = new DirtyCellBox[MaxExactDirtyBoxes];
+        private static int _curTickNonSkippedWatchCalls;
+        private static int _prevTickNonSkippedWatchCalls;
+        private static bool _demandPrecomputeActive;
+        private const int DemandActivateThreshold = 128;
+        private const int DemandDeactivateThreshold = 64;
+
+        internal static bool InWatchWindow
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => _watchWindowActive;
+        }
+
+        private static void EnsureMeta()
+        {
+            if (_metaInit) return;
+            lock (_metaLock)
+            {
+                if (_metaInit) return;
+                try
+                {
+                    var asm = Core.GameBridge.GameAssembly;
+                    if (asm == null)
+                    {
+                        _metaInit = true;
+                        return;
+                    }
+
+                    _tZXEntity = Core.GameBridge.TypeZXEntity ?? asm.GetType("ZX.Entities.ZXEntity");
+                    _tZombie = asm.GetType(Core.ObfuscatedSymbols.Type_Zombie);
+                    _tWall = asm.GetType("ZX.Entities.Wall");
+                    Type tWatcher = asm.GetType(Core.ObfuscatedSymbols.Type_CEntityWatcher);
+                    Type tCmd = asm.GetType("ZX.Commands.ZXCommand");
+                    Type tMov = asm.GetType("ZX.Components.CMovable");
+
+                    const BindingFlags F = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                    var fRawCell = typeof(DXEntity).GetField("_Cell", F);
+                    var mCompEnt = typeof(DXComponent).GetProperty("Entity", F)?.GetGetMethod(true);
+                    var mGetWatcher = _tZXEntity != null ? AccessTools.Method(_tZXEntity, "#=zFSiAQxYFx7B9", Type.EmptyTypes) : null;
+                    var fMask = tWatcher?.GetField(Core.ObfuscatedSymbols.Field_CEntityWatcher_TargetMask, F);
+                    var fTargetEnt = tWatcher?.GetField(Core.ObfuscatedSymbols.Field_CEntityWatcher_TargetEntity, F);
+                    var pWasAtk = tWatcher?.GetProperty("WasAttacked", F);
+                    var mGetWasAtk = pWasAtk?.GetGetMethod(true);
+                    var mSetWasAtk = pWasAtk?.GetSetMethod(true);
+                    var mBlocker = tWatcher?.GetMethod("#=zqyVWs5Nb64VULfbWHg==", F, null, new[] { typeof(PointF), typeof(int) }, null);
+
+                    var mGetLife = _tZXEntity != null ? AccessTools.Method(_tZXEntity, Core.ObfuscatedSymbols.Method_ZXEntity_GetLife, Type.EmptyTypes) : null;
+                    var tLife = mGetLife?.ReturnType;
+                    var mIsAlive = tLife?.GetProperty("IsAlive", F)?.GetGetMethod(true);
+
+                    var mGetParams = _tZXEntity != null ? AccessTools.Method(_tZXEntity, Core.ObfuscatedSymbols.Method_ZXEntity_GetParams, Type.EmptyTypes) : null;
+                    var tParams = mGetParams?.ReturnType;
+                    var mWatchRange = tParams?.GetProperty("WatchRange", F)?.GetGetMethod(true);
+                    var mCanJump = tParams?.GetProperty("CanJump", F)?.GetGetMethod(true);
+                    var mCanAvoid = tParams?.GetProperty("CanAvoidOverkill", F)?.GetGetMethod(true);
+                    var mPriority = _tZXEntity?.GetProperty("TargetPriority", F)?.GetGetMethod(true);
+                    var mAtkCmd = _tZXEntity?.GetProperty("CurrentAttackCommand", F)?.GetGetMethod(true);
+                    var mRangeBonus = _tZXEntity?.GetProperty("RangeBonus", F)?.GetGetMethod(true);
+
+                    var mCmdParams = tCmd != null ? AccessTools.Method(tCmd, "#=zcODCID3ur9P9", Type.EmptyTypes) : null;
+                    var tCmdP = mCmdParams?.ReturnType;
+                    var mActRange = tCmdP?.GetProperty("ActionRange", F)?.GetGetMethod(true);
+                    var mMinDist = tCmdP?.GetProperty("MinTargetDistance", F)?.GetGetMethod(true);
+                    var mThruWalls = tCmdP?.GetProperty("UsabeThroughWalls", F)?.GetGetMethod(true);
+
+                    var mAtkCC = _tZombie?.GetProperty("AttackCommandCenter", F)?.GetGetMethod(true);
+                    var mGetBehComp = _tZXEntity != null ? AccessTools.Method(_tZXEntity, "#=zrPViR3ZjTZsjVndIuu8$9io=", Type.EmptyTypes) : null;
+                    var mGetBeh = mGetBehComp?.ReturnType?.GetProperty("Behaviour", F)?.GetGetMethod(true);
+                    var mGetData = mGetBeh?.ReturnType?.GetProperty("Data", F)?.GetGetMethod(true);
+                    var mGetCellAct = mGetData?.ReturnType?.GetProperty("CellActivity", F)?.GetGetMethod(true);
+
+                    var mGetMov = _tZXEntity != null ? AccessTools.Method(_tZXEntity, Core.ObfuscatedSymbols.Method_ZXEntity_GetMovable, Type.EmptyTypes) : null;
+                    var mGetTargetPos = tMov?.GetProperty("TargetPosition", F)?.GetGetMethod(true);
+                    var mNextCell = tMov != null ? AccessTools.Method(tMov, "#=zyRp4Y9IqSiCU", Type.EmptyTypes) : null;
+
+                    if (_tZXEntity == null || _tZombie == null || _tWall == null || tWatcher == null || tCmd == null || tMov == null ||
+                        fRawCell == null || mCompEnt == null || mGetWatcher == null || fMask == null || fTargetEnt == null ||
+                        mGetWasAtk == null || mSetWasAtk == null || mBlocker == null || mGetLife == null || mIsAlive == null ||
+                        mGetParams == null || mWatchRange == null || mCanJump == null || mCanAvoid == null || mPriority == null ||
+                        mAtkCmd == null || mRangeBonus == null || mCmdParams == null || mActRange == null || mMinDist == null ||
+                        mThruWalls == null || mAtkCC == null || mGetBehComp == null || mGetBeh == null || mGetData == null ||
+                        mGetCellAct == null || mGetMov == null || mGetTargetPos == null || mNextCell == null)
+                    {
+                        ModLogger.Warn("[Perception] Missing reflected member(s); Stage 4D precomputation disabled.");
+                        _metaInit = true;
+                        return;
+                    }
+
+                    // 1. DXEntity._Cell
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_GetCell", typeof(Point), new[] { typeof(DXEntity) }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Ldfld, fRawCell);
+                        il.Emit(OpCodes.Ret);
+                        _getRawCell = (Func<DXEntity, Point>)dm.CreateDelegate(typeof(Func<DXEntity, Point>));
+                    }
+                    // 2. GetWatcher(DXEntity) -> object
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_GetWatcher", typeof(object), new[] { typeof(DXEntity) }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        var lblNull = il.DefineLabel();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Isinst, _tZXEntity);
+                        il.Emit(OpCodes.Dup);
+                        il.Emit(OpCodes.Brfalse, lblNull);
+                        il.Emit(OpCodes.Callvirt, mGetWatcher);
+                        il.Emit(OpCodes.Ret);
+                        il.MarkLabel(lblNull);
+                        il.Emit(OpCodes.Pop);
+                        il.Emit(OpCodes.Ldnull);
+                        il.Emit(OpCodes.Ret);
+                        _getWatcher = (Func<DXEntity, object>)dm.CreateDelegate(typeof(Func<DXEntity, object>));
+                    }
+                    // 3. GetWatcherMask(object) -> uint
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_GetMask", typeof(uint), new[] { typeof(object) }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Castclass, tWatcher);
+                        il.Emit(OpCodes.Ldfld, fMask);
+                        il.Emit(OpCodes.Ret);
+                        _getWatcherMask = (Func<object, uint>)dm.CreateDelegate(typeof(Func<object, uint>));
+                    }
+                    // 4. GetWatcherTarget(object) -> DXEntity
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_GetTarget", typeof(DXEntity), new[] { typeof(object) }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Castclass, tWatcher);
+                        il.Emit(OpCodes.Ldfld, fTargetEnt);
+                        il.Emit(OpCodes.Ret);
+                        _getWatcherTarget = (Func<object, DXEntity>)dm.CreateDelegate(typeof(Func<object, DXEntity>));
+                    }
+                    // 5. SetWatcherTarget(object, DXEntity)
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_SetTarget", typeof(void), new[] { typeof(object), typeof(DXEntity) }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Castclass, tWatcher);
+                        il.Emit(OpCodes.Ldarg_1);
+                        il.Emit(OpCodes.Isinst, _tZXEntity);
+                        il.Emit(OpCodes.Stfld, fTargetEnt);
+                        il.Emit(OpCodes.Ret);
+                        _setWatcherTarget = (Action<object, DXEntity>)dm.CreateDelegate(typeof(Action<object, DXEntity>));
+                    }
+                    // 6. GetWatcherWasAttacked / SetWatcherWasAttacked
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_GetWasAtk", typeof(bool), new[] { typeof(object) }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Castclass, tWatcher);
+                        il.Emit(OpCodes.Callvirt, mGetWasAtk);
+                        il.Emit(OpCodes.Ret);
+                        _getWatcherWasAttacked = (Func<object, bool>)dm.CreateDelegate(typeof(Func<object, bool>));
+
+                        var dm2 = new DynamicMethod("TABCoop_Perc_SetWasAtk", typeof(void), new[] { typeof(object), typeof(bool) }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il2 = dm2.GetILGenerator();
+                        il2.Emit(OpCodes.Ldarg_0);
+                        il2.Emit(OpCodes.Castclass, tWatcher);
+                        il2.Emit(OpCodes.Ldarg_1);
+                        il2.Emit(OpCodes.Callvirt, mSetWasAtk);
+                        il2.Emit(OpCodes.Ret);
+                        _setWatcherWasAttacked = (Action<object, bool>)dm2.CreateDelegate(typeof(Action<object, bool>));
+                    }
+                    // 7. GetCompEntity(object) -> DXEntity
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_CompEnt", typeof(DXEntity), new[] { typeof(object) }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Castclass, typeof(DXComponent));
+                        il.Emit(OpCodes.Callvirt, mCompEnt);
+                        il.Emit(OpCodes.Ret);
+                        _getCompEntity = (Func<object, DXEntity>)dm.CreateDelegate(typeof(Func<object, DXEntity>));
+                    }
+                    // 8. IsLifeAlive(DXEntity) -> bool
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_IsAlive", typeof(bool), new[] { typeof(DXEntity) }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        var lblPopFalse = il.DefineLabel();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Isinst, _tZXEntity);
+                        il.Emit(OpCodes.Dup);
+                        il.Emit(OpCodes.Brfalse, lblPopFalse);
+                        il.Emit(OpCodes.Callvirt, mGetLife);
+                        il.Emit(OpCodes.Dup);
+                        il.Emit(OpCodes.Brfalse, lblPopFalse);
+                        il.Emit(OpCodes.Callvirt, mIsAlive);
+                        il.Emit(OpCodes.Ret);
+                        il.MarkLabel(lblPopFalse);
+                        il.Emit(OpCodes.Pop);
+                        il.Emit(OpCodes.Ldc_I4_0);
+                        il.Emit(OpCodes.Ret);
+                        _isLifeAlive = (Func<DXEntity, bool>)dm.CreateDelegate(typeof(Func<DXEntity, bool>));
+                    }
+                    // 9. GetWatcherConfig
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_Cfg", typeof(bool),
+                            new[] { typeof(DXEntity), typeof(float).MakeByRefType(), typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(), typeof(int).MakeByRefType(), typeof(object).MakeByRefType(), typeof(int).MakeByRefType() },
+                            typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        var locZx = il.DeclareLocal(_tZXEntity);
+                        var locP = il.DeclareLocal(tParams);
+                        var lblFail = il.DefineLabel();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Isinst, _tZXEntity);
+                        il.Emit(OpCodes.Stloc, locZx);
+                        il.Emit(OpCodes.Ldloc, locZx);
+                        il.Emit(OpCodes.Brfalse, lblFail);
+                        il.Emit(OpCodes.Ldloc, locZx);
+                        il.Emit(OpCodes.Callvirt, mGetParams);
+                        il.Emit(OpCodes.Stloc, locP);
+                        il.Emit(OpCodes.Ldloc, locP);
+                        il.Emit(OpCodes.Brfalse, lblFail);
+
+                        il.Emit(OpCodes.Ldarg_1);
+                        il.Emit(OpCodes.Ldloc, locP);
+                        il.Emit(OpCodes.Callvirt, mWatchRange);
+                        il.Emit(OpCodes.Conv_R4);
+                        il.Emit(OpCodes.Stind_R4);
+
+                        il.Emit(OpCodes.Ldarg_2);
+                        il.Emit(OpCodes.Ldloc, locP);
+                        il.Emit(OpCodes.Callvirt, mCanJump);
+                        il.Emit(OpCodes.Stind_I1);
+
+                        il.Emit(OpCodes.Ldarg_3);
+                        il.Emit(OpCodes.Ldloc, locP);
+                        il.Emit(OpCodes.Callvirt, mCanAvoid);
+                        il.Emit(OpCodes.Stind_I1);
+
+                        il.Emit(OpCodes.Ldarg_S, (byte)4);
+                        il.Emit(OpCodes.Ldloc, locZx);
+                        il.Emit(OpCodes.Callvirt, mPriority);
+                        il.Emit(OpCodes.Stind_I4);
+
+                        il.Emit(OpCodes.Ldarg_S, (byte)5);
+                        il.Emit(OpCodes.Ldloc, locZx);
+                        il.Emit(OpCodes.Callvirt, mAtkCmd);
+                        il.Emit(OpCodes.Stind_Ref);
+
+                        il.Emit(OpCodes.Ldarg_S, (byte)6);
+                        il.Emit(OpCodes.Ldloc, locZx);
+                        il.Emit(OpCodes.Callvirt, mRangeBonus);
+                        il.Emit(OpCodes.Stind_I4);
+
+                        il.Emit(OpCodes.Ldc_I4_1);
+                        il.Emit(OpCodes.Ret);
+                        il.MarkLabel(lblFail);
+                        il.Emit(OpCodes.Ldc_I4_0);
+                        il.Emit(OpCodes.Ret);
+                        _getWatcherConfig = (GetWatcherConfigDel)dm.CreateDelegate(typeof(GetWatcherConfigDel));
+                    }
+                    // 10. GetAtkCmdParams
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_AtkCmd", typeof(bool),
+                            new[] { typeof(object), typeof(float).MakeByRefType(), typeof(float).MakeByRefType(), typeof(bool).MakeByRefType() },
+                            typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        var locP = il.DeclareLocal(tCmdP);
+                        var lblNullPop = il.DefineLabel();
+                        var lblNull = il.DefineLabel();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Isinst, tCmd);
+                        il.Emit(OpCodes.Dup);
+                        il.Emit(OpCodes.Brfalse, lblNullPop);
+                        il.Emit(OpCodes.Callvirt, mCmdParams);
+                        il.Emit(OpCodes.Stloc, locP);
+                        il.Emit(OpCodes.Ldloc, locP);
+                        il.Emit(OpCodes.Brfalse, lblNull);
+
+                        il.Emit(OpCodes.Ldarg_1);
+                        il.Emit(OpCodes.Ldloc, locP);
+                        il.Emit(OpCodes.Callvirt, mActRange);
+                        il.Emit(OpCodes.Stind_R4);
+
+                        il.Emit(OpCodes.Ldarg_2);
+                        il.Emit(OpCodes.Ldloc, locP);
+                        il.Emit(OpCodes.Callvirt, mMinDist);
+                        il.Emit(OpCodes.Stind_R4);
+
+                        il.Emit(OpCodes.Ldarg_3);
+                        il.Emit(OpCodes.Ldloc, locP);
+                        il.Emit(OpCodes.Callvirt, mThruWalls);
+                        il.Emit(OpCodes.Stind_I1);
+
+                        il.Emit(OpCodes.Ldc_I4_1);
+                        il.Emit(OpCodes.Ret);
+                        il.MarkLabel(lblNullPop);
+                        il.Emit(OpCodes.Pop);
+                        il.MarkLabel(lblNull);
+                        il.Emit(OpCodes.Ldc_I4_0);
+                        il.Emit(OpCodes.Ret);
+                        _getAtkCmdParams = (GetAtkCmdParamsDel)dm.CreateDelegate(typeof(GetAtkCmdParamsDel));
+                    }
+                    // 11. CallGetBlockerWall
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_Blocker", typeof(DXEntity),
+                            new[] { typeof(object), typeof(PointF), typeof(int) }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Castclass, tWatcher);
+                        il.Emit(OpCodes.Ldarg_1);
+                        il.Emit(OpCodes.Ldarg_2);
+                        il.Emit(OpCodes.Callvirt, mBlocker);
+                        il.Emit(OpCodes.Ret);
+                        _callGetBlockerWall = (Func<object, PointF, int, DXEntity>)dm.CreateDelegate(typeof(Func<object, PointF, int, DXEntity>));
+                    }
+                    // 12. HasZombieWallCheckCond
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_ZWallCond", typeof(bool), new[] { typeof(DXEntity) }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        var locZ = il.DeclareLocal(_tZombie);
+                        var locCa = il.DeclareLocal(typeof(Point?));
+                        var mHasVal = typeof(Point?).GetProperty("HasValue").GetGetMethod();
+                        var lblTrue = il.DefineLabel();
+                        var lblPopFalse = il.DefineLabel();
+                        var lblFalse = il.DefineLabel();
+
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Isinst, _tZombie);
+                        il.Emit(OpCodes.Stloc, locZ);
+                        il.Emit(OpCodes.Ldloc, locZ);
+                        il.Emit(OpCodes.Brfalse, lblFalse);
+                        il.Emit(OpCodes.Ldloc, locZ);
+                        il.Emit(OpCodes.Callvirt, mAtkCC);
+                        il.Emit(OpCodes.Brtrue, lblTrue);
+                        il.Emit(OpCodes.Ldloc, locZ);
+                        il.Emit(OpCodes.Callvirt, mGetBehComp);
+                        il.Emit(OpCodes.Dup);
+                        il.Emit(OpCodes.Brfalse, lblPopFalse);
+                        il.Emit(OpCodes.Callvirt, mGetBeh);
+                        il.Emit(OpCodes.Dup);
+                        il.Emit(OpCodes.Brfalse, lblPopFalse);
+                        il.Emit(OpCodes.Callvirt, mGetData);
+                        il.Emit(OpCodes.Dup);
+                        il.Emit(OpCodes.Brfalse, lblPopFalse);
+                        il.Emit(OpCodes.Callvirt, mGetCellAct);
+                        il.Emit(OpCodes.Stloc, locCa);
+                        il.Emit(OpCodes.Ldloca, locCa);
+                        il.Emit(OpCodes.Call, mHasVal);
+                        il.Emit(OpCodes.Ret);
+                        il.MarkLabel(lblTrue);
+                        il.Emit(OpCodes.Ldc_I4_1);
+                        il.Emit(OpCodes.Ret);
+                        il.MarkLabel(lblPopFalse);
+                        il.Emit(OpCodes.Pop);
+                        il.MarkLabel(lblFalse);
+                        il.Emit(OpCodes.Ldc_I4_0);
+                        il.Emit(OpCodes.Ret);
+                        _hasZombieWallCheckCond = (Func<DXEntity, bool>)dm.CreateDelegate(typeof(Func<DXEntity, bool>));
+                    }
+                    // 13. TryGetMovableTargetPointF
+                    {
+                        var dm = new DynamicMethod("TABCoop_Perc_MovTarget", typeof(bool),
+                            new[] { typeof(DXEntity), typeof(PointF).MakeByRefType() }, typeof(PrecomputedPerceptionManager).Module, true);
+                        var il = dm.GetILGenerator();
+                        var locMov = il.DeclareLocal(tMov);
+                        var locTp = il.DeclareLocal(typeof(PointF?));
+                        var locNc = il.DeclareLocal(typeof(Point?));
+                        var mPfHasVal = typeof(PointF?).GetProperty("HasValue").GetGetMethod();
+                        var mPfVal = typeof(PointF?).GetProperty("Value").GetGetMethod();
+                        var mPtHasVal = typeof(Point?).GetProperty("HasValue").GetGetMethod();
+                        var mPtVal = typeof(Point?).GetProperty("Value").GetGetMethod();
+                        var mCellCenter = typeof(DXWorldGrid).GetMethod("PointFromCell_Center", new[] { typeof(Point) });
+                        var lblPopFalse = il.DefineLabel();
+                        var lblFalse = il.DefineLabel();
+                        var lblUseCell = il.DefineLabel();
+
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Isinst, _tZXEntity);
+                        il.Emit(OpCodes.Dup);
+                        il.Emit(OpCodes.Brfalse, lblPopFalse);
+                        il.Emit(OpCodes.Callvirt, mGetMov);
+                        il.Emit(OpCodes.Stloc, locMov);
+                        il.Emit(OpCodes.Ldloc, locMov);
+                        il.Emit(OpCodes.Brfalse, lblFalse);
+                        il.Emit(OpCodes.Ldloc, locMov);
+                        il.Emit(OpCodes.Callvirt, mGetTargetPos);
+                        il.Emit(OpCodes.Stloc, locTp);
+                        il.Emit(OpCodes.Ldloca, locTp);
+                        il.Emit(OpCodes.Call, mPfHasVal);
+                        il.Emit(OpCodes.Brfalse, lblFalse);
+                        il.Emit(OpCodes.Ldloc, locMov);
+                        il.Emit(OpCodes.Callvirt, mNextCell);
+                        il.Emit(OpCodes.Stloc, locNc);
+                        il.Emit(OpCodes.Ldloca, locNc);
+                        il.Emit(OpCodes.Call, mPtHasVal);
+                        il.Emit(OpCodes.Brtrue, lblUseCell);
+
+                        il.Emit(OpCodes.Ldarg_1);
+                        il.Emit(OpCodes.Ldloca, locTp);
+                        il.Emit(OpCodes.Call, mPfVal);
+                        il.Emit(OpCodes.Stobj, typeof(PointF));
+                        il.Emit(OpCodes.Ldc_I4_1);
+                        il.Emit(OpCodes.Ret);
+
+                        il.MarkLabel(lblUseCell);
+                        il.Emit(OpCodes.Ldarg_1);
+                        il.Emit(OpCodes.Ldloca, locNc);
+                        il.Emit(OpCodes.Call, mPtVal);
+                        il.Emit(OpCodes.Call, mCellCenter);
+                        il.Emit(OpCodes.Stobj, typeof(PointF));
+                        il.Emit(OpCodes.Ldc_I4_1);
+                        il.Emit(OpCodes.Ret);
+
+                        il.MarkLabel(lblPopFalse);
+                        il.Emit(OpCodes.Pop);
+                        il.MarkLabel(lblFalse);
+                        il.Emit(OpCodes.Ldc_I4_0);
+                        il.Emit(OpCodes.Ret);
+                        _tryGetMovableTargetPointF = (TryGetMovableTargetDel)dm.CreateDelegate(typeof(TryGetMovableTargetDel));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[Perception] EnsureMeta failed (Stage 4D fallback to vanilla): {ex.Message}");
+                    _getWatcher = null;
+                }
+                finally
+                {
+                    _metaInit = true;
+                }
+            }
+        }
+
+        internal static void Invalidate()
+        {
+            _watchWindowActive = false;
+            _builtSimTick = -1;
+            _builtLevel = null;
+            _snapCount = 0;
+            _midTickDirtyCount = 0;
+            _allMidTickDirty = false;
+            _curTickNonSkippedWatchCalls = 0;
+            _prevTickNonSkippedWatchCalls = 0;
+            _demandPrecomputeActive = false;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static void RecordNonSkippedWatchCall()
+        {
+            _curTickNonSkippedWatchCalls++;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static void EndWatchWindow()
+        {
+            _watchWindowActive = false;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static void NotifyEntityGridOrMaskMutated(DXEntity e)
+        {
+            if (!_watchWindowActive || e == null || _tZombie == null || _tZXEntity == null)
+                return;
+            if (_tZombie.IsInstanceOfType(e) || !_tZXEntity.IsInstanceOfType(e))
+                return;
+            if (_allMidTickDirty) return;
+
+            int minX, minY, maxX, maxY;
+            if (e.IsOneCellSize)
+            {
+                Point cell = _getRawCell != null ? _getRawCell(e) : e.Cell;
+                minX = maxX = cell.X;
+                minY = maxY = cell.Y;
+            }
+            else
+            {
+                Rectangle area = e.CellArea;
+                minX = area.Left;
+                minY = area.Top;
+                maxX = area.Right - 1;
+                maxY = area.Bottom - 1;
+            }
+            AddDirtyBox(minX, minY, maxX, maxY);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static void NotifyPointMutated(DXEntity e, PointF newPos)
+        {
+            if (!_watchWindowActive || e == null || _tZombie == null || _tZXEntity == null)
+                return;
+            if (_tZombie.IsInstanceOfType(e) || !_tZXEntity.IsInstanceOfType(e))
+                return;
+            if (_allMidTickDirty) return;
+
+            Point newCell = DXWorldGrid.CellFromPoint(newPos);
+            if (e.IsOneCellSize)
+            {
+                AddDirtyBox(newCell.X, newCell.Y, newCell.X, newCell.Y);
+            }
+            else
+            {
+                int w = Math.Max(1, (int)Math.Ceiling(e.Width));
+                int h = Math.Max(1, (int)Math.Ceiling(e.Height));
+                AddDirtyBox(newCell.X - w, newCell.Y - h, newCell.X + w, newCell.Y + h);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void AddDirtyBox(int minX, int minY, int maxX, int maxY)
+        {
+            int idx = _midTickDirtyCount;
+            if (idx >= MaxExactDirtyBoxes)
+            {
+                _allMidTickDirty = true;
+                return;
+            }
+            _midTickDirtyBoxes[idx] = new DirtyCellBox { MinX = minX, MinY = minY, MaxX = maxX, MaxY = maxY };
+            _midTickDirtyCount = idx + 1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsMidTickDirtyNear(int cellX, int cellY, float watchRange)
+        {
+            if (_allMidTickDirty) return true;
+            int count = _midTickDirtyCount;
+            if (count == 0) return false;
+            int rPad = (int)Math.Ceiling(watchRange) + 4;
+            for (int i = 0; i < count; i++)
+            {
+                DirtyCellBox b = _midTickDirtyBoxes[i];
+                if (cellX >= b.MinX - rPad && cellX <= b.MaxX + rPad && cellY >= b.MinY - rPad && cellY <= b.MaxY + rPad)
+                    return true;
+            }
+            return false;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static DXEntity ResolveWatcherOutcome(
+            object watcher, DXEntity entity, DXEntity cand, bool canJump, out bool earlyNullReturn)
+        {
+            if (cand != null)
+            {
+                DXObject so = cand.SceneObject;
+                if (so == null || so.Scene == null || !_isLifeAlive(cand))
+                {
+                    earlyNullReturn = true;
+                    return null;
+                }
+                earlyNullReturn = false;
+                if (!canJump && !entity.Position.InRange(cand.Position, 0.5f))
+                {
+                    // Initialize and clear [ThreadStatic] _CurrentEntitiesAtCellList before FirstEntityAtCellArea
+                    // (vanilla DXWorldGrid.FirstEntityAtCellArea omits InitThreadStaticEntitiesAtCellList).
+                    DXWorldGrid.EntitiesAtCell(-1, -1);
+                    DXEntity blocker = _callGetBlockerWall(watcher, cand.Position, (int)entity.Width + 3);
+                    if (blocker != null)
+                        return blocker;
+                }
+                return cand;
+            }
+            earlyNullReturn = false;
+            return null;
+        }
+
+        internal static void PrecomputeForTick(DXGame game)
+        {
+            _prevTickNonSkippedWatchCalls = _curTickNonSkippedWatchCalls;
+            _curTickNonSkippedWatchCalls = 0;
+            if (_demandPrecomputeActive)
+            {
+                if (_prevTickNonSkippedWatchCalls < DemandDeactivateThreshold)
+                    _demandPrecomputeActive = false;
+            }
+            else if (_prevTickNonSkippedWatchCalls >= DemandActivateThreshold)
+            {
+                _demandPrecomputeActive = true;
+            }
+
+            _midTickDirtyCount = 0;
+            _allMidTickDirty = false;
+            _watchWindowActive = false;
+
+            if (!_demandPrecomputeActive || Testing.TestHarnessConfig.DisablePerceptionPrecompute || game == null || LockstepClock.LoadingLevel)
+            {
+                _builtSimTick = -1;
+                return;
+            }
+
+            EnsureMeta();
+
+            int workers = Testing.TestHarnessConfig.ParallelWorkers;
+            if (workers <= 1 || _getWatcher == null || !ActiveUpdateEntityManager.TryGetActiveSnapshot(out List<DXEntity> active, out int count))
+            {
+                _builtSimTick = -1;
+                return;
+            }
+
+            var level = DXLevel.Current;
+            if (level == null || !ZombieWatcherCoarseGrid.IsReadyForCurrentTick() || count <= 0)
+            {
+                _builtSimTick = -1;
+                return;
+            }
+
+            if (_entries.Length < count)
+            {
+                int newCap = Math.Max(count, _entries.Length * 2);
+                _entries = new PrecomputedEntry[newCap];
+            }
+
+            int simTick = game.IAIterationInt;
+            bool samplePerf = DeterministicSandboxPatches.DiagPerfSamplingActive;
+            long t0 = samplePerf ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+            long builtCount = 0;
+
+            if (workers > 8) workers = 8;
+            int chunkCount = count < 512 ? 1 : Math.Min(workers * 4, 32);
+
+            if (chunkCount <= 1)
+            {
+                builtCount = PrecomputeRange(active, 0, count, simTick);
+            }
+            else
+            {
+                Parallel.For(0, chunkCount, new ParallelOptions { MaxDegreeOfParallelism = workers }, chunk =>
+                {
+                    int start = (int)(((long)count * chunk) / chunkCount);
+                    int end = (int)(((long)count * (chunk + 1)) / chunkCount);
+                    if (start < end)
+                    {
+                        long c = PrecomputeRange(active, start, end, simTick);
+                        if (samplePerf && c != 0)
+                            Interlocked.Add(ref builtCount, c);
+                    }
+                });
+            }
+
+            _snapCount = count;
+            _builtSimTick = simTick;
+            _builtLevel = level;
+            _watchWindowActive = true;
+
+            if (samplePerf)
+            {
+                DeterministicSandboxPatches.DiagTickPrecompTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+                DeterministicSandboxPatches.DiagTickPrecompBuilt += builtCount;
+            }
+        }
+
+        private static long PrecomputeRange(List<DXEntity> active, int start, int end, int simTick)
+        {
+            long built = 0;
+            PrecomputedEntry[] entries = _entries;
+            Type tZombie = _tZombie;
+
+            for (int i = start; i < end; i++)
+            {
+                DXEntity e = active[i];
+                if (e == null || e.Disposed || (e.Flags & DXEntity.DXEntityFlags.FreeingToPool) != 0 || !tZombie.IsInstanceOfType(e))
+                    continue;
+
+                object watcher = _getWatcher(e);
+                if (watcher == null || _getWatcherMask(watcher) != 0x8000u)
+                    continue;
+
+                if (_getWatcherWasAttacked(watcher))
+                    continue;
+
+                if (!_getWatcherConfig(e, out float watchRangeBase, out bool canJump, out bool canAvoidOverkill, out int priority, out object atkCmd, out int rangeBonus))
+                    continue;
+                if (canAvoidOverkill || priority != 0)
+                    continue;
+
+                DXEntity prevTarget = _getWatcherTarget(watcher);
+                Point rawCell = _getRawCell(e);
+                float watchRange = watchRangeBase + rangeBonus;
+                if (prevTarget == null && ZombieWatcherCoarseGrid.IsAreaEmptyAroundZombie(rawCell.X, rawCell.Y, watchRange))
+                    continue;
+
+                if (!_isLifeAlive(e))
+                    continue;
+
+                float actionRange = watchRange;
+                float minDist = 0f;
+                uint opaqueMask = 2u;
+                if (atkCmd != null && _getAtkCmdParams(atkCmd, out float actRangeBase, out float cmdMinDist, out bool thruWalls))
+                {
+                    float r = actRangeBase + rangeBonus;
+                    if (r < actionRange) actionRange = r;
+                    minDist = cmdMinDist > 0f ? cmdMinDist : 0f;
+                    if (!thruWalls) opaqueMask = 6146u;
+                }
+
+                PointF pos = e.Position;
+                DXEntity candFalse = DXWorldGrid.GetNearestVisibleEntityAtPoint(pos, watchRange, 0x8000u, opaqueMask, minDist);
+                DXEntity resFalse = ResolveWatcherOutcome(watcher, e, candFalse, canJump, out bool earlyNullFalse);
+
+                DXEntity resTrue;
+                bool earlyNullTrue;
+                if (actionRange < watchRange && candFalse != null)
+                {
+                    DXEntity candTrue = DXWorldGrid.GetNearestVisibleEntityAtPoint(pos, actionRange, 0x8000u, opaqueMask, minDist);
+                    resTrue = ResolveWatcherOutcome(watcher, e, candTrue, canJump, out earlyNullTrue);
+                }
+                else
+                {
+                    resTrue = resFalse;
+                    earlyNullTrue = earlyNullFalse;
+                }
+
+                entries[i] = new PrecomputedEntry
+                {
+                    SimTick = simTick,
+                    Watcher = watcher,
+                    SnapPos = pos,
+                    SnapCell = rawCell,
+                    SnapPrevTarget = prevTarget,
+                    SnapAttackCmd = atkCmd,
+                    SnapRangeBonus = rangeBonus,
+                    WatchRange = watchRange,
+                    CanJump = canJump,
+                    EarlyNullReturnFalse = earlyNullFalse,
+                    EarlyNullReturnTrue = earlyNullTrue,
+                    TargetFalse = resFalse,
+                    TargetTrue = resTrue
+                };
+                built++;
+            }
+            return built;
+        }
+
+        internal static bool TryApplyPrecomputed(object watcher, bool onlyActionRange)
+        {
+            if (!_watchWindowActive || _getCompEntity == null || _tZombie == null)
+                return false;
+
+            var game = DXGame.Current;
+            var level = DXLevel.Current;
+            if (game == null || level == null || !ReferenceEquals(_builtLevel, level) || _builtSimTick != game.IAIterationInt)
+                return false;
+
+            DXEntity entity = _getCompEntity(watcher);
+            if (entity == null || entity.Disposed || (entity.Flags & DXEntity.DXEntityFlags.FreeingToPool) != 0 || !_tZombie.IsInstanceOfType(entity))
+                return false;
+
+            if (!ActiveUpdateEntityManager.TryGetSlot(entity, out int slot) || (uint)slot >= (uint)_snapCount)
+                return false;
+
+            ref PrecomputedEntry entry = ref _entries[slot];
+            if (entry.SimTick != game.IAIterationInt || !ReferenceEquals(entry.Watcher, watcher))
+                return false;
+
+            if (_getWatcherMask(watcher) != 0x8000u || _getWatcherWasAttacked(watcher))
+                return false;
+
+            Point rawCell = _getRawCell(entity);
+            PointF curPos = entity.Position;
+            if (curPos.X != entry.SnapPos.X || curPos.Y != entry.SnapPos.Y || rawCell.X != entry.SnapCell.X || rawCell.Y != entry.SnapCell.Y)
+                return false;
+
+            if (!_getWatcherConfig(entity, out _, out bool curCanJump, out bool curCanAvoid, out int curPrio, out object curAtkCmd, out int curRangeBonus))
+                return false;
+            if (curCanAvoid || curPrio != 0 || curCanJump != entry.CanJump || curRangeBonus != entry.SnapRangeBonus || !ReferenceEquals(curAtkCmd, entry.SnapAttackCmd))
+                return false;
+
+            DXEntity curPrev = _getWatcherTarget(watcher);
+            if (!ReferenceEquals(curPrev, entry.SnapPrevTarget))
+                return false;
+
+            if (IsMidTickDirtyNear(rawCell.X, rawCell.Y, entry.WatchRange))
+                return false;
+
+            bool earlyNull = onlyActionRange ? entry.EarlyNullReturnTrue : entry.EarlyNullReturnFalse;
+            if (earlyNull)
+            {
+                _setWatcherTarget(watcher, null);
+                return true;
+            }
+
+            DXEntity target = onlyActionRange ? entry.TargetTrue : entry.TargetFalse;
+            if (target != null)
+            {
+                DXObject so = target.SceneObject;
+                if (target.Disposed || so == null || so.Scene == null || !_isLifeAlive(target))
+                    return false;
+
+                _setWatcherTarget(watcher, target);
+                _setWatcherWasAttacked(watcher, false);
+                return true;
+            }
+
+            _setWatcherTarget(watcher, null);
+            _setWatcherWasAttacked(watcher, false);
+            if (!entry.CanJump)
+            {
+                if (curPrev != null && _tWall.IsInstanceOfType(curPrev) && _isLifeAlive(curPrev))
+                {
+                    _setWatcherTarget(watcher, curPrev);
+                    return true;
+                }
+                if (_hasZombieWallCheckCond(entity) && _tryGetMovableTargetPointF(entity, out PointF targetPt))
+                {
+                    DXWorldGrid.EntitiesAtCell(-1, -1);
+                    DXEntity blocker = _callGetBlockerWall(watcher, targetPt, 1);
+                    if (blocker != null)
+                        _setWatcherTarget(watcher, blocker);
+                }
+            }
+            return true;
+        }
+    }
+
+    [HarmonyPatch]
+    public static class PrecomputedWatcherPatch
+    {
+        public static MethodBase TargetMethod()
+        {
+            var t = Core.GameBridge.GameAssembly?.GetType(Core.ObfuscatedSymbols.Type_CEntityWatcher);
+            return t != null ? AccessTools.Method(t, Core.ObfuscatedSymbols.Method_CEntityWatcher_UpdateWatch, new[] { typeof(bool) }) : null;
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.Low)]
+        public static bool Prefix(object __instance, bool __0, out long __state)
+        {
+            bool detActive = LockstepClock.IsDeterministicModeActive && !LockstepClock.LoadingLevel;
+            if (detActive)
+                PrecomputedPerceptionManager.RecordNonSkippedWatchCall();
+
+            bool samplePerf = detActive && DeterministicSandboxPatches.DiagPerfSamplingActive;
+            __state = samplePerf ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+
+            if (!detActive)
+                return true;
+
+            if (PrecomputedPerceptionManager.TryApplyPrecomputed(__instance, __0))
+            {
+                if (samplePerf)
+                    DeterministicSandboxPatches.DiagTickWatcherPrecompHits++;
+                return false;
+            }
+            // Ensure [ThreadStatic] _CurrentEntitiesAtCellList is non-null and cleared before vanilla UpdateWatch -> FirstEntityAtCellArea.
+            DXWorldGrid.EntitiesAtCell(-1, -1);
+            return true;
+        }
+
+        [HarmonyPostfix]
+        public static void Postfix(long __state)
+        {
+            if (__state != 0L && DeterministicSandboxPatches.DiagPerfSamplingActive)
+            {
+                DeterministicSandboxPatches.DiagTickWatcherTicks += System.Diagnostics.Stopwatch.GetTimestamp() - __state;
+                DeterministicSandboxPatches.DiagTickWatcherCalls++;
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(DXEntity), nameof(DXEntity.OnPoolFree))]
+    public static class PerceptionOnPoolFreePatch
+    {
+        [HarmonyPrefix]
+        public static void Prefix(DXEntity __instance)
+        {
+            if (PrecomputedPerceptionManager.InWatchWindow)
+                PrecomputedPerceptionManager.NotifyEntityGridOrMaskMutated(__instance);
+        }
+    }
+
+    [HarmonyPatch]
+    public static class PerceptionLevelEntityDiedPatch
+    {
+        public static MethodBase TargetMethod()
+        {
+            var t = Core.GameBridge.GameAssembly?.GetType("ZX.ZXLevelState");
+            return t != null ? AccessTools.Method(t, "#=zmGjBHwC$KPGs", new[] { typeof(DXEntity) }) : null;
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix(DXEntity __0)
+        {
+            if (PrecomputedPerceptionManager.InWatchWindow)
+                PrecomputedPerceptionManager.NotifyEntityGridOrMaskMutated(__0);
+        }
+    }
+
+    [HarmonyPatch(typeof(DXWorldGrid), "SetNewCellFor", new[] { typeof(DXEntity) })]
+    public static class PerceptionSetNewCellPatch
+    {
+        [HarmonyPrefix]
+        public static void Prefix(DXEntity __0)
+        {
+            if (PrecomputedPerceptionManager.InWatchWindow)
+                PrecomputedPerceptionManager.NotifyEntityGridOrMaskMutated(__0);
+        }
+    }
+
+    [HarmonyPatch(typeof(DXEntity), nameof(DXEntity.Position), MethodType.Setter)]
+    public static class PerceptionEntitySetPositionPatch
+    {
+        [HarmonyPrefix]
+        public static void Prefix(DXEntity __instance, PointF __0)
+        {
+            if (LockstepClock.IsDeterministicModeActive && __instance != null && __instance.Position != __0)
+            {
+                if (LockstepClock.LogicTickActive && (__instance._BodyCategoryMask & ZombieWatcherCoarseGrid.WatchInterestMask) != 0u)
+                    ZombieWatcherCoarseGrid.OnEntityPositionChanging(__instance, __0);
+                if (PrecomputedPerceptionManager.InWatchWindow)
+                {
+                    PrecomputedPerceptionManager.NotifyEntityGridOrMaskMutated(__instance);
+                    PrecomputedPerceptionManager.NotifyPointMutated(__instance, __0);
+                }
+            }
         }
     }
 }

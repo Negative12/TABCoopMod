@@ -87,7 +87,7 @@ function Place-NearCc {
     $beforeList = (Invoke-Control $Port "list_entities" @{ typeContains = $shortType; onlyPlayer = $true; limit = 100 }).entities
     $beforeIds = @{}
     foreach ($be in $beforeList) { $beforeIds[$be.id] = $true }
-    $spot = Invoke-Control $Port "find_build_spot" @{ buildingType = $BuildingType; cx = $Cx; cy = $Cy; sizeW = $SizeW; sizeH = $SizeH; maxRadius = 28 }
+    $spot = Invoke-Control $Port "find_build_spot" @{ buildingType = $BuildingType; cx = $Cx; cy = $Cy; sizeW = $SizeW; sizeH = $SizeH; maxRadius = 36 }
     if ($spot -and $spot.found) {
         $useW = if ($spot.PSObject.Properties["sizeW"]) { [int]$spot.sizeW } else { $SizeW }
         $useH = if ($spot.PSObject.Properties["sizeH"]) { [int]$spot.sizeH } else { $SizeH }

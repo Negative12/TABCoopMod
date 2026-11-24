@@ -811,8 +811,11 @@ namespace TABCoopMod.Patches
 
         static void Postfix(object __instance)
         {
-            if (!MultiWaveSwarmContext.IsActive || __instance == null) return;
-            MultiWaveSwarmContext.EndTrigger(__instance);
+            if (__instance == null) return;
+            if (MultiWaveSwarmContext.IsActive)
+                MultiWaveSwarmContext.EndTrigger(__instance);
+            if (GameBridge.IsLevelEventAllInfectedToCC(__instance))
+                GameBridge.PrewarmFinalSwarmMapZombiesParallel();
         }
     }
 
@@ -831,6 +834,7 @@ namespace TABCoopMod.Patches
 
         internal struct UpdateState
         {
+            public bool HasSpawnCheck;
             public int PrevBufCount;
             public List<ReqSnapshot> Snapshots;
         }
@@ -847,28 +851,40 @@ namespace TABCoopMod.Patches
         static void Prefix(object __instance, out UpdateState __state)
         {
             __state = default(UpdateState);
-            if (!MultiWaveSwarmContext.IsActive || __instance == null || _fieldSpawnBuffer == null || _propRequests == null)
+            if (__instance == null || _fieldSpawnBuffer == null)
+                return;
+
+            bool multiWaveActive = MultiWaveSwarmContext.IsActive;
+            bool wantPrewarm = Determinism.LockstepClock.IsDeterministicModeActive;
+            if (!multiWaveActive && !wantPrewarm)
                 return;
 
             try
             {
                 var buf = _fieldSpawnBuffer.GetValue(__instance) as List<DXEntity>;
-                var reqs = _propRequests.GetValue(__instance) as IList;
-                if (buf == null || reqs == null || reqs.Count == 0)
-                    return;
+                if (buf == null) return;
 
-                var snaps = new List<ReqSnapshot>(reqs.Count);
-                for (int i = reqs.Count - 1; i >= 0; i--)
+                List<ReqSnapshot> snaps = null;
+                if (multiWaveActive && _propRequests != null)
                 {
-                    object r = reqs[i];
-                    if (r == null) continue;
-                    ulong evId = GameBridge.GetGenerationRequestEventId(r);
-                    int cnt = GameBridge.GetGenerationRequestCount(r);
-                    snaps.Add(new ReqSnapshot { Req = r, EventId = evId, BeforeCount = cnt });
+                    var reqs = _propRequests.GetValue(__instance) as IList;
+                    if (reqs != null && reqs.Count > 0)
+                    {
+                        snaps = new List<ReqSnapshot>(reqs.Count);
+                        for (int i = reqs.Count - 1; i >= 0; i--)
+                        {
+                            object r = reqs[i];
+                            if (r == null) continue;
+                            ulong evId = GameBridge.GetGenerationRequestEventId(r);
+                            int cnt = GameBridge.GetGenerationRequestCount(r);
+                            snaps.Add(new ReqSnapshot { Req = r, EventId = evId, BeforeCount = cnt });
+                        }
+                    }
                 }
 
                 __state = new UpdateState
                 {
+                    HasSpawnCheck = true,
                     PrevBufCount = buf.Count,
                     Snapshots = snaps
                 };
@@ -878,7 +894,7 @@ namespace TABCoopMod.Patches
 
         static void Postfix(object __instance, UpdateState __state)
         {
-            if (__state.Snapshots == null || __instance == null || _fieldSpawnBuffer == null)
+            if (!__state.HasSpawnCheck || __instance == null || _fieldSpawnBuffer == null)
                 return;
 
             try
@@ -887,26 +903,78 @@ namespace TABCoopMod.Patches
                 if (buf == null || buf.Count <= __state.PrevBufCount)
                     return;
 
-                int cursor = __state.PrevBufCount;
-                for (int i = 0; i < __state.Snapshots.Count && cursor < buf.Count; i++)
+                if (__state.Snapshots != null)
                 {
-                    var snap = __state.Snapshots[i];
-                    int afterCount = GameBridge.GetGenerationRequestCount(snap.Req);
-                    int spawned = snap.BeforeCount - afterCount;
-                    if (spawned <= 0) continue;
-
-                    byte targetPid = FactionOwnershipTracker.GetSubSwarmEventTarget(snap.EventId);
-                    int end = Math.Min(buf.Count, cursor + spawned);
-                    if (targetPid != 0)
+                    int cursor = __state.PrevBufCount;
+                    for (int i = 0; i < __state.Snapshots.Count && cursor < buf.Count; i++)
                     {
-                        for (int k = cursor; k < end; k++)
+                        var snap = __state.Snapshots[i];
+                        int afterCount = GameBridge.GetGenerationRequestCount(snap.Req);
+                        int spawned = snap.BeforeCount - afterCount;
+                        if (spawned <= 0) continue;
+
+                        byte targetPid = FactionOwnershipTracker.GetSubSwarmEventTarget(snap.EventId);
+                        int end = Math.Min(buf.Count, cursor + spawned);
+                        if (targetPid != 0)
                         {
-                            var z = buf[k];
-                            if (z != null && z.ID != 0UL)
-                                FactionOwnershipTracker.SetZombieSwarmTarget(z.ID, targetPid);
+                            for (int k = cursor; k < end; k++)
+                            {
+                                var z = buf[k];
+                                if (z != null && z.ID != 0UL)
+                                    FactionOwnershipTracker.SetZombieSwarmTarget(z.ID, targetPid);
+                            }
                         }
+                        cursor = end;
                     }
-                    cursor = end;
+                }
+
+                // Proactively pre-solve unique 2x2-clustered A* paths for spawned attack-wave
+                // zombies in parallel before DXGame.InvokeOnStartFrame -> AddToScene triggers CMovable.
+                int spawnedTotal = buf.Count - __state.PrevBufCount;
+                if (spawnedTotal >= 4 && Determinism.LockstepClock.IsDeterministicModeActive)
+                {
+                    bool isMultiFaction = CoopSessionManager.IsMultiFactionActive
+                        || (FactionOwnershipTracker.IsInitialized && FactionOwnershipTracker.ActivePlayerCount >= 2);
+                    DXEntity sharedCc = isMultiFaction ? null : GameBridge.GetCommandCenterEntity();
+                    Point sharedCcCell = sharedCc != null && !sharedCc.Disposed ? sharedCc.Cell : Point.Empty;
+                    bool hasSharedCc = sharedCc != null && !sharedCc.Disposed;
+
+                    var batch = new List<Determinism.DeterministicPathfindingPatch.PathPrewarmItem>(spawnedTotal);
+                    for (int k = __state.PrevBufCount; k < buf.Count; k++)
+                    {
+                        var z = buf[k];
+                        if (z == null || z.Disposed) continue;
+                        if (!GameBridge.GetUnitAttackCommandCenter(z)) continue;
+
+                        Point endCell;
+                        if (isMultiFaction)
+                        {
+                            var cc = FactionOwnershipTracker.PickTargetCommandCenterForZombie(z, splitDistantById: true);
+                            if (cc == null || cc.Disposed) continue;
+                            endCell = cc.Cell;
+                        }
+                        else
+                        {
+                            if (!hasSharedCc) continue;
+                            endCell = sharedCcCell;
+                        }
+
+                        int cs = (int)Math.Ceiling(2f * z.Radius);
+                        if (cs < 1) cs = 1;
+                        else if (cs > 3) cs = 3;
+
+                        uint mask = GameBridge.GetEntityPathfindingMask(z);
+                        batch.Add(new Determinism.DeterministicPathfindingPatch.PathPrewarmItem
+                        {
+                            CellSize = cs,
+                            Start = z.Cell,
+                            End = endCell,
+                            Mask = mask,
+                            MaxNodes = null
+                        });
+                    }
+                    if (batch.Count >= 4)
+                        Determinism.DeterministicPathfindingPatch.PrewarmUniquePathsParallel(batch);
                 }
             }
             catch (Exception ex)

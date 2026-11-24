@@ -64,6 +64,21 @@ namespace TABCoopMod.Testing
         /// <summary>Worker count for Two-Phase deterministic parallel physics/pathfinding (TABCOOP_PARALLEL_WORKERS).</summary>
         public static int ParallelWorkers { get; private set; } = 1;
 
+        /// <summary>Makes all CommandCenters immune to damage/infection for FinalSwarm stress tests (TABCOOP_CC_INVULN=1).</summary>
+        public static bool InvulnerableCommandCenters { get; private set; }
+
+        /// <summary>Forces continuous [Perf] sampling every 60 ticks even when frame time &lt;= 45ms (TABCOOP_PERF_DIAG=1).</summary>
+        public static bool ForcePerfDiag { get; private set; }
+
+        /// <summary>Enables full deterministic multicore sandbox on standalone loads without Coop/ReplayVerifier (TABCOOP_DET_SOLO=1).</summary>
+        public static bool SoloDeterministicMode { get; private set; }
+
+        /// <summary>Enables deterministic adaptive Chipmunk2D solver iterations (TABCOOP_ADAPTIVE_PHYS_ITER=1).</summary>
+        public static bool AdaptivePhysicsIterations { get; private set; }
+
+        /// <summary>Disables Stage 4D two-phase CEntityWatcher perception precomputation (TABCOOP_DISABLE_PERCEPTION=1).</summary>
+        public static bool DisablePerceptionPrecompute { get; private set; }
+
         /// <summary>True when the MCP control server is enabled (TABCOOP_CONTROL_PORT set).</summary>
         public static bool ControlEnabled => ControlPort > 0;
 
@@ -101,6 +116,11 @@ namespace TABCoopMod.Testing
             SimExtraTickMs = Math.Max(0, ParseInt(Env("TABCOOP_SIM_EXTRA_TICK_MS"), 0));
             int defaultWorkers = Math.Min(4, Math.Max(1, Environment.ProcessorCount));
             ParallelWorkers = Math.Max(1, Math.Min(8, ParseInt(Env("TABCOOP_PARALLEL_WORKERS"), defaultWorkers)));
+            InvulnerableCommandCenters = Env("TABCOOP_CC_INVULN") == "1";
+            ForcePerfDiag = Env("TABCOOP_PERF_DIAG") == "1";
+            SoloDeterministicMode = Env("TABCOOP_DET_SOLO") == "1";
+            AdaptivePhysicsIterations = Env("TABCOOP_ADAPTIVE_PHYS_ITER") == "1";
+            DisablePerceptionPrecompute = Env("TABCOOP_DISABLE_PERCEPTION") == "1";
 
             string logDir = null;
             try { logDir = Path.GetDirectoryName(ModLogger.LogFilePath); } catch { }

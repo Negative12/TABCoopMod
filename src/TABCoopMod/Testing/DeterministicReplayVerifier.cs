@@ -52,7 +52,7 @@ namespace TABCoopMod.Testing
 
         public static void Begin()
         {
-            if (!TestHarnessConfig.Enabled || string.IsNullOrEmpty(TestHarnessConfig.ReplaySave) || _phase != Phase.Idle)
+            if (!TestHarnessConfig.Enabled || TestHarnessConfig.SoloDeterministicMode || string.IsNullOrEmpty(TestHarnessConfig.ReplaySave) || _phase != Phase.Idle)
                 return;
 
             // Co-op host/client sessions also auto-load a save, but must not run the single-process
@@ -82,7 +82,7 @@ namespace TABCoopMod.Testing
         /// </summary>
         public static void PrepareForLoad()
         {
-            if (!TestHarnessConfig.Enabled) return;
+            if (!TestHarnessConfig.Enabled || TestHarnessConfig.SoloDeterministicMode) return;
             try
             {
                 if (!Sync.CoopSessionManager.IsSessionActive)

@@ -228,6 +228,9 @@ namespace TABCoopMod.Sync
             }
         }
 
+        [ThreadStatic]
+        internal static bool IsLoadingOwnerState;
+
         public static void FlushActiveOwnerFromLevelState()
         {
             if (_activeLevelStateOwner < 1 || _activeLevelStateOwner > 3) return;
@@ -243,11 +246,45 @@ namespace TABCoopMod.Sync
                     ledger.OwnEnergyNeeded = raw.EnergyNeeded;
                 }
             }
-            ledger.ShowFullMap = GameBridge.GetLevelStateShowFullMap();
+            bool curShowFullMap = GameBridge.GetLevelStateShowFullMap();
+            if (curShowFullMap && !ledger.ShowFullMap)
+            {
+                // ShowFullMap is global via shared ZXSystemMapLayers fog: propagate any vanilla trigger
+                // (FinalSwarm ShowAllMap / Telescope) across all faction ledgers so PopContext() never reverts it.
+                for (byte p = 1; p <= 3; p++)
+                {
+                    if (_factions[p] != null)
+                        _factions[p].ShowFullMap = true;
+                }
+            }
+            ledger.ShowFullMap = curShowFullMap;
             var bonus = GameBridge.GetLevelBonusTemplatesDict();
             if (bonus != null) ledger.BonusEntityTemplates = bonus;
             var techs = GameBridge.GetLevelOnlyOneCommandsDict();
             if (techs != null) ledger.OnlyOneExecutedCommands = techs;
+        }
+
+        internal static void OnNativeShowFullMapSet(bool value)
+        {
+            if (IsLoadingOwnerState || Determinism.LockstepClock.LoadingLevel || !value)
+                return;
+
+            if (CoopSessionManager.IsMultiFactionActive && IsInitialized)
+            {
+                for (byte p = 1; p <= 3; p++)
+                {
+                    if (_factions[p] != null)
+                        _factions[p].ShowFullMap = true;
+                }
+            }
+
+            if (Determinism.LockstepClock.IsDeterministicModeActive)
+            {
+                // Apply FogEnabled/ShadowEnabled synchronously on the deterministic simulation tick rather than
+                // waiting for each peer's asynchronous OnStartFrame render loop (prevents ZXBehaviour watch interval drift).
+                GameBridge.SetFogEnabled(false);
+                GameBridge.SetShadowEnabled(false);
+            }
         }
 
         private static void LoadOwnerIntoLevelState(byte playerId)
@@ -256,11 +293,19 @@ namespace TABCoopMod.Sync
             var ledger = _factions[playerId];
             if (ledger == null) return;
 
-            GameBridge.WriteRawLevelEconomyState(in ledger.Economy);
-            GameBridge.SetLevelStateShowFullMap(ledger.ShowFullMap);
-            GameBridge.SetLevelBonusTemplatesDict(ledger.BonusEntityTemplates);
-            GameBridge.SetLevelOnlyOneCommandsDict(ledger.OnlyOneExecutedCommands);
-            _activeLevelStateOwner = playerId;
+            IsLoadingOwnerState = true;
+            try
+            {
+                GameBridge.WriteRawLevelEconomyState(in ledger.Economy);
+                GameBridge.SetLevelStateShowFullMap(ledger.ShowFullMap);
+                GameBridge.SetLevelBonusTemplatesDict(ledger.BonusEntityTemplates);
+                GameBridge.SetLevelOnlyOneCommandsDict(ledger.OnlyOneExecutedCommands);
+                _activeLevelStateOwner = playerId;
+            }
+            finally
+            {
+                IsLoadingOwnerState = false;
+            }
         }
 
         /// <summary>

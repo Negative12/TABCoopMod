@@ -160,8 +160,8 @@ namespace TABCoopMod.Sync
 
         private static string EffectiveResyncMode =>
             string.IsNullOrEmpty(TestHarnessConfig.ResyncMode) ? "async_align" : TestHarnessConfig.ResyncMode.ToLowerInvariant();
-        private static bool IsStrictMode => EffectiveResyncMode == "strict";
-        private static bool EnableAsyncPosAlign => EffectiveResyncMode == "async_align";
+        internal static bool IsStrictMode => EffectiveResyncMode == "strict";
+        internal static bool EnableAsyncPosAlign => EffectiveResyncMode == "async_align";
         private static double AutoResyncCooldownMs =>
             TestHarnessConfig.ResyncCooldownMs > 0
                 ? TestHarnessConfig.ResyncCooldownMs
@@ -387,6 +387,7 @@ namespace TABCoopMod.Sync
             public List<StructSampleMeta> StructBuilds;
             public List<ulong> StructDestroys;
             public Dictionary<ulong, DynamicTargetSample> TargetFixes;
+            public HashSet<ulong> DriftedPosIds15;
             public List<DynamicSpawnSample> DynamicSpawns;
         }
 
@@ -442,7 +443,9 @@ namespace TABCoopMod.Sync
             new Dictionary<int, PosSyncReceiveBuffer>();
 
         private const byte SessionStartProtoFlag_CompactBinary = 1 << 0;
+        private const byte SessionStartProtoFlag_AdaptivePhysIter = 1 << 1;
         private static bool _useCompactWireProtocol;
+        public static bool SyncedAdaptivePhysicsIterations { get; private set; }
         private static PointF _lastSentCursorWorldPos = new PointF(-9999f, -9999f);
         private static RectangleF _lastSentCamArea = RectangleF.Empty;
         private static double _lastCursorCamPacketMs = -100000.0;
@@ -1503,13 +1506,16 @@ namespace TABCoopMod.Sync
             int startTick = DXGame.Current?.IAIterationInt ?? 0;
             long idCounter = LockstepClock.CurrentSyncedEntityIdCounter;
             _useCompactWireProtocol = true;
+            SyncedAdaptivePhysicsIterations = TestHarnessConfig.AdaptivePhysicsIterations;
+            byte protoFlags = (byte)(SessionStartProtoFlag_CompactBinary
+                | (SyncedAdaptivePhysicsIterations ? SessionStartProtoFlag_AdaptivePhysIter : 0));
             Transport.Broadcast(SendChannel.ReliableCommand, PacketType.SessionStart, w =>
             {
                 w.Write(startTick);
                 w.Write(CurrentSessionSeed);
                 w.Write(idCounter);
                 w.Write((byte)InputDelayTicks);
-                w.Write(SessionStartProtoFlag_CompactBinary);
+                w.Write(protoFlags);
             });
             ModLogger.InfoImmediate($"[CoopSessionManager] Host+Client barrier satisfied; entered synced level and sent SessionStart at tick={startTick}, seed={CurrentSessionSeed}, inputDelay={InputDelayTicks}!");
         }
@@ -1624,7 +1630,10 @@ namespace TABCoopMod.Sync
             RoomPhase = LobbyRoomPhase.InGame;
             HostActionHint = string.Empty;
             if (Transport.IsHost)
+            {
+                SyncedAdaptivePhysicsIterations = TestHarnessConfig.AdaptivePhysicsIterations;
                 BroadcastLobbyRoster();
+            }
             LobbyStateChanged?.Invoke();
 
             // The save loader leaves DXGame.Paused/GameSpeed at 0; clear it so engine animations and
@@ -2952,6 +2961,7 @@ namespace TABCoopMod.Sync
                     byte protoFlags = r.BaseStream.Position < r.BaseStream.Length ? r.ReadByte() : (byte)0;
                     ResetSyncTrackingState();
                     _useCompactWireProtocol = (protoFlags & SessionStartProtoFlag_CompactBinary) != 0;
+                    SyncedAdaptivePhysicsIterations = (protoFlags & SessionStartProtoFlag_AdaptivePhysIter) != 0;
                     InputDelayTicks = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, (int)hostDelay));
                     EnterSyncedLevel();
                     ModLogger.InfoImmediate($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, inputDelay={InputDelayTicks}, compact={_useCompactWireProtocol}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
@@ -3953,7 +3963,7 @@ namespace TABCoopMod.Sync
                             applyPosCorrection: EnableAsyncPosAlign,
                             bucketMask: ComputeDiffBucketMask(in host, in client),
                             includeStatic: false,
-                            includeTargetMeta: EnableAsyncPosAlign);
+                            includeTargetMeta: false);
                     }
                     continue;
                 }
@@ -4022,7 +4032,7 @@ namespace TABCoopMod.Sync
                             applyPosCorrection: EnableAsyncPosAlign,
                             bucketMask: ComputeDiffBucketMask(in host, in client),
                             includeStatic: false,
-                            includeTargetMeta: EnableAsyncPosAlign);
+                            includeTargetMeta: EnableAsyncPosAlign && (softAggroDrift || coarsePosDiff));
                     }
                 }
             }
@@ -4252,17 +4262,35 @@ namespace TABCoopMod.Sync
                     }
                 }
 
-                // Phase 3A: Align combat/move targets for non-snapped dynamic entities (alerted zombies / desynced AI units)
+                // Phase 3A: Align combat targets ONLY for non-snapped dynamic entities where Host holds
+                // an active TargetEntityId != 0UL. Never overwrite CMovable.TargetPosition here (alignMoveTarget: false),
+                // because Phase 2D left e.Position unsnapped (dist < minThreshold) and rewinding waypoints 15-40 ticks
+                // into the past clears active paths and amplifies sub-threshold position drift.
                 if (item.TargetFixes != null && item.TargetFixes.Count > 0 && game != null)
                 {
                     foreach (var kv in item.TargetFixes)
                     {
                         if (targetAlignedIds != null && targetAlignedIds.Contains(kv.Key)) continue;
+                        if (kv.Value.TargetEntityId == 0UL) continue;
+                        if (_lastEntityPosCorrectedTick.TryGetValue(kv.Key, out int prevCorrTick))
+                        {
+                            int elapsedTicks = item.Tick - prevCorrTick;
+                            if (elapsedTicks >= 0 && elapsedTicks < EntityPosRealignCooldownTicks)
+                                continue;
+                        }
+
+                        bool posDrifted = item.DriftedPosIds15 != null && item.DriftedPosIds15.Contains(kv.Key);
                         DXEntity e = game.GetEntityByID(kv.Key);
                         if (e == null || e.Disposed || e.PhysicalType != DXBodyType.Dynamic) continue;
                         if (TryGetActiveUnitOwner(e.ID, item.Tick, e, out byte ownerId) && ownerId == localPid)
                             continue;
-                        if (GameBridge.TryAlignEntityCombatAndMoveTarget(e, kv.Value.TargetEntityId, kv.Value.MoveX, kv.Value.MoveY))
+                        if (GameBridge.TryAlignEntityCombatAndMoveTarget(
+                                e,
+                                kv.Value.TargetEntityId,
+                                kv.Value.MoveX,
+                                kv.Value.MoveY,
+                                alignMoveTarget: false,
+                                onlyIfLocalIdle: !posDrifted))
                             targetAligned++;
                     }
                 }
@@ -4456,7 +4484,20 @@ namespace TABCoopMod.Sync
             Dictionary<ulong, StructSampleMeta> structMetaMap = null;
             Dictionary<ulong, DynamicTargetSample> targetMetaMap = null;
             Dictionary<ulong, DynamicSpawnMeta> spawnMetaMap = null;
-            if (includeStructMeta || includeTargetMeta || includeSpawnMeta)
+            bool needMainLoopForMeta = includeStructMeta || includeSpawnMeta;
+            bool needFallbackTargetScan = false;
+            if (includeTargetMeta && !needMainLoopForMeta)
+            {
+                for (int i = 0; i < filtered.Count; i++)
+                {
+                    if (filtered[i].IsDynamic && !filtered[i].HasTargetMeta)
+                    {
+                        needFallbackTargetScan = true;
+                        break;
+                    }
+                }
+            }
+            if (needMainLoopForMeta || needFallbackTargetScan)
             {
                 var game = DXGame.Current;
                 if (game != null)
@@ -4464,10 +4505,16 @@ namespace TABCoopMod.Sync
                     for (int i = 0; i < filtered.Count; i++)
                     {
                         var s = filtered[i];
+                        bool wantStruct = includeStructMeta && s.IsStructure;
+                        bool wantSpawn = includeSpawnMeta && s.IsDynamic;
+                        bool wantFallbackTarget = includeTargetMeta && s.IsDynamic && !s.HasTargetMeta;
+                        if (!wantStruct && !wantSpawn && !wantFallbackTarget)
+                            continue;
+
                         DXEntity ent = game.GetEntityByID(s.Id);
                         if (ent == null || ent.Disposed) continue;
 
-                        if (includeStructMeta && s.IsStructure)
+                        if (wantStruct)
                         {
                             if (GameBridge.TryCaptureStructureMeta(ent, out ulong tplId, out int cx, out int cy, out byte w, out byte h, out float bf))
                             {
@@ -4487,7 +4534,7 @@ namespace TABCoopMod.Sync
                             }
                         }
 
-                        if (includeTargetMeta && s.IsDynamic)
+                        if (wantFallbackTarget)
                         {
                             GameBridge.GetEntityCombatAndMoveTargets(ent, out ulong tgtId, out float mx, out float my);
                             if (tgtId != 0 || !float.IsNaN(mx) || !GameBridge.IsZombieType(ent.GetType()))
@@ -4503,7 +4550,7 @@ namespace TABCoopMod.Sync
                             }
                         }
 
-                        if (includeSpawnMeta && s.IsDynamic)
+                        if (wantSpawn)
                         {
                             if (GameBridge.TryCaptureDynamicSpawnMeta(ent, out ulong dTplId, out byte teamRaw, out ulong dTgtId))
                             {
@@ -4523,19 +4570,7 @@ namespace TABCoopMod.Sync
             }
 
             bool hasStructMeta = includeStructMeta && structMetaMap != null && structMetaMap.Count > 0;
-            bool hasTargetMeta = includeTargetMeta && targetMetaMap != null && targetMetaMap.Count > 0;
             bool hasSpawnMeta = includeSpawnMeta && spawnMetaMap != null && spawnMetaMap.Count > 0;
-
-            ushort sentMask = effectiveMask;
-            byte flags = (byte)(
-                (applyLifeCorrection ? 1 : 0)
-                | (applyPosCorrection ? 2 : 0)
-                | (wantStatic ? 4 : 0)
-                | (hasEcon ? 8 : 0)
-                | (hasProd ? 16 : 0)
-                | (hasStructMeta ? 32 : 0)
-                | (hasTargetMeta ? 64 : 0)
-                | (hasSpawnMeta ? 128 : 0));
             bool useCompactV2 = _useCompactWireProtocol;
             int seq = ++_posSyncSeq;
             Task.Run(() =>
@@ -4543,6 +4578,39 @@ namespace TABCoopMod.Sync
                 try
                 {
                     if (gen != _asyncGeneration) return;
+
+                    if (includeTargetMeta)
+                    {
+                        for (int i = 0; i < filtered.Count; i++)
+                        {
+                            var fs = filtered[i];
+                            if (!fs.IsDynamic || !fs.HasTargetMeta) continue;
+                            if (fs.TargetEntityId != 0UL || !float.IsNaN(fs.MoveX) || !fs.IsZombie)
+                            {
+                                if (targetMetaMap == null)
+                                    targetMetaMap = new Dictionary<ulong, DynamicTargetSample>(64);
+                                targetMetaMap[fs.Id] = new DynamicTargetSample
+                                {
+                                    Id = fs.Id,
+                                    TargetEntityId = fs.TargetEntityId,
+                                    MoveX = fs.MoveX,
+                                    MoveY = fs.MoveY
+                                };
+                            }
+                        }
+                    }
+
+                    bool hasTargetMeta = includeTargetMeta && targetMetaMap != null && targetMetaMap.Count > 0;
+                    ushort sentMask = effectiveMask;
+                    byte flags = (byte)(
+                        (applyLifeCorrection ? 1 : 0)
+                        | (applyPosCorrection ? 2 : 0)
+                        | (wantStatic ? 4 : 0)
+                        | (hasEcon ? 8 : 0)
+                        | (hasProd ? 16 : 0)
+                        | (hasStructMeta ? 32 : 0)
+                        | (hasTargetMeta ? 64 : 0)
+                        | (hasSpawnMeta ? 128 : 0));
 
                     byte[] compressed;
                     if (useCompactV2)
@@ -5154,6 +5222,7 @@ namespace TABCoopMod.Sync
                     ulong hostMaxId = 0;
                     double sumSq = 0.0;
                     List<EntityDeltaFix> deltas = apply ? new List<EntityDeltaFix>(64) : null;
+                    HashSet<ulong> driftedPosIds15 = (apply && flagHasTargetMeta) ? new HashSet<ulong>() : null;
                     List<EntityLifeFix> lifeFixes = effectiveApplyLife ? new List<EntityLifeFix>(64) : null;
                     var hostIds = new HashSet<ulong>();
                     var hostSampleMap = (flagHasSpawnMeta || flagHasStructMeta)
@@ -5202,6 +5271,8 @@ namespace TABCoopMod.Sync
                             maxDeltaId = hs.Id;
                         }
 
+                        if (driftedPosIds15 != null && dist >= 0.15f)
+                            driftedPosIds15.Add(hs.Id);
                         if (apply && dist >= MinAsyncPosSnapCells && dist <= MaxAsyncNudgeCells)
                             deltas.Add(new EntityDeltaFix { Id = hs.Id, Dx = dx, Dy = dy });
                     }
@@ -5385,6 +5456,7 @@ namespace TABCoopMod.Sync
                         StructBuilds = structBuilds,
                         StructDestroys = structDestroys,
                         TargetFixes = (apply && flagHasTargetMeta) ? hostTargetMetas : null,
+                        DriftedPosIds15 = driftedPosIds15,
                         DynamicSpawns = dynamicSpawns
                     });
                 }

@@ -23,7 +23,8 @@ namespace TABCoopMod.Commands
         MayorVoteOrSelect = 8,   // Mayor selection (0 = left male, 1 = right female)
         TransferResource = 9,    // Market-unlocked ally resource transfer (20% fee, 0% with CoopMayor_ZeroTransferFee)
         WonderContribute = 10,   // Functional Wonder 2-phase crowdfunding contribution
-        WonderWithdraw = 11      // Functional Wonder 2-phase crowdfunding withdrawal (while funding phase open)
+        WonderWithdraw = 11,     // Functional Wonder 2-phase crowdfunding withdrawal (while funding phase open)
+        TestTriggerFinalSwarm = 12 // Test-harness synced FinalSwarm wave trigger for multiplayer benchmarks
     }
 
     /// <summary>
@@ -406,6 +407,7 @@ namespace TABCoopMod.Commands
             byte prevPlayerId = ActiveCommandPlayerId;
             bool swappedLevelSysCc = false;
             DXEntity prevLevelSysCc = null;
+            bool pushedRngScope = false;
             object suspendedBuildCursor = GameBridge.SuspendLocalBuildCursorEnergyPreview();
             IsReplayingCommand = true;
             ActiveCommandPlayerId = netCmd.PlayerId;
@@ -416,6 +418,14 @@ namespace TABCoopMod.Commands
                     || netCmd.Type == NetCommandType.CancelCurrentOrder
                     || netCmd.Type == NetCommandType.CancelQueuedOrder);
             LockstepClock.InDeterministicContext = true;
+            if (LockstepClock.IsDeterministicModeActive)
+            {
+                ulong cmdScopeId = netCmd.ExecutorEntityIds != null && netCmd.ExecutorEntityIds.Length > 0 && netCmd.ExecutorEntityIds[0] != 0UL
+                    ? netCmd.ExecutorEntityIds[0]
+                    : (0x434D440000000000UL | ((ulong)unchecked((uint)netCmd.CommandId) << 8) | netCmd.PlayerId);
+                LockstepClock.PushRngScope(cmdScopeId, LockstepClock.RngDomainTag.CommandReplay);
+                pushedRngScope = true;
+            }
 
             if (TABCoopMod.Sync.CoopSessionManager.IsMultiFactionActive && netCmd.PlayerId > 0)
             {
@@ -566,6 +576,10 @@ namespace TABCoopMod.Commands
                             TABCoopMod.Sync.WonderCrowdfundManager.TryWithdraw(netCmd.PlayerId, wKind, resKind, netCmd.CommandId);
                         }
                         break;
+
+                    case NetCommandType.TestTriggerFinalSwarm:
+                        GameBridge.TriggerFinalSwarmEvents(out _, out _);
+                        break;
                 }
             }
             catch (Exception ex)
@@ -588,6 +602,9 @@ namespace TABCoopMod.Commands
 
                 if (swappedLevelSysCc)
                     GameBridge.SetLevelSysCurrentCommandCenter(prevLevelSysCc);
+
+                if (pushedRngScope)
+                    LockstepClock.PopRngScope();
 
                 ActiveCommandPlayerId = prevPlayerId;
                 LockstepClock.InDeterministicContext = prevDet;
@@ -663,8 +680,8 @@ namespace TABCoopMod.Commands
             // 1. Assign distributed target positions to each unit's CCommandable.Target
             GameBridge.AssignGroupMoveTargets(entities, cmd, netCmd.TargetPosition);
 
-            // Two-Phase Parallel A* pre-warm for bulk unit group moves/attack-moves.
-            if (entitiesForExecution.Count >= 4 && TABCoopMod.Testing.TestHarnessConfig.ParallelWorkers > 1)
+            // Two-Phase deterministic A* pre-warm for bulk unit group moves/attack-moves.
+            if (entitiesForExecution.Count >= 4)
             {
                 var batch = new List<DeterministicPathfindingPatch.PathPrewarmItem>(entitiesForExecution.Count);
                 for (int i = 0; i < entitiesForExecution.Count; i++)

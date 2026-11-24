@@ -87,12 +87,18 @@ namespace TABCoopMod.Determinism
             [HarmonyPrefix]
             public static bool Prefix(int __0, int __1, Action<int, int> __2)
             {
-                if (!Active) return true;
+                if (!LockstepClock.IsDeterministicModeActive) return true;
+
+                bool inPhysThread = LockstepClock.InPhysicsStep && LockstepClock.IsPhysicsThreadActive();
+                if (!inPhysThread && !LockstepClock.InMapDrawer)
+                    return true;
+
                 if (!LockstepClock.InPhysicsStep)
                 {
                     __2(__0, __1);
                     return false;
                 }
+
                 bool samplePerf = DeterministicSandboxPatches.DiagPerfSamplingActive;
                 long t0 = samplePerf ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                 if (LockstepClock.InPhysicsReadback && LockstepClock.TryRunMergedPhysicsReadbackAndQuantize(__0, __1))
@@ -101,7 +107,26 @@ namespace TABCoopMod.Determinism
                         DeterministicSandboxPatches.DiagPhysFor2Ticks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
                     return false;
                 }
-                __2(__0, __1);
+
+                // Physics Loop 1 (StartUpdatePhysics): replace ~164 small ThreadPool closures (step=200)
+                // with coarse static chunks matching ParallelWorkers (1 = sequential, >1 = fixed W slices).
+                int total = __1 - __0;
+                int workers = Testing.TestHarnessConfig.ParallelWorkers;
+                if (workers > 1 && total >= 512 && !LockstepClock.InPhysicsReadback)
+                {
+                    if (workers > 8) workers = 8;
+                    System.Threading.Tasks.Parallel.For(0, workers, w =>
+                    {
+                        int a = __0 + (int)(((long)total * w) / workers);
+                        int b = __0 + (int)(((long)total * (w + 1)) / workers);
+                        if (a < b) __2(a, b);
+                    });
+                }
+                else
+                {
+                    __2(__0, __1);
+                }
+
                 if (samplePerf)
                 {
                     long dt = System.Diagnostics.Stopwatch.GetTimestamp() - t0;

@@ -40,6 +40,11 @@ namespace TABCoopMod.Determinism
             public int Life;
             public bool IsDynamic;
             public bool IsStructure;
+            public bool HasTargetMeta;
+            public bool IsZombie;
+            public ulong TargetEntityId;
+            public float MoveX;
+            public float MoveY;
         }
 
         public struct ProdQueueSample
@@ -86,8 +91,9 @@ namespace TABCoopMod.Determinism
             public ulong[] EntityBuckets;
             public List<EntityPosSample> DynamicPositions;
             public List<ProdQueueSample> ProdQueues;
+            public bool SampleTargetMeta;
 
-            public void Reset(bool allocateBuckets, List<EntityPosSample> dynamicOut, List<ProdQueueSample> prodQueuesOut = null)
+            public void Reset(bool allocateBuckets, List<EntityPosSample> dynamicOut, List<ProdQueueSample> prodQueuesOut = null, bool sampleTargetMeta = false)
             {
                 EntityCount = 0;
                 ProjectileCount = 0;
@@ -104,6 +110,7 @@ namespace TABCoopMod.Determinism
                 EntityBuckets = allocateBuckets ? new ulong[BucketCount] : null;
                 DynamicPositions = dynamicOut;
                 ProdQueues = prodQueuesOut;
+                SampleTargetMeta = sampleTargetMeta;
             }
         }
 
@@ -149,7 +156,16 @@ namespace TABCoopMod.Determinism
                 {
                     if (slot != 0)
                         return false;
-                    _acc.Reset(allocateBuckets: true, dynamicOut: new List<EntityPosSample>(2048), prodQueuesOut: new List<ProdQueueSample>(16));
+                    bool sampleTargets = Sync.CoopSessionManager.IsInSyncedLevel
+                        && !Sync.CoopSessionManager.IsStrictMode
+                        && Sync.CoopSessionManager.EnableAsyncPosAlign
+                        && Sync.CoopSessionManager.Transport != null
+                        && Sync.CoopSessionManager.Transport.IsHost;
+                    _acc.Reset(
+                        allocateBuckets: true,
+                        dynamicOut: new List<EntityPosSample>(2048),
+                        prodQueuesOut: new List<ProdQueueSample>(16),
+                        sampleTargetMeta: sampleTargets);
                     PartitionEntitiesForEpoch(game);
                     _inEpoch = true;
                 }
@@ -293,10 +309,32 @@ namespace TABCoopMod.Determinism
 
             bool isDynamic = entity.PhysicalType == DXBodyType.Dynamic;
             bool isStructure = (flags & FlagStructure) != 0;
-            // Dynamic bodies carry position + HP for async alignment; static structures / HP entities
-            // are sampled too so host-authoritative HP and static structure correction cover them.
+            bool isZombie = (flags & FlagZombie) != 0;
+            // Dynamic bodies carry position + HP (and amortized host target metadata) for async alignment;
+            // static structures / HP entities are sampled too so host-authoritative HP and static structure correction cover them.
             if (acc.DynamicPositions != null && (isDynamic || isStructure || lifeValue > 0))
-                acc.DynamicPositions.Add(new EntityPosSample { Id = entity.ID, X = px, Y = py, Life = lifeValue, IsDynamic = isDynamic, IsStructure = isStructure });
+            {
+                bool hasTgt = isDynamic && acc.SampleTargetMeta;
+                ulong targetId = 0UL;
+                float moveX = float.NaN;
+                float moveY = float.NaN;
+                if (hasTgt)
+                    GameBridge.GetEntityCombatAndMoveTargets(entity, out targetId, out moveX, out moveY);
+                acc.DynamicPositions.Add(new EntityPosSample
+                {
+                    Id = entity.ID,
+                    X = px,
+                    Y = py,
+                    Life = lifeValue,
+                    IsDynamic = isDynamic,
+                    IsStructure = isStructure,
+                    HasTargetMeta = hasTgt,
+                    IsZombie = isZombie,
+                    TargetEntityId = targetId,
+                    MoveX = moveX,
+                    MoveY = moveY
+                });
+            }
 
             int bucketIdx = (int)(entity.ID & (ulong)(BucketCount - 1));
             long posMix = (long)entity.ID ^ (qx * 73856093L) ^ (qy * 19349663L);

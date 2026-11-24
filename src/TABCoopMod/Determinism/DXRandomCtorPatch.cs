@@ -93,10 +93,19 @@ namespace TABCoopMod.Determinism
             EnsureInitGenrand();
             if (_initGenrand == null) return true;
 
-            long n = IsSimConstruction()
-                ? Interlocked.Increment(ref _seedCounter)
-                : Interlocked.Increment(ref _nonSimSeedCounter);
-            uint seed = unchecked((uint)(LockstepClock.SyncedRandomSeed + (uint)(n * 2654435761L)));
+            bool isSim = IsSimConstruction();
+            uint seed;
+            if (isSim && LockstepClock.TryNextScopedRandomUInt(out uint scopedSeed))
+            {
+                seed = scopedSeed;
+            }
+            else
+            {
+                long n = isSim
+                    ? Interlocked.Increment(ref _seedCounter)
+                    : Interlocked.Increment(ref _nonSimSeedCounter);
+                seed = unchecked((uint)(LockstepClock.SyncedRandomSeed + (uint)(n * 2654435761L)));
+            }
             try
             {
                 if (_fastInitGenrand != null)

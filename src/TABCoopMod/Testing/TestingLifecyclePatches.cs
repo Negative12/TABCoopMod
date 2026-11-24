@@ -424,4 +424,78 @@ namespace TABCoopMod.Testing
             return SlimDX.Direct3D9.Texture.FromFile(device, fileName);
         }
     }
+
+    /// <summary>
+    /// Opt-in test/benchmark helper that grants invulnerability to all CommandCenters when enabled
+    /// via TABCOOP_CC_INVULN=1, ControlServer ("set_cc_invuln"), or persisted save ScriptVariables
+    /// ("TABCOOP_CC_INVULN" = "1"). Normal gameplay levels are completely unaffected.
+    /// </summary>
+    public static class CommandCenterInvulnerability
+    {
+        private static volatile bool _runtimeOverride;
+        private static volatile bool _scriptVarFlag;
+
+        public static bool IsActive =>
+            TestHarnessConfig.InvulnerableCommandCenters || _runtimeOverride || _scriptVarFlag;
+
+        public static void SetRuntimeOverride(bool enabled)
+        {
+            _runtimeOverride = enabled;
+        }
+
+        public static void ResetLevelFlag()
+        {
+            _runtimeOverride = false;
+            _scriptVarFlag = false;
+        }
+
+        public static void OnNewLevelLoaded()
+        {
+            _runtimeOverride = false;
+            RefreshFromCurrentLevel();
+        }
+
+        public static void RefreshFromCurrentLevel()
+        {
+            _scriptVarFlag = GameBridge.ReadCommandCenterInvulnerableFlagFromScriptVars();
+            if (IsActive)
+                ModLogger.Info($"[TestHarness] CommandCenter invulnerability active (env={TestHarnessConfig.InvulnerableCommandCenters}, runtime={_runtimeOverride}, saveVar={_scriptVarFlag}).");
+        }
+    }
+
+    [HarmonyPatch]
+    internal static class CommandCenterLifeDamagePatch
+    {
+        private static Type _typeZombieDmgEnum;
+
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            var asm = GameBridge.GameAssembly;
+            var tLife = asm?.GetType("ZX.Components.CLife");
+            if (tLife == null) yield break;
+            _typeZombieDmgEnum = asm.GetType("ZX.ZXDamageType");
+
+            if (_typeZombieDmgEnum != null)
+            {
+                var m1 = AccessTools.Method(tLife, "#=zXdArBkQ=", new[] { typeof(int), typeof(bool), _typeZombieDmgEnum });
+                if (m1 != null) yield return m1;
+            }
+            var m2 = AccessTools.Method(tLife, "#=zi4nTn5pLODUq", new[] { typeof(int), typeof(bool) });
+            if (m2 != null) yield return m2;
+        }
+
+        [HarmonyPrefix]
+        public static bool Prefix(DXComponent __instance, ref bool __result)
+        {
+            if (!CommandCenterInvulnerability.IsActive || __instance == null)
+                return true;
+            var ent = __instance.Entity;
+            if (ent != null && GameBridge.TypeCommandCenter != null && GameBridge.TypeCommandCenter.IsInstanceOfType(ent))
+            {
+                __result = false;
+                return false;
+            }
+            return true;
+        }
+    }
 }

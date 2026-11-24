@@ -145,6 +145,11 @@ namespace TABCoopMod.Core
         public const string Method_ZXEntity_GetLife            = "#=zS6TvFuwF_68l";
         public const string Method_ZXEntity_GetMovable         = "#=zCv3n3xlGOMilHuHlHA==";
         public const string Method_ZXEntity_GetDefaultParams   = "#=zcODCID3ur9P9";
+        public const string Method_ZXEntity_RefreshBodyMask    = "#=zIypU1vOCzKav";
+        public const string Type_CEntityWatcher                = "ZX.Components.CEntityWatcher";
+        public const string Method_CEntityWatcher_UpdateWatch  = "#=zeRH0JCyR0JcPKUO3SQ==";
+        public const string Field_CEntityWatcher_TargetMask    = "#=zQuhHE0hijiPHtz8vfQ==";
+        public const string Field_CEntityWatcher_TargetEntity  = "#=zzHNTi1HK7zWIwekjb$Gg3RtTI7SD";
 
         public const string Method_CCommandable_GetCurrentCmd  = "#=zE83e_h4=";
         public const string Method_CCommandable_SetCurrentCmd  = "#=zQKpiMFU=";

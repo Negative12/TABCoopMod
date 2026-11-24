@@ -178,6 +178,7 @@ namespace TABCoopMod.Core
         private static PropertyInfo _propLevelEventStartTimeH;
         private static PropertyInfo _propLevelEventGameTimeH;
         private static PropertyInfo _propLevelEventFinalSwarm;
+        private static PropertyInfo _propLevelEventAllInfectedToCC;
         private static PropertyInfo _propLevelStateExtraWorkers;
         private static PropertyInfo _propLevelStateExtraFood;
 
@@ -688,6 +689,7 @@ namespace TABCoopMod.Core
                     _propLevelEventStartTimeH = AccessTools.Property(_typeZXLevelEvent, "StartTimeH");
                     _propLevelEventGameTimeH = AccessTools.Property(_typeZXLevelEvent, "GameTimeH");
                     _propLevelEventFinalSwarm = AccessTools.Property(_typeZXLevelEvent, "FinalSwarm");
+                    _propLevelEventAllInfectedToCC = AccessTools.Property(_typeZXLevelEvent, "AllInfectedToCommandCenter");
                     _propLevelEventNTimesTriggered = AccessTools.Property(_typeZXLevelEvent, "NTimesTriggered");
                     _propLevelEventShowCountdown = AccessTools.Property(_typeZXLevelEvent, "ShowCountdown");
                     _propLevelEventMaxRepetitions = AccessTools.Property(_typeZXLevelEvent, "MaxRepetitions");
@@ -1003,6 +1005,7 @@ namespace TABCoopMod.Core
                 Check(_propLevelEventStartTimeH, "ZXLevelEvent.StartTimeH");
                 Check(_propLevelEventGameTimeH, "ZXLevelEvent.GameTimeH");
                 Check(_propLevelEventFinalSwarm, "ZXLevelEvent.FinalSwarm");
+                Check(_propLevelEventAllInfectedToCC, "ZXLevelEvent.AllInfectedToCommandCenter");
                 Check(_propLevelStateExtraWorkers, "ZXLevelState.CommandCenterExtraWorkers");
                 Check(_propLevelStateExtraFood, "ZXLevelState.CommandCenterExtraFood");
                 Check(_methodLevelSysCapturePanorama, "ZXSystemGameLevel.CapturePanorama");
@@ -1247,26 +1250,23 @@ namespace TABCoopMod.Core
         private static Type _mapLayersType;
         private static FieldInfo _mapLayersCurrentField;
         private static PropertyInfo _fogEnabledProp;
+        private static PropertyInfo _shadowEnabledProp;
+
+        private static bool SetMapLayersBoolProperty(ref PropertyInfo propCache, string propName, bool on)
+        {
+            object inst = GetMapLayersInstance();
+            if (inst == null) return false;
+            if (propCache == null)
+                propCache = _mapLayersType.GetProperty(propName, BindingFlags.Public | BindingFlags.Instance);
+            if (propCache == null || !propCache.CanWrite) return false;
+            try { propCache.SetValue(inst, on); return true; } catch { return false; }
+        }
 
         /// <summary>Toggles ZXSystemMapLayers.FogEnabled (the global fog-of-war switch).</summary>
-        public static bool SetFogEnabled(bool on)
-        {
-            if (_mapLayersType == null)
-                _mapLayersType = GameAssembly?.GetType(ObfuscatedSymbols.Type_ZXSystemMapLayers);
-            if (_mapLayersType == null) return false;
+        public static bool SetFogEnabled(bool on) => SetMapLayersBoolProperty(ref _fogEnabledProp, "FogEnabled", on);
 
-            if (_mapLayersCurrentField == null)
-                _mapLayersCurrentField = _mapLayersType.GetField(ObfuscatedSymbols.Field_MapLayers_Current,
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-            object inst = _mapLayersCurrentField?.GetValue(null);
-            if (inst == null) return false;
-
-            if (_fogEnabledProp == null)
-                _fogEnabledProp = _mapLayersType.GetProperty("FogEnabled", BindingFlags.Public | BindingFlags.Instance);
-            if (_fogEnabledProp == null || !_fogEnabledProp.CanWrite) return false;
-
-            try { _fogEnabledProp.SetValue(inst, on); return true; } catch { return false; }
-        }
+        /// <summary>Toggles ZXSystemMapLayers.ShadowEnabled (the global dynamic shadow-of-war switch).</summary>
+        public static bool SetShadowEnabled(bool on) => SetMapLayersBoolProperty(ref _shadowEnabledProp, "ShadowEnabled", on);
 
         /// <summary>
         /// Checks whether <paramref name="key"/> matches the player's currently active game
@@ -1671,6 +1671,8 @@ namespace TABCoopMod.Core
         private static Func<object, int> _fastGetLifeInt;
         private static Type _fastGetOrdersQueuedDeclType;
         private static Func<object, IList> _fastGetOrdersQueued;
+        private delegate void FastGetCombatAndMoveTargetsDelegate(object entity, out ulong targetEntityId, out float moveX, out float moveY);
+        private static FastGetCombatAndMoveTargetsDelegate _fastGetCombatAndMoveTargets;
 
         private static void TryCompileFastCommandDelegates()
         {
@@ -1791,6 +1793,122 @@ namespace TABCoopMod.Core
                     _fastGetOrdersQueued = (Func<object, IList>)dmOrders.CreateDelegate(typeof(Func<object, IList>));
                 }
 
+                if (_mGetEntityBehaviour != null && _mGetEntityMovable != null && _typeBData != null && _fieldBDataTargetRef != null && _propMovableTargetPosProp != null)
+                {
+                    Type tCBeh = _mGetEntityBehaviour.ReturnType;
+                    var mGetBeh = tCBeh?.GetProperty("Behaviour", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod(true);
+                    var mGetData = mGetBeh?.ReturnType?.GetProperty("Data", BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy)?.GetGetMethod(true);
+                    var mGetRefId = _fieldBDataTargetRef.FieldType.GetProperty("IDEntity", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod(true);
+                    var mGetMoveTarget = _propMovableTargetPosProp.GetGetMethod(true);
+                    var mNullHasVal = typeof(PointF?).GetProperty("HasValue")?.GetGetMethod();
+                    var mNullGetVal = typeof(PointF?).GetMethod("GetValueOrDefault", Type.EmptyTypes);
+                    var mPtX = typeof(PointF).GetProperty("X")?.GetGetMethod();
+                    var mPtY = typeof(PointF).GetProperty("Y")?.GetGetMethod();
+
+                    if (mGetBeh != null && mGetData != null && mGetRefId != null && mGetMoveTarget != null
+                        && mNullHasVal != null && mNullGetVal != null && mPtX != null && mPtY != null)
+                    {
+                        var dmTgt = new DynamicMethod(
+                            "TABCoop_FastGetCombatAndMoveTargets",
+                            typeof(void),
+                            new[] { typeof(object), typeof(ulong).MakeByRefType(), typeof(float).MakeByRefType(), typeof(float).MakeByRefType() },
+                            typeof(GameBridge).Module,
+                            skipVisibility: true);
+                        var il = dmTgt.GetILGenerator();
+                        var locZx = il.DeclareLocal(typeof(ZXEntity));
+                        var locCBeh = il.DeclareLocal(tCBeh);
+                        var locBeh = il.DeclareLocal(mGetBeh.ReturnType);
+                        var locBData = il.DeclareLocal(_typeBData);
+                        var locMov = il.DeclareLocal(_mGetEntityMovable.ReturnType);
+                        var locOptPt = il.DeclareLocal(typeof(PointF?));
+                        var locPt = il.DeclareLocal(typeof(PointF));
+                        var lblMovable = il.DefineLabel();
+                        var lblRet = il.DefineLabel();
+
+                        il.Emit(OpCodes.Ldarg_1); il.Emit(OpCodes.Ldc_I4_0); il.Emit(OpCodes.Conv_I8); il.Emit(OpCodes.Stind_I8);
+                        il.Emit(OpCodes.Ldarg_2); il.Emit(OpCodes.Ldc_R4, float.NaN); il.Emit(OpCodes.Stind_R4);
+                        il.Emit(OpCodes.Ldarg_3); il.Emit(OpCodes.Ldc_R4, float.NaN); il.Emit(OpCodes.Stind_R4);
+
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Isinst, typeof(ZXEntity));
+                        il.Emit(OpCodes.Stloc, locZx);
+                        il.Emit(OpCodes.Ldloc, locZx);
+                        il.Emit(OpCodes.Brfalse, lblRet);
+
+                        il.Emit(OpCodes.Ldloc, locZx);
+                        il.Emit(OpCodes.Callvirt, _mGetEntityBehaviour);
+                        il.Emit(OpCodes.Stloc, locCBeh);
+                        il.Emit(OpCodes.Ldloc, locCBeh);
+                        il.Emit(OpCodes.Brfalse, lblMovable);
+
+                        il.Emit(OpCodes.Ldloc, locCBeh);
+                        il.Emit(OpCodes.Callvirt, mGetBeh);
+                        il.Emit(OpCodes.Stloc, locBeh);
+                        il.Emit(OpCodes.Ldloc, locBeh);
+                        il.Emit(OpCodes.Brfalse, lblMovable);
+
+                        il.Emit(OpCodes.Ldloc, locBeh);
+                        il.Emit(OpCodes.Callvirt, mGetData);
+                        if (!_typeBData.IsAssignableFrom(mGetData.ReturnType))
+                            il.Emit(OpCodes.Isinst, _typeBData);
+                        il.Emit(OpCodes.Stloc, locBData);
+                        il.Emit(OpCodes.Ldloc, locBData);
+                        il.Emit(OpCodes.Brfalse, lblMovable);
+
+                        il.Emit(OpCodes.Ldarg_1);
+                        il.Emit(OpCodes.Ldloc, locBData);
+                        if (_fieldBDataTargetRef.FieldType.IsValueType)
+                        {
+                            il.Emit(OpCodes.Ldflda, _fieldBDataTargetRef);
+                            il.Emit(OpCodes.Call, mGetRefId);
+                        }
+                        else
+                        {
+                            il.Emit(OpCodes.Ldfld, _fieldBDataTargetRef);
+                            il.Emit(OpCodes.Dup);
+                            var lblHasRef = il.DefineLabel();
+                            il.Emit(OpCodes.Brtrue, lblHasRef);
+                            il.Emit(OpCodes.Pop);
+                            il.Emit(OpCodes.Pop);
+                            il.Emit(OpCodes.Br, lblMovable);
+                            il.MarkLabel(lblHasRef);
+                            il.Emit(OpCodes.Callvirt, mGetRefId);
+                        }
+                        il.Emit(OpCodes.Stind_I8);
+
+                        il.MarkLabel(lblMovable);
+                        il.Emit(OpCodes.Ldloc, locZx);
+                        il.Emit(OpCodes.Callvirt, _mGetEntityMovable);
+                        il.Emit(OpCodes.Stloc, locMov);
+                        il.Emit(OpCodes.Ldloc, locMov);
+                        il.Emit(OpCodes.Brfalse, lblRet);
+
+                        il.Emit(OpCodes.Ldloc, locMov);
+                        il.Emit(OpCodes.Callvirt, mGetMoveTarget);
+                        il.Emit(OpCodes.Stloc, locOptPt);
+                        il.Emit(OpCodes.Ldloca, locOptPt);
+                        il.Emit(OpCodes.Call, mNullHasVal);
+                        il.Emit(OpCodes.Brfalse, lblRet);
+
+                        il.Emit(OpCodes.Ldloca, locOptPt);
+                        il.Emit(OpCodes.Call, mNullGetVal);
+                        il.Emit(OpCodes.Stloc, locPt);
+                        il.Emit(OpCodes.Ldarg_2);
+                        il.Emit(OpCodes.Ldloca, locPt);
+                        il.Emit(OpCodes.Call, mPtX);
+                        il.Emit(OpCodes.Stind_R4);
+                        il.Emit(OpCodes.Ldarg_3);
+                        il.Emit(OpCodes.Ldloca, locPt);
+                        il.Emit(OpCodes.Call, mPtY);
+                        il.Emit(OpCodes.Stind_R4);
+
+                        il.MarkLabel(lblRet);
+                        il.Emit(OpCodes.Ret);
+
+                        _fastGetCombatAndMoveTargets = (FastGetCombatAndMoveTargetsDelegate)dmTgt.CreateDelegate(typeof(FastGetCombatAndMoveTargetsDelegate));
+                    }
+                }
+
                 ModLogger.Info("[Perf] Compiled DynamicMethods for fast command replay & state hashing.");
             }
             catch (Exception ex)
@@ -1806,6 +1924,7 @@ namespace TABCoopMod.Core
                 _fastGetLifeInt = null;
                 _fastGetOrdersQueuedDeclType = null;
                 _fastGetOrdersQueued = null;
+                _fastGetCombatAndMoveTargets = null;
                 ModLogger.Warn($"[Perf] TryCompileFastCommandDelegates failed (falling back to reflection): {ex.Message}");
             }
         }
@@ -2708,6 +2827,20 @@ namespace TABCoopMod.Core
         /// Computes a deterministic aggro/alert signature for a Zombie entity without touching internal
         /// types at compile time. Returns 0 when idle/roaming so pure micro-physics nudges never trip aggro alerts.
         /// </summary>
+        public static bool GetUnitAttackCommandCenter(DXEntity entity)
+        {
+            if (entity == null || _typeZombie == null || !_typeZombie.IsInstanceOfType(entity))
+                return false;
+            if (!_zombieAggroReflectionInit)
+            {
+                _zombieAggroReflectionInit = true;
+                _propZombieAttackCC = _typeZombie.GetProperty("AttackCommandCenter", BindingFlags.Public | BindingFlags.Instance);
+            }
+            if (_propZombieAttackCC == null) return false;
+            try { return (bool)_propZombieAttackCC.GetValue(entity); }
+            catch { return false; }
+        }
+
         public static long GetZombieAggroSignature(DXEntity entity, out bool isAlerted)
         {
             isAlerted = false;
@@ -3669,6 +3802,12 @@ namespace TABCoopMod.Core
 
         public static void GetEntityCombatAndMoveTargets(DXEntity entity, out ulong targetEntityId, out float moveX, out float moveY)
         {
+            if (_fastGetCombatAndMoveTargets != null && entity != null && !entity.Disposed)
+            {
+                _fastGetCombatAndMoveTargets(entity, out targetEntityId, out moveX, out moveY);
+                return;
+            }
+
             targetEntityId = 0UL;
             moveX = float.NaN;
             moveY = float.NaN;
@@ -3708,19 +3847,31 @@ namespace TABCoopMod.Core
             catch { }
         }
 
-        public static bool TryAlignEntityCombatAndMoveTarget(DXEntity entity, ulong hostTargetId, float hostMoveX, float hostMoveY)
+        public static bool TryAlignEntityCombatAndMoveTarget(
+            DXEntity entity,
+            ulong hostTargetId,
+            float hostMoveX,
+            float hostMoveY,
+            bool alignMoveTarget = true,
+            bool onlyIfLocalIdle = false)
         {
             if (entity == null || entity.Disposed) return false;
             bool changed = false;
             try
             {
                 GetEntityCombatAndMoveTargets(entity, out ulong localTargetId, out float localMoveX, out float localMoveY);
+                if (onlyIfLocalIdle && localTargetId != 0UL)
+                    return false;
+
                 if (localTargetId != hostTargetId)
                 {
                     object bdata = GetBDataFromEntity(entity);
                     if (bdata != null && TrySetEntityTargetRefOnBData(bdata, hostTargetId))
                         changed = true;
                 }
+
+                if (!alignMoveTarget)
+                    return changed;
 
                 bool hostHasMove = !float.IsNaN(hostMoveX) && !float.IsNaN(hostMoveY) && !float.IsInfinity(hostMoveX) && !float.IsInfinity(hostMoveY);
                 bool localHasMove = !float.IsNaN(localMoveX) && !float.IsNaN(localMoveY);
@@ -5523,8 +5674,19 @@ namespace TABCoopMod.Core
                             else if (overrideMultiFaction == true && !Sync.CoopSessionManager.IsSessionActive)
                             {
                                 int pCount = Math.Max(2, Math.Min(3, overridePlayerCount ?? 2));
+                                Sync.CoopSessionManager.ApplySyncedMultiFactionSettings(
+                                    Sync.CoopGameMode.MultiFaction,
+                                    Sync.CoopSessionManager.DefeatRule);
                                 Sync.FactionOwnershipTracker.AssignInitialOwnershipFromLevel(pCount);
+                                Sync.FactionOwnershipTracker.SaveToLevelScriptVariables();
                                 Patches.MultiWaveSwarmContext.Reset();
+                            }
+                            else if (!Sync.CoopSessionManager.IsSessionActive)
+                            {
+                                Sync.CoopSessionManager.ApplySyncedMultiFactionSettings(
+                                    Sync.CoopGameMode.Archon,
+                                    Sync.CoopSessionManager.DefeatRule);
+                                Sync.FactionOwnershipTracker.Reset();
                             }
                         }
                         else
@@ -7644,6 +7806,148 @@ namespace TABCoopMod.Core
         public static DXEntityTemplate GetGenerationRequestTemplate(object req)
         {
             return req != null && _methodGenReqGetTemplate != null ? _methodGenReqGetTemplate.Invoke(req, null) as DXEntityTemplate : null;
+        }
+
+        private const string CcInvulnScriptVarKey = "TABCOOP_CC_INVULN";
+
+        public static bool ReadCommandCenterInvulnerableFlagFromScriptVars()
+        {
+            try
+            {
+                var vars = GetLevelScriptVariables();
+                if (vars == null || !vars.Contains(CcInvulnScriptVarKey)) return false;
+                return string.Equals(vars[CcInvulnScriptVarKey]?.ToString(), "1", StringComparison.Ordinal);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static int SetCommandCenterInvulnerableFlag(bool enabled, bool persistInSave = true)
+        {
+            if (persistInSave)
+            {
+                var vars = GetLevelScriptVariables();
+                if (vars != null)
+                {
+                    if (enabled) vars[CcInvulnScriptVarKey] = "1";
+                    else vars.Remove(CcInvulnScriptVarKey);
+                }
+            }
+
+            Testing.CommandCenterInvulnerability.RefreshFromCurrentLevel();
+            Testing.CommandCenterInvulnerability.SetRuntimeOverride(enabled);
+
+            int count = 0;
+            var ccs = GetAllCommandCenters(aliveOnly: true);
+            for (int i = 0; i < ccs.Count; i++)
+            {
+                var cc = ccs[i];
+                if (cc == null || cc.Disposed) continue;
+                count++;
+                if (enabled) TryCorrectLife(cc, 9999999, forceKill: false);
+            }
+            return count;
+        }
+
+        public static bool IsLevelEventAllInfectedToCC(object levelEvent)
+        {
+            if (levelEvent == null || _propLevelEventAllInfectedToCC == null) return false;
+            try { return (bool)_propLevelEventAllInfectedToCC.GetValue(levelEvent); }
+            catch { return false; }
+        }
+
+        public static void PrewarmFinalSwarmMapZombiesParallel()
+        {
+            if (!Determinism.LockstepClock.IsDeterministicModeActive)
+                return;
+            var game = DXGame.Current;
+            if (game?.Entities == null || _typeZombie == null) return;
+
+            bool isMultiFaction = Sync.CoopSessionManager.IsMultiFactionActive
+                || (Sync.FactionOwnershipTracker.IsInitialized && Sync.FactionOwnershipTracker.ActivePlayerCount >= 2);
+            DXEntity sharedCc = isMultiFaction ? null : GetCommandCenterEntity();
+            bool hasSharedCc = sharedCc != null && !sharedCc.Disposed;
+            Point sharedCcCell = hasSharedCc ? sharedCc.Cell : Point.Empty;
+
+            var batch = new List<Determinism.DeterministicPathfindingPatch.PathPrewarmItem>(4096);
+            foreach (var ent in game.Entities)
+            {
+                if (ent == null || ent.Disposed) continue;
+                if ((ent.ID & 0x8000000000000000UL) != 0UL) continue;
+                if (!_typeZombie.IsInstanceOfType(ent)) continue;
+                if (!GetUnitAttackCommandCenter(ent)) continue;
+
+                Point endCell;
+                if (isMultiFaction)
+                {
+                    var cc = Sync.FactionOwnershipTracker.PickTargetCommandCenterForZombie(ent, splitDistantById: true);
+                    if (cc == null || cc.Disposed) continue;
+                    endCell = cc.Cell;
+                }
+                else
+                {
+                    if (!hasSharedCc) continue;
+                    endCell = sharedCcCell;
+                }
+
+                int cs = (int)Math.Ceiling(2f * ent.Radius);
+                if (cs < 1) cs = 1;
+                else if (cs > 3) cs = 3;
+
+                batch.Add(new Determinism.DeterministicPathfindingPatch.PathPrewarmItem
+                {
+                    CellSize = cs,
+                    Start = ent.Cell,
+                    End = endCell,
+                    Mask = GetEntityPathfindingMask(ent),
+                    MaxNodes = null
+                });
+            }
+
+            if (batch.Count >= 4)
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                Determinism.DeterministicPathfindingPatch.PrewarmUniquePathsParallel(batch);
+                ModLogger.Info($"[Pathfinding] Prewarmed FinalSwarm map zombies in parallel: zombies={batch.Count}, elapsedMs={sw.ElapsedMilliseconds}.");
+            }
+        }
+
+        public static int TriggerFinalSwarmEvents(out int queuedRequests, out int queuedUnits)
+        {
+            queuedRequests = 0;
+            queuedUnits = 0;
+            var events = GetCurrentLevelEvents();
+            var tEvent = GameAssembly?.GetType(ObfuscatedSymbols.Type_ZXLevelEvent);
+            var mTrigger = tEvent != null ? AccessTools.Method(tEvent, ObfuscatedSymbols.Method_LevelEvent_Trigger, Type.EmptyTypes) : null;
+            if (events == null || mTrigger == null) return 0;
+
+            int triggered = 0;
+            foreach (object ev in events)
+            {
+                if (ev == null) continue;
+                IsLevelEventPeriodicSwarm(ev, out bool isFinalSwarm, out _, out _, out _);
+                if (!isFinalSwarm) continue;
+                mTrigger.Invoke(ev, null);
+                triggered++;
+            }
+
+            var allEdgeGens = GetAllEdgeUnitGenerators();
+            if (allEdgeGens != null && allEdgeGens.Count > 0)
+            {
+                var propReqs = AccessTools.Property(allEdgeGens[0].GetType(), "Requests");
+                foreach (object g in allEdgeGens)
+                {
+                    if (propReqs?.GetValue(g) is IList reqs)
+                    {
+                        queuedRequests += reqs.Count;
+                        foreach (object r in reqs)
+                            queuedUnits += GetGenerationRequestCount(r);
+                    }
+                }
+            }
+            return triggered;
         }
     }
 }

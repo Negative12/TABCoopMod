@@ -119,7 +119,8 @@ namespace TABCoopMod.Testing
                         var pending = new PendingRequest { RequestJson = line, Done = new ManualResetEventSlim(false) };
                         _queue.Enqueue(pending);
                         int waitMs = (line.IndexOf("start_survival_gen", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                      line.IndexOf("capture_panorama", StringComparison.OrdinalIgnoreCase) >= 0)
+                                      line.IndexOf("capture_panorama", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                      line.IndexOf("trigger_final_swarm", StringComparison.OrdinalIgnoreCase) >= 0)
                             ? 120000
                             : 10000;
                         if (!pending.Done.Wait(waitMs))
@@ -233,6 +234,12 @@ namespace TABCoopMod.Testing
                     return TestGrantResources(args);
                 case "find_build_spot":
                     return FindBuildSpot(args);
+                case "set_cc_invuln":
+                    return SetCcInvulnTool(args);
+                case "trigger_final_swarm":
+                    return TriggerFinalSwarmTool();
+                case "save_game":
+                    return SaveGameTool(args);
                 default: throw new InvalidOperationException($"unknown tool '{tool}'");
             }
         }
@@ -1242,7 +1249,7 @@ namespace TABCoopMod.Testing
             float cy = GetFloat(args, "cy");
             int w = GetInt(args, "sizeW", 3);
             int h = GetInt(args, "sizeH", 3);
-            int maxR = Math.Max(4, Math.Min(36, GetInt(args, "maxRadius", 28)));
+            int maxR = Math.Max(4, Math.Min(48, GetInt(args, "maxRadius", 28)));
 
             Type bt = GameBridge.GameAssembly?.GetType(typeName);
             if (bt == null) throw new ArgumentException($"unknown building type '{typeName}'");
@@ -1255,7 +1262,7 @@ namespace TABCoopMod.Testing
             var size = new SizeF(w, h);
             for (int r = 4; r <= maxR; r++)
             {
-                int step = r <= 20 ? 1 : 2;
+                int step = r <= 32 ? 1 : 2;
                 for (int dx = -r; dx <= r; dx += step)
                 {
                     for (int dy = -r; dy <= r; dy += step)
@@ -1289,6 +1296,88 @@ namespace TABCoopMod.Testing
         {
             var payload = new Dictionary<string, object> { ["id"] = id, ["ok"] = true, ["result"] = result };
             return _json.Serialize(payload);
+        }
+
+        private static object SetCcInvulnTool(Dictionary<string, object> args)
+        {
+            bool enabled = GetBool(args, "enabled", true);
+            bool persist = GetBool(args, "persistInSave", true);
+            int ccCount = GameBridge.SetCommandCenterInvulnerableFlag(enabled, persist);
+            return new Dictionary<string, object>
+            {
+                ["ok"] = true,
+                ["invulnerable"] = CommandCenterInvulnerability.IsActive,
+                ["persistedInSave"] = persist && GameBridge.ReadCommandCenterInvulnerableFlagFromScriptVars(),
+                ["ccCount"] = ccCount
+            };
+        }
+
+        private static object TriggerFinalSwarmTool()
+        {
+            if (Sync.CoopSessionManager.IsInSyncedLevel)
+            {
+                CommandInterceptor.Dispatch(new NetCommand
+                {
+                    Type = NetCommandType.TestTriggerFinalSwarm,
+                    PlayerId = CommandInterceptor.LocalPlayerId,
+                    TargetSimTick = CurrentTick()
+                });
+                return new Dictionary<string, object>
+                {
+                    ["ok"] = true,
+                    ["mode"] = "lockstep_synced",
+                    ["dispatchedTick"] = CurrentTick()
+                };
+            }
+
+            int triggered = 0;
+            int reqs = 0;
+            int units = 0;
+            if (Determinism.LockstepClock.IsDeterministicModeActive)
+            {
+                Determinism.LockstepClock.RunInDeterministicContext(() =>
+                    triggered = GameBridge.TriggerFinalSwarmEvents(out reqs, out units));
+            }
+            else
+            {
+                triggered = GameBridge.TriggerFinalSwarmEvents(out reqs, out units);
+            }
+            return new Dictionary<string, object>
+            {
+                ["ok"] = triggered > 0,
+                ["mode"] = "direct",
+                ["triggeredEvents"] = triggered,
+                ["queuedRequests"] = reqs,
+                ["queuedUnits"] = units
+            };
+        }
+
+        private static object SaveGameTool(Dictionary<string, object> args)
+        {
+            string name = GetStr(args, "name") ?? "bench_save";
+            foreach (char ch in Path.GetInvalidFileNameChars())
+                name = name.Replace(ch, '_');
+            if (name.EndsWith(".zxsav", StringComparison.OrdinalIgnoreCase))
+                name = name.Substring(0, name.Length - 6);
+
+            string savesDir = GameBridge.GetSavesDirectory();
+            if (string.IsNullOrEmpty(savesDir))
+                throw new InvalidOperationException("Saves directory unavailable");
+            if (!Directory.Exists(savesDir))
+                Directory.CreateDirectory(savesDir);
+
+            string fullPath = Path.Combine(savesDir, name + ".zxsav");
+            if (Sync.FactionOwnershipTracker.IsInitialized && Sync.FactionOwnershipTracker.ActivePlayerCount >= 2)
+                Sync.FactionOwnershipTracker.SaveToLevelScriptVariables();
+
+            GameBridge.WriteSaveFile(fullPath);
+            long size = File.Exists(fullPath) ? new FileInfo(fullPath).Length : 0L;
+            return new Dictionary<string, object>
+            {
+                ["ok"] = size > 0,
+                ["path"] = fullPath,
+                ["sizeBytes"] = size
+            };
         }
 
         private static string ErrorResponse(long id, string message)

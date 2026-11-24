@@ -981,7 +981,7 @@ namespace TABCoopMod.Sync
 
         public static void SaveToLevelScriptVariables()
         {
-            if (!CoopSessionManager.IsMultiFactionActive) return;
+            if (!CoopSessionManager.IsMultiFactionActive && (!IsInitialized || ActivePlayerCount < 2)) return;
             var vars = GameBridge.GetLevelScriptVariables();
             if (vars == null) return;
             byte[] bytes = SerializeToBytes();
