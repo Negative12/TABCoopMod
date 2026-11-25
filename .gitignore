@@ -42,5 +42,6 @@ coop_cam_*.json
 *.zxsav
 *.zxcheck
 
-# Local notes
+# Local notes & video showcase workspace
 .notes/
+video_showcase/

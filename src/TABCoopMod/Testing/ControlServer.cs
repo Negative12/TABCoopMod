@@ -202,6 +202,14 @@ namespace TABCoopMod.Testing
                 case "mayor_select": return SelectMayor(args);
                 case "issue_command": return IssueRawCommand(args);
                 case "screenshot": return TakeScreenshot(args);
+                case "start_recording":
+                    return ScreenshotService.StartRecording(
+                        GetStr(args, "dir"),
+                        GetInt(args, "width", 1440),
+                        GetInt(args, "height", 900),
+                        GetInt(args, "fps", 30));
+                case "stop_recording":
+                    return ScreenshotService.StopRecording();
                 case "get_camera": return GetCamera();
                 case "set_camera": return SetCamera(args);
                 case "reveal_map": return RevealMap(args);
