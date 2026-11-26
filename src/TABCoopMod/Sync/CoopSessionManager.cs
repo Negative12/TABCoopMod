@@ -72,7 +72,10 @@ namespace TABCoopMod.Sync
         public static int LocalChaosJitterMs { get; private set; } = 20;
         public static double LocalChaosLossRate { get; private set; } = 0.02;
         public static bool IsLocalChaosLockedByEnv => TestHarnessConfig.HasChaos;
-        public static bool IsLocalLoopbackSession => UnwrapTransport() is LocalTcpLoopbackTransport;
+        public static bool IsLocalLoopbackSession =>
+            UnwrapTransport() is LocalTcpLoopbackTransport loop && !loop.IsLanMode;
+        public static bool IsLanSession =>
+            UnwrapTransport() is LocalTcpLoopbackTransport lan && lan.IsLanMode;
 
         public static INetworkTransport UnwrapTransport(INetworkTransport transport = null)
         {
@@ -900,7 +903,7 @@ namespace TABCoopMod.Sync
             });
         }
 
-        public static void StartHostSession(bool useLoopback)
+        public static void StartHostSession(bool useLoopback, int lanPort = 0)
         {
             StopSession();
             int seed = RollNewGameSeed();
@@ -909,7 +912,9 @@ namespace TABCoopMod.Sync
             LockstepClock.ResetBehaviourRandom(seed);
 
             LocalTcpLoopbackTransport.HostRoomPhaseProvider = () => (byte)RoomPhase;
-            Transport = CreateTransport(useLoopback);
+            Transport = lanPort > 0
+                ? (INetworkTransport)CreateLanTransport(host: true, port: lanPort)
+                : CreateTransport(useLoopback);
             BindTransportEvents();
             Transport.StartHost(3);
 
@@ -937,11 +942,12 @@ namespace TABCoopMod.Sync
 
             CommandInterceptor.LocalPlayerId = 1;
             CommandInterceptor.OnLocalCommandCaptured = OnLocalCommandCaptured;
-            ModLogger.Info($"[CoopSessionManager] Started Host Session (Mode={(useLoopback ? "LocalLoopback" : "SteamP2P")}, seed={seed}).");
+            string hostMode = lanPort > 0 ? "LanTcp" : (useLoopback ? "LocalLoopback" : "SteamP2P");
+            ModLogger.Info($"[CoopSessionManager] Started Host Session (Mode={hostMode}, seed={seed}).");
             LobbyStateChanged?.Invoke();
         }
 
-        public static void JoinSession(bool useLoopback, string targetAddressOrSteamId)
+        public static void JoinSession(bool useLoopback, string targetAddressOrSteamId, bool lanMode = false)
         {
             StopSession();
             CurrentSessionSeed = SyncSeed;
@@ -949,7 +955,9 @@ namespace TABCoopMod.Sync
             LockstepClock.RequestPostLoadCalibration(CurrentSessionSeed, markLoading: false);
             LockstepClock.ResetBehaviourRandom(CurrentSessionSeed);
 
-            Transport = CreateTransport(useLoopback);
+            Transport = lanMode
+                ? (INetworkTransport)CreateLanTransport(host: false, port: 0)
+                : CreateTransport(useLoopback);
             BindTransportEvents();
             Transport.ConnectToHost(targetAddressOrSteamId);
 
@@ -961,7 +969,8 @@ namespace TABCoopMod.Sync
             FactionOwnershipTracker.Reset();
             HostActionHint = string.Empty;
             CommandInterceptor.OnLocalCommandCaptured = OnLocalCommandCaptured;
-            ModLogger.Info($"[CoopSessionManager] Joining Session at '{targetAddressOrSteamId}' (Mode={(useLoopback ? "LocalLoopback" : "SteamP2P")}).");
+            string joinMode = lanMode ? "LanTcp" : (useLoopback ? "LocalLoopback" : "SteamP2P");
+            ModLogger.Info($"[CoopSessionManager] Joining Session at '{targetAddressOrSteamId}' (Mode={joinMode}).");
             LobbyStateChanged?.Invoke();
         }
 
@@ -1158,6 +1167,17 @@ namespace TABCoopMod.Sync
                 }
             }
             LobbyStateChanged?.Invoke();
+        }
+
+        private static LocalTcpLoopbackTransport CreateLanTransport(bool host, int port)
+        {
+            var transport = new LocalTcpLoopbackTransport
+            {
+                IsLanMode = true,
+                BindAddress = host ? "0.0.0.0" : "127.0.0.1",
+                ListenPort = (host && port > 0 && port <= 65535) ? port : LocalTcpLoopbackTransport.DefaultPort
+            };
+            return transport;
         }
 
         private static INetworkTransport CreateTransport(bool useLoopback)

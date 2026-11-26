@@ -106,6 +106,8 @@ namespace TABCoopMod.UI
         private static DXButton _btnCreateSteam;
         private static DXButton _btnCreateLoopback;
         private static DXTextObject _probeCardText;
+        private static DXButton _btnCreateLan;
+        private static DXButton _btnJoinLan;
         private static DXButton _btnJoinLoopback;
         private static DXButton _btnRefreshProbe;
         private static DXTextObject _entryMessageText;
@@ -160,6 +162,17 @@ namespace TABCoopMod.UI
                     return true;
                 case "join_loopback":
                     JoinLocalRoomClicked();
+                    return true;
+                case "host_lan":
+                    CoopSessionManager.StartHostSession(useLoopback: true, lanPort: LocalTcpLoopbackTransport.DefaultPort);
+                    RefreshUI();
+                    return true;
+                case "join_lan":
+                    CoopSessionManager.JoinSession(
+                        useLoopback: true,
+                        targetAddressOrSteamId: "127.0.0.1:" + LocalTcpLoopbackTransport.DefaultPort,
+                        lanMode: true);
+                    RefreshUI();
                     return true;
                 case "toggle_ready":
                     ClientReadyClicked();
@@ -532,6 +545,19 @@ namespace TABCoopMod.UI
             localDesc.Text = "在 127.0.0.1:27099 开放本地房间，\n支持同机双开及延迟/抖动/丢包网络模拟。";
             _entryView.AddObject(localDesc);
 
+            // LAN / frp TCP room (same wire protocol, host listens on 0.0.0.0).
+            float lanBtnY = localDesc.Y + localDesc.Height + 14f * u;
+            _btnCreateLan = CreateNativeButton("创建局域网房间", padLeft, lanBtnY, 0, CreateLanRoomClicked);
+            _entryView.AddObject(_btnCreateLan);
+
+            var lanDesc = CreateTextBox(padLeft, lanBtnY + _btnCreateLan.Height + 6f * u, leftW - padLeft * 2f, 36f * u,
+                10.5f * u, FontStyle.Regular, Color.Silver, ContentAlignment.TopLeft, Color.Transparent, Color.Transparent, 0f);
+            lanDesc.Text = "监听 0.0.0.0，端口可输入（默认 27099），\n适合局域网或 frp / nps 的 TCP 内网穿透。";
+            _entryView.AddObject(lanDesc);
+
+            _btnJoinLan = CreateNativeButton("加入局域网房间", padLeft, lanDesc.Y + lanDesc.Height + 8f * u, -30, JoinLanRoomClicked);
+            _entryView.AddObject(_btnJoinLan);
+
             // Right column: Probe & Join
             var rightTitle = CreateTextBox(rightX, 0f, rightW, 28f * u, 13.5f * u, FontStyle.Bold, Color.Gold,
                 ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
@@ -865,6 +891,8 @@ namespace TABCoopMod.UI
         {
             GameBridge.SetZXButtonSteamText(_btnCreateSteam, "创建 Steam 房间");
             GameBridge.SetZXButtonSteamText(_btnCreateLoopback, "创建本地测试房间");
+            GameBridge.SetZXButtonSteamText(_btnCreateLan, "创建局域网房间");
+            GameBridge.SetZXButtonSteamText(_btnJoinLan, "加入局域网房间");
 
             var probe = _lastProbe;
             if (probe != null && probe.IsOnline)
@@ -1314,7 +1342,9 @@ namespace TABCoopMod.UI
                 return $"当前玩家: {persona} ({steamTag})   |   状态: 未加入房间";
             }
 
-            string mode = CoopSessionManager.IsLocalLoopbackSession ? "本地回环" : "Steam P2P";
+            string mode = CoopSessionManager.IsLanSession
+                ? "局域网 TCP"
+                : (CoopSessionManager.IsLocalLoopbackSession ? "本地回环" : "Steam P2P");
             var diag = CoopSessionManager.Transport as ITransportDiagnostics;
             string pathText = diag != null ? diag.ActivePathSummary : mode;
             double showRtt = (diag != null && diag.ActiveDirectRttMs > 0.0)
@@ -1371,6 +1401,78 @@ namespace TABCoopMod.UI
                 CoopSessionManager.StopSession();
                 RefreshUI();
             }
+        }
+
+        private static void CreateLanRoomClicked()
+        {
+            _entryStatusMessage = string.Empty;
+            string defaultPort = Environment.GetEnvironmentVariable("TABCOOP_LAN_PORT");
+            if (!int.TryParse(defaultPort, out int envPort) || envPort <= 0 || envPort > 65535)
+                envPort = LocalTcpLoopbackTransport.DefaultPort;
+            GameBridge.ShowInputBox(
+                "创建局域网房间",
+                "请输入监听端口（默认 27099；frp/nps 请映射这个 TCP 端口）：",
+                envPort.ToString(),
+                text =>
+                {
+                    if (!int.TryParse((text ?? string.Empty).Trim(), out int port) || port <= 0 || port > 65535)
+                    {
+                        _entryStatusMessage = "端口无效，请输入 1~65535。";
+                        RefreshUI();
+                        return;
+                    }
+
+                    try
+                    {
+                        CoopSessionManager.StartHostSession(useLoopback: true, lanPort: port);
+                        RefreshUI();
+                    }
+                    catch (Exception ex)
+                    {
+                        _entryStatusMessage = $"创建局域网房间失败: {ex.Message}";
+                        CoopSessionManager.StopSession();
+                        RefreshUI();
+                    }
+                },
+                maxLength: 5);
+        }
+
+        private static void JoinLanRoomClicked()
+        {
+            _entryStatusMessage = string.Empty;
+            string defaultTarget = Environment.GetEnvironmentVariable("TABCOOP_LAN_JOIN");
+            if (string.IsNullOrWhiteSpace(defaultTarget))
+                defaultTarget = "127.0.0.1:27099";
+            GameBridge.ShowInputBox(
+                "加入局域网房间",
+                "请输入房主地址（IP 或域名:端口，例如 192.168.1.10:27099 或 xxx.sakurafrp.com:37099）：",
+                defaultTarget,
+                text =>
+                {
+                    string target = (text ?? string.Empty).Trim();
+                    if (string.IsNullOrEmpty(target))
+                    {
+                        _entryStatusMessage = "地址不能为空。";
+                        RefreshUI();
+                        return;
+                    }
+
+                    try
+                    {
+                        CoopSessionManager.JoinSession(
+                            useLoopback: true,
+                            targetAddressOrSteamId: target,
+                            lanMode: true);
+                        RefreshUI();
+                    }
+                    catch (Exception ex)
+                    {
+                        _entryStatusMessage = $"连接局域网房主失败: {ex.Message}";
+                        CoopSessionManager.StopSession();
+                        RefreshUI();
+                    }
+                },
+                maxLength: 64);
         }
 
         private static void InviteSteamClicked()

@@ -112,6 +112,16 @@ namespace TABCoopMod.Networking
         private int _maxPlayers = 3;
 
         /// <summary>
+        /// When true, this transport is used as a plain LAN TCP transport (bind 0.0.0.0 / join IP:port)
+        /// instead of same-machine loopback testing. The wire protocol is identical.
+        /// </summary>
+        public bool IsLanMode { get; set; }
+        public string BindAddress { get; set; } = "127.0.0.1";
+        public int ListenPort { get; set; } = DefaultPort;
+        public string JoinAddress { get; set; } = "127.0.0.1";
+        public int JoinPort { get; set; } = DefaultPort;
+
+        /// <summary>
         /// Optional callback returning current Host lobby phase byte for non-intrusive LobbyProbeAck replies.
         /// </summary>
         public static Func<byte> HostRoomPhaseProvider { get; set; }
@@ -122,7 +132,9 @@ namespace TABCoopMod.Networking
         public IReadOnlyList<PeerInfo> ConnectedPeers => _peers;
 
         public bool IsDirectConnected => IsActive;
-        public string ActivePathSummary => "Local Loopback (127.0.0.1)";
+        public string ActivePathSummary => IsLanMode
+            ? $"LAN TCP ({(IsHost ? $"{BindAddress}:{ListenPort}" : $"{JoinAddress}:{JoinPort}")})"
+            : "Local Loopback (127.0.0.1)";
         public double ActiveDirectRttMs => 0.0;
         public string GetDebugStatsLine() => $"LocalTcpLoopback(Active={IsActive}, Peers={_peers.Count})";
 
@@ -140,10 +152,25 @@ namespace TABCoopMod.Networking
             _peers.Clear();
             _peers.Add(new PeerInfo { PlayerId = 1, PlayerName = "HostPlayer", IsReady = true });
 
-            _listener = new TcpListener(IPAddress.Loopback, DefaultPort);
+            IPAddress bindAddr = IPAddress.Loopback;
+            string bind = (BindAddress ?? string.Empty).Trim();
+            if (bind.Length > 0)
+            {
+                if (bind == "0.0.0.0" || bind == "*")
+                {
+                    bindAddr = IPAddress.Any;
+                }
+                else if (!IPAddress.TryParse(bind, out bindAddr))
+                {
+                    bindAddr = IPAddress.Any;
+                }
+            }
+
+            int port = (ListenPort > 0 && ListenPort <= 65535) ? ListenPort : DefaultPort;
+            _listener = new TcpListener(bindAddr, port);
             _listener.Start();
             IsActive = true;
-            ModLogger.Info($"[LocalTcpLoopbackTransport] Host listening on 127.0.0.1:{DefaultPort}");
+            ModLogger.Info($"[LocalTcpLoopbackTransport] Host listening on {bindAddr}:{port} (LanMode={IsLanMode})");
         }
 
         public void ConnectToHost(string targetAddressOrSteamId)
@@ -153,17 +180,70 @@ namespace TABCoopMod.Networking
             LocalPlayerId = 0; // Assigned by Host upon HandshakeAccept
             _peers.Clear();
 
-            string host = "127.0.0.1";
-            int port = DefaultPort;
-            if (!string.IsNullOrEmpty(targetAddressOrSteamId) && targetAddressOrSteamId.Contains(":"))
+            string host = string.IsNullOrWhiteSpace(JoinAddress) ? "127.0.0.1" : JoinAddress.Trim();
+            int port = (JoinPort > 0 && JoinPort <= 65535) ? JoinPort : DefaultPort;
+            string target = targetAddressOrSteamId?.Trim();
+            if (!string.IsNullOrEmpty(target))
             {
-                var parts = targetAddressOrSteamId.Split(':');
-                host = parts[0];
-                int.TryParse(parts[1], out port);
+                if (target.StartsWith("[", StringComparison.Ordinal))
+                {
+                    int close = target.IndexOf(']');
+                    if (close > 0)
+                    {
+                        host = target.Substring(1, close - 1);
+                        if (close + 1 < target.Length && target[close + 1] == ':'
+                            && int.TryParse(target.Substring(close + 2), out int ipv6Port))
+                        {
+                            port = ipv6Port;
+                        }
+                    }
+                }
+                else if (target.Contains(":"))
+                {
+                    int firstColon = target.IndexOf(':');
+                    int lastColon = target.LastIndexOf(':');
+                    if (firstColon == lastColon)
+                    {
+                        host = target.Substring(0, lastColon);
+                        if (int.TryParse(target.Substring(lastColon + 1), out int parsedPort))
+                            port = parsedPort;
+                    }
+                    else
+                    {
+                        // Bare IPv6 address without a port (e.g. "2001:db8::1").
+                        host = target;
+                    }
+                }
+                else
+                {
+                    host = target;
+                }
             }
 
+            JoinAddress = host;
+            JoinPort = port;
+
             _clientToHost = new TcpClient { NoDelay = true };
-            _clientToHost.Connect(host, port);
+            int timeoutMs = 8000;
+            if (int.TryParse(Environment.GetEnvironmentVariable("TABCOOP_LAN_CONNECT_TIMEOUT_MS"), out int envTimeout) && envTimeout > 0)
+                timeoutMs = envTimeout;
+
+            try
+            {
+                var iar = _clientToHost.BeginConnect(host, port, null, null);
+                if (!iar.AsyncWaitHandle.WaitOne(timeoutMs))
+                {
+                    try { _clientToHost.Close(); } catch { }
+                    throw new TimeoutException($"连接 {host}:{port} 超时（{timeoutMs}ms）。");
+                }
+                _clientToHost.EndConnect(iar);
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
+
             _streamToHost = _clientToHost.GetStream();
             IsActive = true;
 
