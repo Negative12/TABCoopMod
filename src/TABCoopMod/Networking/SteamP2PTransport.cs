@@ -26,7 +26,7 @@ namespace TABCoopMod.Networking
         private static bool _startupLobbyChecked;
         private static string _pendingInviteLobbyId;
 
-        private Callback<LobbyCreated_t> _cbLobbyCreated;
+        private CallResult<LobbyCreated_t> _crLobbyCreated;
         private Callback<LobbyEnter_t> _cbLobbyEnter;
         private Callback<LobbyChatUpdate_t> _cbLobbyChatUpdate;
         private Callback<P2PSessionRequest_t> _cbP2PSessionRequest;
@@ -98,6 +98,8 @@ namespace TABCoopMod.Networking
         private CSteamID _expectedLobbyId = CSteamID.Nil;
         private CSteamID _hostSteamId = CSteamID.Nil;
         private volatile bool _disposed;
+        private long _lobbyCreateStartTs;
+        private bool _lobbyCreateTimedOut;
         private readonly List<PeerInfo> _peers = new List<PeerInfo>();
         private readonly Dictionary<byte, CSteamID> _playerToSteamId = new Dictionary<byte, CSteamID>();
         private int _maxPlayers = 3;
@@ -111,6 +113,8 @@ namespace TABCoopMod.Networking
         public bool IsHost { get; private set; }
         public byte LocalPlayerId { get; private set; } = 1;
         public CSteamID CurrentLobbyId => _currentLobbyId;
+        public string LobbyError { get; private set; }
+        public string LobbyErrorDetail { get; private set; }
         public IReadOnlyList<PeerInfo> ConnectedPeers => _peers;
 
         public string ActivePathSummary
@@ -175,12 +179,14 @@ namespace TABCoopMod.Networking
         public event Action<PeerInfo> OnPeerConnected;
         public event Action<byte> OnPeerDisconnected;
         public event Action<string, string, string> OnVersionMismatch;
+        public event Action OnLobbyReady;
+        public event Action<string, string> OnLobbyError;
 
         public void EnsureCallbacksRegistered()
         {
-            if (_disposed || _cbLobbyCreated != null) return;
+            if (_disposed || _crLobbyCreated != null) return;
 
-            _cbLobbyCreated = Callback<LobbyCreated_t>.Create(OnLobbyCreated);
+            _crLobbyCreated = CallResult<LobbyCreated_t>.Create(OnLobbyCreatedCallResult);
             _cbLobbyEnter = Callback<LobbyEnter_t>.Create(OnLobbyEntered);
             _cbLobbyChatUpdate = Callback<LobbyChatUpdate_t>.Create(OnLobbyChatUpdate);
             _cbP2PSessionRequest = Callback<P2PSessionRequest_t>.Create(OnP2PSessionRequest);
@@ -189,12 +195,12 @@ namespace TABCoopMod.Networking
 
         private void DisposeCallbacks()
         {
-            try { _cbLobbyCreated?.Dispose(); } catch { }
+            try { _crLobbyCreated?.Dispose(); } catch { }
             try { _cbLobbyEnter?.Dispose(); } catch { }
             try { _cbLobbyChatUpdate?.Dispose(); } catch { }
             try { _cbP2PSessionRequest?.Dispose(); } catch { }
             try { _cbP2PConnectFail?.Dispose(); } catch { }
-            _cbLobbyCreated = null;
+            _crLobbyCreated = null;
             _cbLobbyEnter = null;
             _cbLobbyChatUpdate = null;
             _cbP2PSessionRequest = null;
@@ -204,11 +210,20 @@ namespace TABCoopMod.Networking
         public void StartHost(int maxPlayers = 3)
         {
             if (_disposed) return;
+            if (!SteamAPI.IsSteamRunning())
+                throw new InvalidOperationException("未检测到运行中的 Steam 客户端，请从 Steam 启动游戏后重试。");
+            if (!SteamUser.BLoggedOn())
+                throw new InvalidOperationException("Steam 当前未在线登录（可能处于离线模式或与 Steam 服务器断开连接），无法创建 Steam 大厅。");
+
             EnsureCallbacksRegistered();
             IsHost = true;
             LocalPlayerId = 1;
             _maxPlayers = Math.Max(2, maxPlayers);
             _expectedLobbyId = CSteamID.Nil;
+            _currentLobbyId = CSteamID.Nil;
+            LobbyError = null;
+            LobbyErrorDetail = null;
+            _lobbyCreateTimedOut = false;
             _peers.Clear();
             _playerToSteamId.Clear();
 
@@ -218,10 +233,14 @@ namespace TABCoopMod.Networking
             _playerToSteamId[1] = mySteamId;
             _peers.Add(new PeerInfo { PlayerId = 1, PlayerName = myName, SteamId64 = mySteamId.m_SteamID, IsReady = true });
 
-            InitializeDirectFastPath(true);
-
             SteamNetworking.AllowP2PPacketRelay(true);
-            SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypeFriendsOnly, maxPlayers);
+            SteamAPICall_t createCall = SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypeFriendsOnly, maxPlayers);
+            if (createCall == SteamAPICall_t.Invalid)
+                throw new InvalidOperationException("SteamMatchmaking.CreateLobby 返回无效句柄，请确认 Steam 客户端已正常登录。");
+
+            _crLobbyCreated.Set(createCall);
+            _lobbyCreateStartTs = Stopwatch.GetTimestamp();
+            InitializeDirectFastPath(true);
             IsActive = true;
             ModLogger.Info($"[SteamP2PTransport] Creating Steam Friends-Only Lobby for up to {maxPlayers} players...");
         }
@@ -233,6 +252,11 @@ namespace TABCoopMod.Networking
             IsHost = false;
             LocalPlayerId = 0;
             _expectedLobbyId = CSteamID.Nil;
+            _currentLobbyId = CSteamID.Nil;
+            LobbyError = null;
+            LobbyErrorDetail = null;
+            _lobbyCreateStartTs = 0;
+            _lobbyCreateTimedOut = false;
             _peers.Clear();
             _playerToSteamId.Clear();
             InitializeDirectFastPath(false);
@@ -266,18 +290,66 @@ namespace TABCoopMod.Networking
             }
         }
 
-        private void OnLobbyCreated(LobbyCreated_t param)
+        private void OnLobbyCreatedCallResult(LobbyCreated_t param, bool bIOFailure)
         {
             if (_disposed || !IsActive || !IsHost) return;
-            if (param.m_eResult != EResult.k_EResultOK)
+            if (bIOFailure || param.m_eResult != EResult.k_EResultOK)
             {
-                ModLogger.Error($"[SteamP2PTransport] CreateLobby failed: {param.m_eResult}");
+                string errCode = bIOFailure ? "IOFailure" : param.m_eResult.ToString();
+                FormatLobbyCreateError(param.m_eResult, bIOFailure, out string shortErr, out string detailErr);
+                LobbyError = shortErr;
+                LobbyErrorDetail = detailErr;
+                ModLogger.Error($"[SteamP2PTransport] CreateLobby failed: {errCode}");
+                OnLobbyError?.Invoke(shortErr, detailErr);
                 return;
             }
+            LobbyError = null;
+            LobbyErrorDetail = null;
             _currentLobbyId = new CSteamID(param.m_ulSteamIDLobby);
             SteamMatchmaking.SetLobbyData(_currentLobbyId, "tab_coop_host", SteamUser.GetSteamID().m_SteamID.ToString());
             SteamMatchmaking.SetLobbyData(_currentLobbyId, "tab_coop_ver", ModInfo.Version);
             ModLogger.Info($"[SteamP2PTransport] Steam Lobby created! LobbyID={_currentLobbyId.m_SteamID} (ver={ModInfo.Version})");
+            OnLobbyReady?.Invoke();
+        }
+
+        private static void FormatLobbyCreateError(EResult result, bool ioFailure, out string shortErr, out string detailErr)
+        {
+            if (ioFailure)
+            {
+                shortErr = "创建大厅失败 (Steam IPC/IO 通信异常)";
+                detailErr = "与 Steam 客户端通信发生 I/O 异常（bIOFailure）。\n\n请确认 Steam 客户端正常运行且已在线登录，然后解散房间重试。";
+                return;
+            }
+
+            switch (result)
+            {
+                case EResult.k_EResultAccessDenied:
+                    shortErr = "创建大厅被 Steam 拒绝 (k_EResultAccessDenied)";
+                    detailErr =
+                        "Steam 后端拒绝了创建大厅请求（错误码：k_EResultAccessDenied）。\n\n" +
+                        "常见原因排查：\n" +
+                        "1. 当前登录的 Steam 账号未直接购买《亿万僵尸》（如通过家庭共享、借号或绕过方式启动）；\n" +
+                        "2. 当前为 Steam 受限账号（商店消费未满 5 美元），被限制创建联机大厅；\n" +
+                        "3. 开启了 Steam 家庭监护未解锁，或账号授权/客户端状态异常。\n\n" +
+                        "建议：使用已购买本游戏且非受限的 Steam 账号从 Steam 启动重试，或改由好友建房后发送邀请。";
+                    break;
+                case EResult.k_EResultNoConnection:
+                    shortErr = "无法连接到 Steam 服务器 (k_EResultNoConnection)";
+                    detailErr = "当前无法连接 Steam 匹配服务器，请检查网络连接、代理/加速器设置或确认 Steam 未处于离线模式。";
+                    break;
+                case EResult.k_EResultTimeout:
+                    shortErr = "创建 Steam 大厅超时 (k_EResultTimeout)";
+                    detailErr = "Steam 匹配服务器响应超时，请检查网络状况后解散房间重试。";
+                    break;
+                case EResult.k_EResultLimitExceeded:
+                    shortErr = "创建大厅过于频繁 (k_EResultLimitExceeded)";
+                    detailErr = "创建大厅请求过于频繁或超出 Steam 限制，请稍等片刻后重试。";
+                    break;
+                default:
+                    shortErr = $"创建 Steam 大厅失败 ({result})";
+                    detailErr = $"Steam 返回错误：{result}（错误码 {(int)result}）。\n\n请检查 Steam 在线状态与网络后解散房间重试，详情见游戏目录下的 TABCoopMod.log。";
+                    break;
+            }
         }
 
         private void OnLobbyEntered(LobbyEnter_t param)
@@ -285,10 +357,28 @@ namespace TABCoopMod.Networking
             if (_disposed || !IsActive) return;
             if (IsHost)
             {
-                _currentLobbyId = new CSteamID(param.m_ulSteamIDLobby);
+                if (param.m_EChatRoomEnterResponse == (uint)EChatRoomEnterResponse.k_EChatRoomEnterResponseSuccess)
+                {
+                    _currentLobbyId = new CSteamID(param.m_ulSteamIDLobby);
+                    LobbyError = null;
+                    LobbyErrorDetail = null;
+                    OnLobbyReady?.Invoke();
+                }
                 return;
             }
             if (_expectedLobbyId.IsValid() && param.m_ulSteamIDLobby != _expectedLobbyId.m_SteamID) return;
+
+            if (param.m_EChatRoomEnterResponse != (uint)EChatRoomEnterResponse.k_EChatRoomEnterResponseSuccess)
+            {
+                var enterResp = (EChatRoomEnterResponse)param.m_EChatRoomEnterResponse;
+                string shortErr = $"加入 Steam 大厅失败 ({enterResp})";
+                string detailErr = $"无法加入目标 Steam 大厅（错误码：{enterResp}）。\n\n可能原因：房主已关闭房间、大厅已满或网络连接异常。";
+                LobbyError = shortErr;
+                LobbyErrorDetail = detailErr;
+                ModLogger.Error($"[SteamP2PTransport] JoinLobby failed for {param.m_ulSteamIDLobby}: {enterResp}");
+                OnLobbyError?.Invoke(shortErr, detailErr);
+                return;
+            }
 
             _currentLobbyId = new CSteamID(param.m_ulSteamIDLobby);
             var ownerId = SteamMatchmaking.GetLobbyOwner(_currentLobbyId);
@@ -494,6 +584,22 @@ namespace TABCoopMod.Networking
             try
             {
                 SteamAPI.RunCallbacks();
+
+                if (IsHost && !_currentLobbyId.IsValid() && !_lobbyCreateTimedOut
+                    && string.IsNullOrEmpty(LobbyError) && _lobbyCreateStartTs > 0)
+                {
+                    double elapsedMs = (Stopwatch.GetTimestamp() - _lobbyCreateStartTs) * 1000.0 / Stopwatch.Frequency;
+                    if (elapsedMs >= 15000.0)
+                    {
+                        _lobbyCreateTimedOut = true;
+                        LobbyError = "创建 Steam 大厅超时 (15s 无响应)";
+                        LobbyErrorDetail =
+                            "超过 15 秒未收到 Steam 大厅创建回执。\n\n" +
+                            "请检查 Steam 客户端是否在线、网络或加速器是否拦截了 Steam 联机服务，或尝试解散房间后重试。";
+                        ModLogger.Error("[SteamP2PTransport] CreateLobby timed out after 15s without callback.");
+                        OnLobbyError?.Invoke(LobbyError, LobbyErrorDetail);
+                    }
+                }
 
                 while (_mainThreadActions.TryDequeue(out var act))
                 {

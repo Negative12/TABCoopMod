@@ -445,13 +445,170 @@ namespace TABCoopMod.Patches
     }
 
     // ========================================================================
-    // 2. Functional & Output Wonder Isolation, Voucher Cost Zeroing & Completion
+    // 2. Functional & Output Wonder Isolation, Tech/Limited Buildings & Completion
     // ========================================================================
+
+    internal static class MultiFactionTechAndLimitHelpers
+    {
+        private static bool _helpersInit;
+        private static Func<object, object, bool> _callCreateEntityIsVisible;
+        private static Func<object, object, bool> _callZXCmdIsVisible;
+        private static Func<object, object, bool> _callZXCmdCanExecute;
+        private static Func<object, object, bool> _callCheckPerTickProd;
+        private static MethodInfo _mErrAllBuilt;
+        private static MethodInfo _mErrMinColonists;
+
+        private static void EnsureHelpers()
+        {
+            if (_helpersInit) return;
+            _helpersInit = true;
+            try
+            {
+                Type tCmd = GameBridge.TypeZXCommand;
+                Type tEnt = GameBridge.TypeZXEntity;
+                Type tCreate = GameBridge.GameAssembly?.GetType("ZX.Commands.CreateEntityCommand");
+                if (tCmd == null || tEnt == null) return;
+
+                if (tCreate != null)
+                {
+                    var mCreateVis = AccessTools.DeclaredMethod(tCreate, ObfuscatedSymbols.Method_ZXCommand_IsVisible, new[] { tEnt });
+                    if (mCreateVis != null)
+                        _callCreateEntityIsVisible = CompileNonVirtualTwoArgBool(mCreateVis, tCreate, tEnt, "TABCoop_CallCreateEntityIsVisible");
+                }
+
+                var mCmdVis = AccessTools.DeclaredMethod(tCmd, ObfuscatedSymbols.Method_ZXCommand_IsVisible, new[] { tEnt });
+                if (mCmdVis != null)
+                    _callZXCmdIsVisible = CompileNonVirtualTwoArgBool(mCmdVis, tCmd, tEnt, "TABCoop_CallZXCmdIsVisible");
+
+                var mCmdExec = AccessTools.DeclaredMethod(tCmd, ObfuscatedSymbols.Method_ZXCommand_CanExecute, new[] { tEnt });
+                if (mCmdExec != null)
+                    _callZXCmdCanExecute = CompileNonVirtualTwoArgBool(mCmdExec, tCmd, tEnt, "TABCoop_CallZXCmdCanExecute");
+
+                var mProd = AccessTools.DeclaredMethod(tCmd, "#=z$HW1u2avGI2so0TLg6a61YZoudmtV6$W8A==", new[] { tEnt });
+                if (mProd != null)
+                    _callCheckPerTickProd = CompileNonVirtualTwoArgBool(mProd, tCmd, tEnt, "TABCoop_CallCheckPerTickProd");
+
+                _mErrAllBuilt = AccessTools.DeclaredMethod(tCmd, "#=zQOgERcimkg66hyHMjQ==", Type.EmptyTypes);
+                _mErrMinColonists = AccessTools.DeclaredMethod(tCmd, "#=zDQX8VmKT1e9ju0gYxgEDh81ZJmej", Type.EmptyTypes);
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[MultiFactionTechAndLimitHelpers] Init warning: {ex.Message}");
+            }
+        }
+
+        private static Func<object, object, bool> CompileNonVirtualTwoArgBool(MethodInfo target, Type thisType, Type argType, string name)
+        {
+            var dm = new System.Reflection.Emit.DynamicMethod(
+                name,
+                typeof(bool),
+                new[] { typeof(object), typeof(object) },
+                typeof(MultiFactionTechAndLimitHelpers).Module,
+                skipVisibility: true);
+            var il = dm.GetILGenerator();
+            il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
+            il.Emit(System.Reflection.Emit.OpCodes.Castclass, thisType);
+            il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
+            il.Emit(System.Reflection.Emit.OpCodes.Castclass, argType);
+            il.Emit(System.Reflection.Emit.OpCodes.Call, target);
+            il.Emit(System.Reflection.Emit.OpCodes.Ret);
+            return (Func<object, object, bool>)dm.CreateDelegate(typeof(Func<object, object, bool>));
+        }
+
+        public static byte ResolveActivePlayer(object executor)
+        {
+            byte owner = 0;
+            if (executor is DXEntity execEnt)
+                owner = FactionOwnershipTracker.GetOwner(execEnt.ID);
+            if (owner == 0) owner = FactionContextManager.CurrentActiveOwner;
+            if (owner == 0) owner = FactionOwnershipTracker.LocalPlayerId;
+            return owner != 0 ? owner : (byte)1;
+        }
+
+        public static int CountOwnedEntitiesOfType(Type entType, byte owner)
+        {
+            var game = DXGame.Current;
+            if (game == null || entType == null) return 0;
+            int count = 0;
+            foreach (var ent in game.EntitiesOfType(entType))
+            {
+                if (ent == null || ent.Disposed) continue;
+                if (FactionOwnershipTracker.GetOwner(ent.ID) == owner)
+                    count++;
+            }
+            return count;
+        }
+
+        public static bool HasOwnedEnabledEntityOfType(Type entType, byte owner)
+        {
+            var game = DXGame.Current;
+            if (game == null || entType == null) return false;
+            foreach (var ent in game.EntitiesOfType(entType))
+            {
+                if (ent == null || ent.Disposed) continue;
+                if (FactionOwnershipTracker.GetOwner(ent.ID) == owner && GameBridge.IsEntityEnabled(ent))
+                    return true;
+            }
+            return false;
+        }
+
+        public static bool CallCreateEntityBaseIsVisible(object cmd, object executor)
+        {
+            EnsureHelpers();
+            return _callCreateEntityIsVisible == null || _callCreateEntityIsVisible(cmd, executor);
+        }
+
+        public static bool CallZXCommandBaseIsVisible(object cmd, object executor)
+        {
+            EnsureHelpers();
+            return _callZXCmdIsVisible == null || _callZXCmdIsVisible(cmd, executor);
+        }
+
+        public static bool CallZXCommandBaseCanExecute(object cmd, object executor)
+        {
+            EnsureHelpers();
+            return _callZXCmdCanExecute == null || _callZXCmdCanExecute(cmd, executor);
+        }
+
+        public static bool CallCheckPerTickProduction(object cmd, object tmplEnt)
+        {
+            EnsureHelpers();
+            return _callCheckPerTickProd == null || _callCheckPerTickProd(cmd, tmplEnt);
+        }
+
+        public static string GetAllInstancesBuiltError(object cmd)
+        {
+            EnsureHelpers();
+            try
+            {
+                if (_mErrAllBuilt != null && cmd != null)
+                    return _mErrAllBuilt.Invoke(cmd, null) as string;
+            }
+            catch { }
+            return "All instances already built";
+        }
+
+        public static string FormatMinColonistsError(object cmd, int requiredColonists)
+        {
+            EnsureHelpers();
+            try
+            {
+                if (_mErrMinColonists != null && cmd != null)
+                {
+                    string fmt = _mErrMinColonists.Invoke(cmd, null) as string;
+                    if (!string.IsNullOrEmpty(fmt))
+                        return string.Format(fmt, requiredColonists);
+                }
+            }
+            catch { }
+            return $"Requires {requiredColonists} colonists";
+        }
+    }
 
     /// <summary>
     /// Isolates MaxInstances > 0 buildings/Wonders:
     /// - Functional Wonders (Telescope/Academy/Spire): strictly 1 globally across team.
-    /// - Output Wonders (CrystalPalace/Transmutator/Victorious) & other MaxInstances>0: 1 per player.
+    /// - Output Wonders (CrystalPalace/Transmutator/Victorious) & other MaxInstances>0 (WoodWorkshop/StoneWorkshop/Foundry/etc.): per player.
     /// </summary>
     [HarmonyPatch]
     public static class Patch_Build_AllInstancesAlreadyBuilt_MultiFaction
@@ -484,28 +641,15 @@ namespace TABCoopMod.Patches
 
             object dp = GameBridge.GetEntityDefaultParamsBoxed(tmplEnt);
             if (dp == null) return;
-            GameBridge.ReadDefaultParamsStats(dp, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out int maxInstances, out _);
+            GameBridge.ReadEntityBuildLimits(dp, out int maxInstances, out _, out _);
             if (maxInstances <= 0)
             {
                 __result = false;
                 return;
             }
 
-            byte activeOwner = FactionContextManager.CurrentActiveOwner;
-            if (activeOwner == 0) activeOwner = FactionOwnershipTracker.LocalPlayerId;
-            if (activeOwner == 0) activeOwner = 1;
-
-            var game = DXGame.Current;
-            if (game == null) return;
-
-            int ownedCount = 0;
-            foreach (var ent in game.EntitiesOfType(entType))
-            {
-                if (ent == null || ent.Disposed) continue;
-                if (FactionOwnershipTracker.GetOwner(ent.ID) == activeOwner)
-                    ownedCount++;
-            }
-            __result = ownedCount >= maxInstances;
+            byte activeOwner = MultiFactionTechAndLimitHelpers.ResolveActivePlayer(null);
+            __result = MultiFactionTechAndLimitHelpers.CountOwnedEntitiesOfType(entType, activeOwner) >= maxInstances;
         }
     }
 
@@ -577,30 +721,51 @@ namespace TABCoopMod.Patches
         [HarmonyPrefix]
         public static bool Prefix(object __instance, object __0, ref bool __result)
         {
-            if (!CoopSessionManager.IsMultiFactionActive || !WonderCrowdfundManager.IsInitialized || __instance == null)
+            if (!CoopSessionManager.IsMultiFactionActive || !FactionContextManager.IsInitialized || __instance == null)
                 return true;
 
             if (_pEntityTypeProp == null)
                 _pEntityTypeProp = __instance.GetType().GetProperty("EntityType", BindingFlags.Public | BindingFlags.Instance);
             Type entType = _pEntityTypeProp?.GetValue(__instance) as Type;
-            if (!WonderCrowdfundManager.TryClassifyEntityType(entType, out var fKind))
+            if (entType == null) return true;
+
+            if (WonderCrowdfundManager.IsInitialized && WonderCrowdfundManager.TryClassifyEntityType(entType, out var fKind))
+            {
+                if (!WonderCrowdfundManager.CanPlaceBuildVoucher(fKind))
+                    return true;
+
+                if (WonderCrowdfundManager.IsWonderBlockedGlobally(fKind))
+                {
+                    __result = false;
+                    return false;
+                }
+                if (fKind == FunctionalWonderType.Telescope && __0 != null && GameBridge.GetCommandCenterTelescopeEnabled(__0))
+                {
+                    __result = false;
+                    return false;
+                }
+
+                __result = true;
+                return false;
+            }
+
+            // Isolate MaxInstances > 0 visibility per player so P1 building a WoodWorkshop/StoneWorkshop/Foundry/
+            // OutputWonder does not hide the build command from P2/P3.
+            var tmpl = DXGame.Current?.GetEntityFromType(entType) as DXEntity;
+            object dp = tmpl != null ? GameBridge.GetEntityDefaultParamsBoxed(tmpl) : null;
+            if (dp == null) return true;
+            GameBridge.ReadEntityBuildLimits(dp, out int maxInstances, out _, out _);
+            if (maxInstances <= 0)
                 return true;
 
-            if (!WonderCrowdfundManager.CanPlaceBuildVoucher(fKind))
-                return true;
-
-            if (WonderCrowdfundManager.IsWonderBlockedGlobally(fKind))
+            if (!MultiFactionTechAndLimitHelpers.CallCreateEntityBaseIsVisible(__instance, __0))
             {
                 __result = false;
                 return false;
             }
-            if (fKind == FunctionalWonderType.Telescope && __0 != null && GameBridge.GetCommandCenterTelescopeEnabled(__0))
-            {
-                __result = false;
-                return false;
-            }
 
-            __result = true;
+            byte owner = MultiFactionTechAndLimitHelpers.ResolveActivePlayer(__0);
+            __result = MultiFactionTechAndLimitHelpers.CountOwnedEntitiesOfType(entType, owner) < maxInstances;
             return false;
         }
     }
@@ -618,15 +783,17 @@ namespace TABCoopMod.Patches
         }
 
         [HarmonyPrefix]
-        public static bool Prefix(object __instance, ref bool __result)
+        public static bool Prefix(object __instance, object __0, ref bool __result)
         {
-            if (!CoopSessionManager.IsMultiFactionActive || !WonderCrowdfundManager.IsInitialized || __instance == null)
+            if (!CoopSessionManager.IsMultiFactionActive || !FactionContextManager.IsInitialized || __instance == null)
                 return true;
 
             if (_pEntityTypeProp == null)
                 _pEntityTypeProp = __instance.GetType().GetProperty("EntityType", BindingFlags.Public | BindingFlags.Instance);
             Type entType = _pEntityTypeProp?.GetValue(__instance) as Type;
-            if (WonderCrowdfundManager.TryClassifyEntityType(entType, out var fKind))
+            if (entType == null) return true;
+
+            if (WonderCrowdfundManager.IsInitialized && WonderCrowdfundManager.TryClassifyEntityType(entType, out var fKind))
             {
                 if (!WonderCrowdfundManager.CanPlaceBuildVoucher(fKind))
                 {
@@ -640,8 +807,8 @@ namespace TABCoopMod.Patches
                 }
                 // Once ReadyVoucher is active (team unlocked + funded Research & Build), allow any non-blocked placement
                 // that passes the placer's own upkeep check (Workers/Food/Energy) without single-player colonist/Foundry locks.
-                var tmpl = DXGame.Current?.GetEntityFromType(entType) as DXEntity;
-                if (tmpl != null && GameBridge.TryGetEntityResourcesCost(entType, out _, out _, out _, out _, out _, out int foodReq, out int workReq, out int engReq))
+                var wonderTmpl = DXGame.Current?.GetEntityFromType(entType) as DXEntity;
+                if (wonderTmpl != null && GameBridge.TryGetEntityResourcesCost(entType, out _, out _, out _, out _, out _, out int foodReq, out int workReq, out int engReq))
                 {
                     if (GameBridge.ReadRawLevelEconomyState(out var e))
                     {
@@ -660,7 +827,203 @@ namespace TABCoopMod.Patches
                 __result = true;
                 return false;
             }
+
+            // Isolate MaxInstances, MinColonistsRequisite scaling, and BuildingRequisite per player
+            // for all non-Functional-Wonder buildings (WoodWorkshop, StoneWorkshop, Foundry, Output Wonders, etc.).
+            var tmpl = DXGame.Current?.GetEntityFromType(entType) as DXEntity;
+            object dp = tmpl != null ? GameBridge.GetEntityDefaultParamsBoxed(tmpl) : null;
+            if (dp == null) return true;
+
+            GameBridge.ReadEntityBuildLimits(dp, out int maxInstances, out int minColonists, out Type buildingReq);
+            if (maxInstances <= 0 && minColonists <= 0 && buildingReq == null)
+                return true;
+
+            byte owner = MultiFactionTechAndLimitHelpers.ResolveActivePlayer(__0);
+            int ownedCount = MultiFactionTechAndLimitHelpers.CountOwnedEntitiesOfType(entType, owner);
+
+            if (maxInstances > 0 && ownedCount >= maxInstances)
+            {
+                GameBridge.SetCommandErrorMessage(__instance, MultiFactionTechAndLimitHelpers.GetAllInstancesBuiltError(__instance));
+                __result = false;
+                return false;
+            }
+
+            if (minColonists > 0)
+            {
+                int reqCol = minColonists * (1 + ownedCount);
+                int haveCol = GameBridge.ReadRawLevelEconomyState(out var eco) ? eco.Colonists : 0;
+                if (reqCol > haveCol)
+                {
+                    GameBridge.SetCommandErrorMessage(__instance, MultiFactionTechAndLimitHelpers.FormatMinColonistsError(__instance, reqCol));
+                    __result = false;
+                    return false;
+                }
+            }
+
+            if (!MultiFactionTechAndLimitHelpers.CallCheckPerTickProduction(__instance, tmpl))
+            {
+                __result = false;
+                return false;
+            }
+
+            if (buildingReq != null && !MultiFactionTechAndLimitHelpers.HasOwnedEnabledEntityOfType(buildingReq, owner))
+            {
+                GameBridge.SetCommandErrorMessage(__instance, $"Requires {GameBridge.GetEntityTemplateDisplayName(buildingReq)}");
+                __result = false;
+                return false;
+            }
+
+            __result = MultiFactionTechAndLimitHelpers.CallZXCommandBaseCanExecute(__instance, __0);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Isolates ZXCommandDefaultParams.BuildingRequisite per player for all ZXCommand subclasses
+    /// (Train, Upgrade, Technology, Build base.CanExecute, etc.).
+    /// </summary>
+    [HarmonyPatch]
+    public static class Patch_ZXCommand_CanExecute_BuildingRequisite
+    {
+        public static MethodBase TargetMethod()
+        {
+            return GameBridge.TypeZXCommand != null && GameBridge.TypeZXEntity != null
+                ? AccessTools.DeclaredMethod(GameBridge.TypeZXCommand, ObfuscatedSymbols.Method_ZXCommand_CanExecute, new[] { GameBridge.TypeZXEntity })
+                : null;
+        }
+
+        [HarmonyPrefix]
+        public static bool Prefix(object __instance, object __0, ref bool __result)
+        {
+            if (!CoopSessionManager.IsMultiFactionActive || !FactionContextManager.IsInitialized || __instance == null)
+                return true;
+
+            Type buildingReq = GameBridge.GetCommandBuildingRequisite(__instance);
+            if (buildingReq == null)
+                return true;
+
+            byte owner = MultiFactionTechAndLimitHelpers.ResolveActivePlayer(__0);
+            if (!MultiFactionTechAndLimitHelpers.HasOwnedEnabledEntityOfType(buildingReq, owner))
+            {
+                GameBridge.SetCommandErrorMessage(__instance, $"Requires {GameBridge.GetEntityTemplateDisplayName(buildingReq)}");
+                __result = false;
+                return false;
+            }
+
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Isolates Technology.IsVisible (#=zXAX1VeKTLe7O) MaxInstances filtering per player
+    /// so P1 building a MaxInstances=1 tech-unlocked building (e.g. Output Wonder) does not
+    /// hide that research command from P2/P3.
+    /// </summary>
+    [HarmonyPatch]
+    public static class Patch_Technology_IsVisible_MultiFaction
+    {
+        private static PropertyInfo _pEntitiesProvided;
+
+        public static MethodBase TargetMethod()
+        {
+            return GameBridge.TypeTechnology != null && GameBridge.TypeZXEntity != null
+                ? AccessTools.DeclaredMethod(GameBridge.TypeTechnology, ObfuscatedSymbols.Method_ZXCommand_IsVisible, new[] { GameBridge.TypeZXEntity })
+                : null;
+        }
+
+        [HarmonyPrefix]
+        public static bool Prefix(object __instance, object __0, ref bool __result)
+        {
+            if (!CoopSessionManager.IsMultiFactionActive || !FactionContextManager.IsInitialized || __instance == null)
+                return true;
+
+            if (!MultiFactionTechAndLimitHelpers.CallZXCommandBaseIsVisible(__instance, __0))
+            {
+                __result = false;
+                return false;
+            }
+
+            if (_pEntitiesProvided == null)
+                _pEntitiesProvided = GameBridge.TypeTechnology?.GetProperty("EntitiesProvided", BindingFlags.Public | BindingFlags.Instance);
+            var provided = _pEntitiesProvided?.GetValue(__instance) as IList<Type>;
+            if (provided == null || provided.Count == 0)
+            {
+                __result = true;
+                return false;
+            }
+
+            byte owner = MultiFactionTechAndLimitHelpers.ResolveActivePlayer(__0);
+            bool allBlocked = true;
+            for (int i = 0; i < provided.Count; i++)
+            {
+                Type entType = provided[i];
+                if (entType == null) continue;
+
+                if (WonderCrowdfundManager.IsInitialized && WonderCrowdfundManager.TryClassifyEntityType(entType, out var fKind))
+                {
+                    if (!WonderCrowdfundManager.IsWonderBlockedGlobally(fKind))
+                    {
+                        allBlocked = false;
+                        break;
+                    }
+                    continue;
+                }
+
+                var tmpl = DXGame.Current?.GetEntityFromType(entType) as DXEntity;
+                object dp = tmpl != null ? GameBridge.GetEntityDefaultParamsBoxed(tmpl) : null;
+                if (dp == null)
+                {
+                    allBlocked = false;
+                    break;
+                }
+                GameBridge.ReadEntityBuildLimits(dp, out int maxInstances, out _, out _);
+                if (maxInstances <= 0 || MultiFactionTechAndLimitHelpers.CountOwnedEntitiesOfType(entType, owner) < maxInstances)
+                {
+                    allBlocked = false;
+                    break;
+                }
+            }
+
+            __result = !allBlocked;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Ensures Building.OnSceneRemoved decrements OnlyOneExecutedCommandsFinished on the owning
+    /// player's ledger when a tech-researching building (WoodWorkshop/StoneWorkshop/Foundry) is destroyed/sold.
+    /// </summary>
+    [HarmonyPatch]
+    public static class Patch_Building_OnSceneRemoved_Context
+    {
+        public static MethodBase TargetMethod()
+        {
+            return GameBridge.TypeBuilding != null
+                ? AccessTools.DeclaredMethod(GameBridge.TypeBuilding, "OnSceneRemoved", Type.EmptyTypes)
+                : null;
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix(object __instance, out bool __state)
+        {
+            __state = false;
+            if (!CoopSessionManager.IsMultiFactionActive || !FactionContextManager.IsInitialized || !(__instance is DXEntity ent))
+                return;
+            if (!GameBridge.HasBuildingOnlyOnceCommandsExecuted(ent))
+                return;
+
+            byte owner = FactionOwnershipTracker.GetOwner(ent.ID);
+            if (owner != 0)
+            {
+                FactionContextManager.PushContext(owner);
+                __state = true;
+            }
+        }
+
+        [HarmonyFinalizer]
+        public static void Finalizer(bool __state)
+        {
+            if (__state) FactionContextManager.PopContext();
         }
     }
 

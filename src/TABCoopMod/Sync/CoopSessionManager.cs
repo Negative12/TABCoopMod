@@ -109,6 +109,8 @@ namespace TABCoopMod.Sync
         public static string VersionMismatchSummary { get; private set; } = string.Empty;
         private static readonly HashSet<string> _versionMismatchAlertedKeys = new HashSet<string>();
         private static string _pendingVersionMismatchAlert;
+        public static string SteamLobbyError { get; private set; } = string.Empty;
+        private static string _pendingSteamLobbyErrorAlert;
 
         // Tiered reload policy (async_align). Positions / HP / aggro / projectiles / 5-resource econ /
         // production queues / small structure & entity deltas are corrected continuously without pausing;
@@ -982,6 +984,8 @@ namespace TABCoopMod.Sync
             VersionMismatchSummary = string.Empty;
             _versionMismatchAlertedKeys.Clear();
             _pendingVersionMismatchAlert = null;
+            SteamLobbyError = string.Empty;
+            _pendingSteamLobbyErrorAlert = null;
             ShouldOpenLobbyOnMainMenu = false;
             _pendingClientReturnToMainMenu = false;
             _suppressReturnNotice = false;
@@ -1268,6 +1272,23 @@ namespace TABCoopMod.Sync
 
             Transport.OnPacketReceived += OnPacketReceived;
             Transport.OnVersionMismatch += OnTransportVersionMismatch;
+            if (UnwrapTransport(Transport) is SteamP2PTransport steamTransport)
+            {
+                steamTransport.OnLobbyReady += () =>
+                {
+                    SteamLobbyError = string.Empty;
+                    _pendingSteamLobbyErrorAlert = null;
+                    LobbyStateChanged?.Invoke();
+                };
+                steamTransport.OnLobbyError += OnSteamLobbyError;
+            }
+        }
+
+        private static void OnSteamLobbyError(string shortError, string detailError)
+        {
+            SteamLobbyError = shortError ?? string.Empty;
+            _pendingSteamLobbyErrorAlert = detailError ?? shortError;
+            LobbyStateChanged?.Invoke();
         }
 
         private static void OnTransportVersionMismatch(string peerName, string localVer, string remoteVer)
@@ -2052,6 +2073,23 @@ namespace TABCoopMod.Sync
                 catch (Exception ex)
                 {
                     ModLogger.Warn($"[CoopSessionManager] Failed to show version mismatch alert modal: {ex.Message}");
+                }
+            }
+
+            if (!string.IsNullOrEmpty(_pendingSteamLobbyErrorAlert)
+                && !TestHarnessConfig.Enabled
+                && !TestHarnessConfig.ControlEnabled
+                && !GameBridge.IsGameLoading())
+            {
+                string lobbyErrMsg = _pendingSteamLobbyErrorAlert;
+                _pendingSteamLobbyErrorAlert = null;
+                try
+                {
+                    GameBridge.ShowAlertMessageBox("Steam 大厅创建/加入失败", lobbyErrMsg);
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[CoopSessionManager] Failed to show Steam lobby error alert modal: {ex.Message}");
                 }
             }
 

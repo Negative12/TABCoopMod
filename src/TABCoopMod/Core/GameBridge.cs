@@ -270,7 +270,11 @@ namespace TABCoopMod.Core
         private static PropertyInfo _pDefMaxInstances, _pDefReturnFactor, _pDefCanEnhance, _pDefResGenTime, _pDefConvertResToGold;
         private static PropertyInfo _pDefColonists, _pDefResStorage, _pDefGoldGen, _pDefGoldPerCol, _pDefFoodNeed, _pDefWorkNeed, _pDefWorkSupply, _pDefEngNeed;
         private static PropertyInfo _pDefWoodGen, _pDefStoneGen, _pDefIronGen, _pDefOilGen, _pDefResCollectRadius, _pDefGoldCost, _pDefLevel;
-        private static MethodInfo _mCmdGetCost;
+        private static PropertyInfo _pDefMinColonists, _pDefBuildingRequisite, _pDefEntityName;
+        private static MethodInfo _mCmdGetCost, _mCmdGetDefaultParams;
+        private static PropertyInfo _pCmdDefBuildingRequisite;
+        private static FieldInfo _fCmdErrorMsg;
+        private static PropertyInfo _pBldgOnlyOnceCmdsExecuted;
         private static PropertyInfo _pMayorBonusEntities, _pMayorBonusTechs, _pMayorExtraGold, _pMayorExtraWood, _pMayorExtraStone, _pMayorExtraIron, _pMayorExtraOil;
         private static PropertyInfo _pMayorNameProp, _pMayorIdProp, _pMayorLevelProp, _pMayorQuoteProp, _pMayorActiveProp, _pMayorCustomProp;
 
@@ -954,6 +958,21 @@ namespace TABCoopMod.Core
                     _pDefResCollectRadius = dpType.GetProperty("ResourceCollectionRadius", BindingFlags.Public | BindingFlags.Instance);
                     _pDefGoldCost = dpType.GetProperty("GoldCost", BindingFlags.Public | BindingFlags.Instance);
                     _pDefLevel = dpType.GetProperty("Level", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefMinColonists = dpType.GetProperty("MinColonistsRequisite", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefBuildingRequisite = dpType.GetProperty("BuildingRequisite", BindingFlags.Public | BindingFlags.Instance);
+                    _pDefEntityName = dpType.GetProperty("Name", BindingFlags.Public | BindingFlags.Instance);
+                }
+                if (TypeZXCommand != null)
+                {
+                    _mCmdGetDefaultParams = AccessTools.Method(TypeZXCommand, ObfuscatedSymbols.Method_ZXEntity_GetDefaultParams, Type.EmptyTypes);
+                    var cmdDpType = _mCmdGetDefaultParams?.ReturnType;
+                    if (cmdDpType != null)
+                        _pCmdDefBuildingRequisite = cmdDpType.GetProperty("BuildingRequisite", BindingFlags.Public | BindingFlags.Instance);
+                    _fCmdErrorMsg = TypeZXCommand.GetField("#=z4gwFgFCco_Z9", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                }
+                if (TypeBuilding != null)
+                {
+                    _pBldgOnlyOnceCmdsExecuted = TypeBuilding.GetProperty("OnlyOnceCommandsExecuted", BindingFlags.Public | BindingFlags.Instance);
                 }
                 if (TypeZXCommand != null && TypeZXEntity != null)
                     _mCmdGetCost = AccessTools.Method(TypeZXCommand, ObfuscatedSymbols.Method_ZXCommand_GetCost, new[] { TypeZXEntity });
@@ -1108,7 +1127,13 @@ namespace TABCoopMod.Core
                 Check(_pCcTelescopeEnabled, "CommandCenter.TelescopeEnabled");
                 Check(_fBldgResCost, "Building.ResourceCost field");
                 Check(_pDefMaxInstances, "ZXEntityDefaultParams.MaxInstances");
+                Check(_pDefMinColonists, "ZXEntityDefaultParams.MinColonistsRequisite");
+                Check(_pDefBuildingRequisite, "ZXEntityDefaultParams.BuildingRequisite");
                 Check(_pDefWorkSupply, "ZXEntityDefaultParams.WorkersSupply");
+                Check(_mCmdGetDefaultParams, "ZXCommand.GetDefaultParams");
+                Check(_pCmdDefBuildingRequisite, "ZXCommandDefaultParams.BuildingRequisite");
+                Check(_fCmdErrorMsg, "ZXCommand.ErrorMsg");
+                Check(_pBldgOnlyOnceCmdsExecuted, "Building.OnlyOnceCommandsExecuted");
                 Check(_mCmdGetCost, "ZXCommand.GetCost");
                 Check(_propMapThemeNumDoomVillages, "ZXMapTheme.NumDoomVillages");
                 Check(_propMapDrawerLayerZombies, "ZXMapDrawer.LayerZombies");
@@ -7355,6 +7380,55 @@ namespace TABCoopMod.Core
         {
             if (dp == null || _pDefWorkSupply == null) return 0;
             return (int)_pDefWorkSupply.GetValue(dp);
+        }
+
+        public static void ReadEntityBuildLimits(object dp, out int maxInstances, out int minColonists, out Type buildingRequisite)
+        {
+            if (dp == null)
+            {
+                maxInstances = 0;
+                minColonists = 0;
+                buildingRequisite = null;
+                return;
+            }
+            maxInstances = _pDefMaxInstances != null ? (int)_pDefMaxInstances.GetValue(dp) : 0;
+            minColonists = _pDefMinColonists != null ? (int)_pDefMinColonists.GetValue(dp) : 0;
+            buildingRequisite = _pDefBuildingRequisite?.GetValue(dp) as Type;
+        }
+
+        public static string GetEntityTemplateDisplayName(Type entType)
+        {
+            if (entType == null) return string.Empty;
+            try
+            {
+                var tmpl = DXGame.Current?.GetEntityFromType(entType) as DXEntity;
+                object dp = tmpl != null ? GetEntityDefaultParamsBoxed(tmpl) : null;
+                string name = dp != null ? _pDefEntityName?.GetValue(dp) as string : null;
+                if (!string.IsNullOrEmpty(name)) return name;
+            }
+            catch { }
+            return entType.Name;
+        }
+
+        public static Type GetCommandBuildingRequisite(object cmd)
+        {
+            if (cmd == null || _mCmdGetDefaultParams == null || _pCmdDefBuildingRequisite == null)
+                return null;
+            object dp = _mCmdGetDefaultParams.Invoke(cmd, null);
+            return dp != null ? _pCmdDefBuildingRequisite.GetValue(dp) as Type : null;
+        }
+
+        public static void SetCommandErrorMessage(object cmd, string msg)
+        {
+            if (cmd == null || _fCmdErrorMsg == null) return;
+            _fCmdErrorMsg.SetValue(cmd, msg);
+        }
+
+        public static bool HasBuildingOnlyOnceCommandsExecuted(object building)
+        {
+            if (building == null || _pBldgOnlyOnceCmdsExecuted == null) return false;
+            var list = _pBldgOnlyOnceCmdsExecuted.GetValue(building) as System.Collections.ICollection;
+            return list != null && list.Count > 0;
         }
 
         public static void RefreshEntityFactionColor(DXEntity entity, Color c)

@@ -492,6 +492,14 @@ namespace TABCoopMod.UI
                     _entryStatusMessage = $"创建 Steam 房间失败: {ex.Message}";
                     CoopSessionManager.StopSession();
                     RefreshUI();
+                    if (!Testing.TestHarnessConfig.Enabled && !Testing.TestHarnessConfig.ControlEnabled)
+                    {
+                        try
+                        {
+                            GameBridge.ShowAlertMessageBox("无法创建 Steam 房间", ex.Message);
+                        }
+                        catch { }
+                    }
                 }
             });
             _entryView.AddObject(_btnCreateSteam);
@@ -979,10 +987,18 @@ namespace TABCoopMod.UI
             {
                 var unwrapped = CoopSessionManager.UnwrapTransport();
                 bool isSteam = unwrapped is SteamP2PTransport;
-                bool lobbyValid = unwrapped is SteamP2PTransport st && st.CurrentLobbyId.IsValid();
-                _btnInviteSteam.Enabled = isSteam && lobbyValid;
+                var steamTrans = unwrapped as SteamP2PTransport;
+                bool lobbyValid = steamTrans != null && steamTrans.CurrentLobbyId.IsValid();
+                string lobbyErr = steamTrans?.LobbyError;
+                if (string.IsNullOrEmpty(lobbyErr))
+                    lobbyErr = CoopSessionManager.SteamLobbyError;
+                bool hasLobbyErr = isSteam && !lobbyValid && !string.IsNullOrEmpty(lobbyErr);
+                _btnInviteSteam.Enabled = isSteam && (lobbyValid || hasLobbyErr);
                 GameBridge.SetZXButtonSteamText(_btnInviteSteam,
-                    (isSteam && !lobbyValid) ? "正在创建大厅..." : "邀请 Steam 好友");
+                    hasLobbyErr
+                        ? "大厅创建失败"
+                        : ((isSteam && !lobbyValid) ? "正在创建大厅..." : "邀请 Steam 好友"));
+                GameBridge.SetZXButtonSteamHue(_btnInviteSteam, hasLobbyErr ? 140 : 0);
 
                 bool canStart = CoopSessionManager.CanHostStartGame;
                 bool hasSaves = GameBridge.HasAnySaveGames();
@@ -1213,6 +1229,17 @@ namespace TABCoopMod.UI
                 return;
             }
 
+            if (!string.IsNullOrEmpty(CoopSessionManager.SteamLobbyError))
+            {
+                string hintLine = isHost
+                    ? "请点击右侧 [大厅创建失败] 查看排查建议，或解散房间重试"
+                    : "请确认 Steam 在线状态与网络连接正常，或退出后重新接受邀请";
+                SetDynamicText(_roomStatusBanner,
+                    $"{CoopSessionManager.SteamLobbyError}\n{hintLine}",
+                    textColor: Color.OrangeRed, borderColor: Color.OrangeRed);
+                return;
+            }
+
             if (isHost)
             {
                 if (!CoopSessionManager.HasJoinedClient)
@@ -1348,9 +1375,18 @@ namespace TABCoopMod.UI
 
         private static void InviteSteamClicked()
         {
-            if (CoopSessionManager.UnwrapTransport() is SteamP2PTransport steamTrans && steamTrans.CurrentLobbyId.IsValid())
+            if (CoopSessionManager.UnwrapTransport() is SteamP2PTransport steamTrans)
             {
-                steamTrans.OpenSteamInviteOverlay();
+                if (steamTrans.CurrentLobbyId.IsValid())
+                {
+                    steamTrans.OpenSteamInviteOverlay();
+                }
+                else if (!string.IsNullOrEmpty(steamTrans.LobbyError))
+                {
+                    GameBridge.ShowAlertMessageBox(
+                        "Steam 大厅创建失败",
+                        steamTrans.LobbyErrorDetail ?? steamTrans.LobbyError);
+                }
             }
         }
 
