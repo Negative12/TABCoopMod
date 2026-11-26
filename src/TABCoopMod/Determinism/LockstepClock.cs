@@ -7802,7 +7802,13 @@ namespace TABCoopMod.Determinism
         internal static void OnBodyGeometryChanged(DXPhysicBody body)
         {
             if (!_ready || _needsRebuild || body == null || LockstepClock.LoadingLevel) return;
-            uint mask = body.Handle != IntPtr.Zero ? body.CategoryMask : 0u;
+            // DXPhysicsNative.Body_GetCategoryMask dereferences [Handle+0x88] (cpShape) without a null
+            // check, unlike Body_SetCategoryMask / Body_GetSize. Shape-less bodies (DXPhysicalShape.None
+            // via DXPhysicBody.Create) leave [Handle+0x88] == IntPtr.Zero and would AV if queried.
+            IntPtr handle = body.Handle;
+            uint mask = (handle != IntPtr.Zero && System.Runtime.InteropServices.Marshal.ReadIntPtr(handle, 0x88) != IntPtr.Zero)
+                ? body.CategoryMask
+                : 0u;
             if ((mask & 1u) == 0u && _tracked.Count == 0) return;
             OnBodyCategoryMaskSet(body, mask);
         }
@@ -7987,33 +7993,56 @@ namespace TABCoopMod.Determinism
         }
     }
 
-    [HarmonyPatch(typeof(DXPhysicBody), nameof(DXPhysicBody.Create), new[] { typeof(float), typeof(PointF), typeof(float), typeof(DXBodyType), typeof(object) })]
-    public static class PhysicBodyCreate1uPatch
+    /// <summary>
+    /// Defers patching static DXPhysicBody.Create* factory methods until after DXPhysicWorld.Init()
+    /// has allocated DXPhysicWorld.Bodies. Patching them at startup before ZXGame initializes physics
+    /// triggers DXPhysicBody..cctor() (Empty = new DXPhysicBody()) while Bodies == null, permanently
+    /// poisoning DXPhysicBody with a cached TypeInitializationException for the whole AppDomain.
+    /// </summary>
+    [HarmonyPatch(typeof(DXPhysicWorld), nameof(DXPhysicWorld.Init), new[] { typeof(int) })]
+    public static class PhysicWorldInitCreate1uPatches
     {
-        [HarmonyPostfix]
-        public static void Postfix(DXPhysicBody __result)
-        {
-            if (LockstepClock.IsDeterministicModeActive)
-                Physics1uGrid.OnBodyGeometryChanged(__result);
-        }
-    }
+        private static int _applied;
 
-    [HarmonyPatch(typeof(DXPhysicBody), nameof(DXPhysicBody.CreateCircle), new[] { typeof(float), typeof(PointF), typeof(float), typeof(DXBodyType), typeof(object) })]
-    public static class PhysicBodyCreateCircle1uPatch
-    {
         [HarmonyPostfix]
-        public static void Postfix(DXPhysicBody __result)
+        public static void Postfix()
         {
-            if (LockstepClock.IsDeterministicModeActive)
-                Physics1uGrid.OnBodyGeometryChanged(__result);
-        }
-    }
+            if (Interlocked.Exchange(ref _applied, 1) != 0)
+                return;
+            var harmony = TABCoopMod.Bootstrap.ModEntry.HarmonyInstance;
+            if (harmony == null || DXPhysicWorld.Bodies == null)
+                return;
 
-    [HarmonyPatch(typeof(DXPhysicBody), nameof(DXPhysicBody.CreateRectangle), new[] { typeof(float), typeof(RectangleF), typeof(DXBodyType), typeof(object) })]
-    public static class PhysicBodyCreateRectangle1uPatch
-    {
-        [HarmonyPostfix]
-        public static void Postfix(DXPhysicBody __result)
+            try
+            {
+                var postfix = new HarmonyMethod(typeof(PhysicWorldInitCreate1uPatches), nameof(CreateBodyPostfix));
+                var targets = new MethodInfo[]
+                {
+                    AccessTools.Method(typeof(DXPhysicBody), nameof(DXPhysicBody.Create),
+                        new[] { typeof(float), typeof(PointF), typeof(float), typeof(DXBodyType), typeof(object) }),
+                    AccessTools.Method(typeof(DXPhysicBody), nameof(DXPhysicBody.CreateCircle),
+                        new[] { typeof(float), typeof(PointF), typeof(float), typeof(DXBodyType), typeof(object) }),
+                    AccessTools.Method(typeof(DXPhysicBody), nameof(DXPhysicBody.CreateRectangle),
+                        new[] { typeof(float), typeof(RectangleF), typeof(DXBodyType), typeof(object) })
+                };
+                int patched = 0;
+                for (int i = 0; i < targets.Length; i++)
+                {
+                    if (targets[i] != null)
+                    {
+                        harmony.Patch(targets[i], postfix: postfix);
+                        patched++;
+                    }
+                }
+                ModLogger.Info($"[Perf] Applied deferred DXPhysicBody.Create* Physics1uGrid patches ({patched}/3).");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[Perf] Failed to apply deferred DXPhysicBody.Create* patches: {ex.Message}");
+            }
+        }
+
+        public static void CreateBodyPostfix(DXPhysicBody __result)
         {
             if (LockstepClock.IsDeterministicModeActive)
                 Physics1uGrid.OnBodyGeometryChanged(__result);
