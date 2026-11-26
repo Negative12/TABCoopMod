@@ -1,4 +1,4 @@
-# package_release.ps1
+﻿# package_release.ps1
 # Builds TABCoopMod (Release) and packages a drag-and-drop archive into dist/
 # containing ONLY runtime files + a plain-text user guide (no install scripts).
 
