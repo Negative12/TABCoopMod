@@ -519,12 +519,7 @@ namespace TABCoopMod.UI
             });
             _entryView.AddObject(_btnCreateSteam);
 
-            var steamDesc = CreateTextBox(padLeft, 40f * u + _btnCreateSteam.Height + 6f * u, leftW - padLeft * 2f, 44f * u,
-                10.5f * u, FontStyle.Regular, Color.Silver, ContentAlignment.TopLeft, Color.Transparent, Color.Transparent, 0f);
-            steamDesc.Text = "创建仅 Steam 好友可见的 2~3 人合作大厅，\n进入等候房间后可通过 Shift+Tab 邀请好友。";
-            _entryView.AddObject(steamDesc);
-
-            float secondBtnY = steamDesc.Y + steamDesc.Height + 18f * u;
+            float secondBtnY = 40f * u + _btnCreateSteam.Height + 18f * u;
             _btnCreateLoopback = CreateNativeButton("创建本地测试房间", padLeft, secondBtnY, 0, () =>
             {
                 _entryStatusMessage = string.Empty;
@@ -542,20 +537,26 @@ namespace TABCoopMod.UI
             });
             _entryView.AddObject(_btnCreateLoopback);
 
-            var localDesc = CreateTextBox(padLeft, secondBtnY + _btnCreateLoopback.Height + 6f * u, leftW - padLeft * 2f, 44f * u,
-                10.5f * u, FontStyle.Regular, Color.Silver, ContentAlignment.TopLeft, Color.Transparent, Color.Transparent, 0f);
-            localDesc.Text = "在 127.0.0.1:27099 开放本地房间，\n支持同机双开及延迟/抖动/丢包网络模拟。";
-            _entryView.AddObject(localDesc);
-
             // LAN / frp TCP room (same wire protocol, host listens on 0.0.0.0).
-            float lanBtnY = localDesc.Y + localDesc.Height + 14f * u;
+            float lanBtnY = secondBtnY + _btnCreateLoopback.Height + 18f * u;
             _btnCreateLan = CreateNativeButton("创建局域网房间", padLeft, lanBtnY, 0, CreateLanRoomClicked);
             _entryView.AddObject(_btnCreateLan);
 
-            var lanDesc = CreateTextBox(padLeft, lanBtnY + _btnCreateLan.Height + 6f * u, leftW - padLeft * 2f, 36f * u,
-                10.5f * u, FontStyle.Regular, Color.Silver, ContentAlignment.TopLeft, Color.Transparent, Color.Transparent, 0f);
-            lanDesc.Text = "监听 0.0.0.0，端口可输入（默认 27099），\n适合局域网或 frp / nps 的 TCP 内网穿透。";
-            _entryView.AddObject(lanDesc);
+            float lanJoinY = lanBtnY + _btnCreateLan.Height + 22f * u;
+            _btnJoinLan = CreateNativeButton("加入局域网房间", padLeft, lanJoinY, -30, JoinLanRoomClicked);
+            _entryView.AddObject(_btnJoinLan);
+
+            float lastBtnX = padLeft + Math.Max(190f * u, _btnJoinLan.Width + 8f * u);
+            float maxLastBtnX = leftW - 110f * u;
+            if (lastBtnX > maxLastBtnX)
+                lastBtnX = Math.Max(padLeft + 170f * u, maxLastBtnX);
+            _btnJoinLast = CreateNativeButton("加入上次", lastBtnX, lanJoinY, 0, JoinLastLanRoomClicked, smallFont: true);
+            _entryView.AddObject(_btnJoinLast);
+
+            _lastLanAddressText = CreateTextBox(padLeft, lanJoinY + _btnJoinLan.Height + 6f * u, leftW - padLeft * 2f, 18f * u,
+                9f * u, FontStyle.Regular, Color.Silver, ContentAlignment.MiddleLeft,
+                Color.Transparent, Color.Transparent, 0f);
+            _entryView.AddObject(_lastLanAddressText);
 
             // Right column: Probe & Join
             var rightTitle = CreateTextBox(rightX, 0f, rightW, 28f * u, 13.5f * u, FontStyle.Bold, Color.Gold,
@@ -585,28 +586,6 @@ namespace TABCoopMod.UI
                 ContentAlignment.MiddleLeft, PanelBgColor, BorderDimColor, 1f);
             joinTip.Text = "  Steam 好友联机：\n  接受邀请后自动进入等候房间。";
             _entryView.AddObject(joinTip);
-
-            float lanSectionY = tipY + joinTip.Height + 14f * u;
-            var lanTitle = CreateTextBox(rightX, lanSectionY, rightW, 20f * u, 10f * u, FontStyle.Bold, Color.LightCyan,
-                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
-            lanTitle.Text = "局域网 / frp 联机";
-            _entryView.AddObject(lanTitle);
-
-            float lanJoinY = lanSectionY + 22f * u;
-            _btnJoinLan = CreateNativeButton("加入局域网房间", rightX, lanJoinY, -30, JoinLanRoomClicked);
-            _entryView.AddObject(_btnJoinLan);
-
-            float lastBtnX = rightX + Math.Max(180f * u, _btnJoinLan.Width + 8f * u);
-            float maxLastBtnX = rightX + rightW - 110f * u;
-            if (lastBtnX > maxLastBtnX)
-                lastBtnX = Math.Max(rightX + 170f * u, maxLastBtnX);
-            _btnJoinLast = CreateNativeButton("加入上次", lastBtnX, lanJoinY, 0, JoinLastLanRoomClicked, smallFont: true);
-            _entryView.AddObject(_btnJoinLast);
-
-            _lastLanAddressText = CreateTextBox(rightX, lanJoinY + _btnJoinLan.Height + 6f * u, rightW, 18f * u,
-                9f * u, FontStyle.Regular, Color.Silver, ContentAlignment.MiddleLeft,
-                Color.Transparent, Color.Transparent, 0f);
-            _entryView.AddObject(_lastLanAddressText);
 
             _entryMessageText = CreateTextBox(0f, bodyH - 32f * u, rightX + rightW, 28f * u,
                 10.5f * u, FontStyle.Bold, Color.OrangeRed, ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
