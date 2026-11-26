@@ -7595,25 +7595,33 @@ namespace TABCoopMod.Determinism
             return !_disabledByEnv && _ready && !_needsRebuild && _dynamic1uCount == 0 && _nCells > 0;
         }
 
-        private static bool TryComputePaddedBounds(DXPhysicBody body, int nCells, out CellRect rect)
+        private static bool TryComputePaddedBounds(DXPhysicBody body, int nCells, out CellRect rect, out bool hasEntity)
         {
             rect = default;
+            hasEntity = false;
             if (body == null || body.Handle == IntPtr.Zero || nCells <= 0) return false;
             if (System.Runtime.InteropServices.Marshal.ReadIntPtr(body.Handle, 0x88) == IntPtr.Zero) return false;
 
             float left = float.MaxValue, top = float.MaxValue, right = float.MinValue, bottom = float.MinValue;
-            PointF center = body.PositionComputed;
+            // Read native body center (cpBody->p) and extents; DXPhysicsNative.Body_GetSize returns
+            // negative Height (-h) for cpPolyShape rectangles (including all CAccesibleLayer terrain colliders).
+            PointF center = body.PhysicPosition;
             SizeF ps = body.PhysicSize;
-            if (ps.Width > 0f && ps.Height > 0f)
+            float pw = Math.Abs(ps.Width);
+            float ph = Math.Abs(ps.Height);
+            if (pw > 0f && ph > 0f)
             {
-                left = center.X - ps.Width * 0.5f;
-                right = center.X + ps.Width * 0.5f;
-                top = center.Y - ps.Height * 0.5f;
-                bottom = center.Y + ps.Height * 0.5f;
+                float hx = pw * 0.5f;
+                float hy = ph * 0.5f;
+                left = center.X - hx;
+                right = center.X + hx;
+                top = center.Y - hy;
+                bottom = center.Y + hy;
             }
 
             var e = body.GameEntity;
-            bool isDyn = e != null && e.PhysicalType == DXBodyType.Dynamic;
+            hasEntity = e != null;
+            bool isDyn = e != null ? e.PhysicalType == DXBodyType.Dynamic : body.BodyType == DXBodyType.Dynamic;
             if (e != null)
             {
                 Rectangle cellRect = e.CellArea;
@@ -7696,6 +7704,9 @@ namespace TABCoopMod.Determinism
 
             lock (_sync)
             {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                _ready = false;
+                _needsRebuild = true;
                 _tracked.Clear();
                 _dynamic1uCount = 0;
                 _nCells = nCells;
@@ -7707,6 +7718,9 @@ namespace TABCoopMod.Determinism
                 if (_coarseRefCount.Length < coarseLen) _coarseRefCount = new ushort[coarseLen];
                 else Array.Clear(_coarseRefCount, 0, coarseLen);
 
+                int noEntityCount = 0;
+                int entityCount = 0;
+                int skippedCount = 0;
                 var bodies = DXPhysicWorld.Bodies;
                 if (bodies != null)
                 {
@@ -7716,18 +7730,33 @@ namespace TABCoopMod.Determinism
                         if (b == null || b.Handle == IntPtr.Zero) continue;
                         if (System.Runtime.InteropServices.Marshal.ReadIntPtr(b.Handle, 0x88) == IntPtr.Zero) continue;
                         if ((b.CategoryMask & 1u) == 0u) continue;
-                        if (TryComputePaddedBounds(b, nCells, out CellRect r))
+                        if (TryComputePaddedBounds(b, nCells, out CellRect r, out bool hasEntity))
                         {
                             _tracked[b] = r;
                             if (r.Dynamic1u) _dynamic1uCount++;
+                            if (hasEntity) entityCount++;
+                            else noEntityCount++;
                             ApplyDelta(in r, +1);
+                        }
+                        else
+                        {
+                            skippedCount++;
                         }
                     }
                 }
 
+                int blockedCells = 0;
+                for (int i = 0; i < cellLen; i++)
+                    if (_cellRefCount[i] != 0) blockedCells++;
+                int blockedCoarse = 0;
+                for (int i = 0; i < coarseLen; i++)
+                    if (_coarseRefCount[i] != 0) blockedCoarse++;
+
                 _builtLevel = level;
                 _needsRebuild = false;
                 _ready = true;
+                sw.Stop();
+                ModLogger.Info($"[Perf] Physics1uGrid built: tracked={_tracked.Count} (terrain/noEntity={noEntityCount}, entity={entityCount}, dyn1u={_dynamic1uCount}, skipped={skippedCount}), blockedCells={blockedCells}/{cellLen}, blockedCoarse={blockedCoarse}/{coarseLen}, nCells={nCells}, {sw.Elapsed.TotalMilliseconds:F2}ms");
             }
         }
 
@@ -7741,15 +7770,27 @@ namespace TABCoopMod.Determinism
                 bool wasTracked = _tracked.TryGetValue(body, out CellRect oldRect);
                 if (!has1u && !wasTracked) return;
 
+                CellRect newRect = default;
+                bool hasNew = has1u
+                    && body.Handle != IntPtr.Zero
+                    && System.Runtime.InteropServices.Marshal.ReadIntPtr(body.Handle, 0x88) != IntPtr.Zero
+                    && TryComputePaddedBounds(body, _nCells, out newRect, out _);
+
+                if (wasTracked && hasNew
+                    && oldRect.X0 == newRect.X0 && oldRect.Y0 == newRect.Y0
+                    && oldRect.X1 == newRect.X1 && oldRect.Y1 == newRect.Y1
+                    && oldRect.Dynamic1u == newRect.Dynamic1u)
+                {
+                    return;
+                }
+
                 if (wasTracked)
                 {
                     ApplyDelta(in oldRect, -1);
                     if (oldRect.Dynamic1u && _dynamic1uCount > 0) _dynamic1uCount--;
                     _tracked.Remove(body);
                 }
-                if (has1u && body.Handle != IntPtr.Zero
-                    && System.Runtime.InteropServices.Marshal.ReadIntPtr(body.Handle, 0x88) != IntPtr.Zero
-                    && TryComputePaddedBounds(body, _nCells, out CellRect newRect))
+                if (hasNew)
                 {
                     _tracked[body] = newRect;
                     if (newRect.Dynamic1u) _dynamic1uCount++;
@@ -7943,6 +7984,39 @@ namespace TABCoopMod.Determinism
         public static void Postfix()
         {
             Physics1uGrid.Invalidate();
+        }
+    }
+
+    [HarmonyPatch(typeof(DXPhysicBody), nameof(DXPhysicBody.Create), new[] { typeof(float), typeof(PointF), typeof(float), typeof(DXBodyType), typeof(object) })]
+    public static class PhysicBodyCreate1uPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix(DXPhysicBody __result)
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                Physics1uGrid.OnBodyGeometryChanged(__result);
+        }
+    }
+
+    [HarmonyPatch(typeof(DXPhysicBody), nameof(DXPhysicBody.CreateCircle), new[] { typeof(float), typeof(PointF), typeof(float), typeof(DXBodyType), typeof(object) })]
+    public static class PhysicBodyCreateCircle1uPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix(DXPhysicBody __result)
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                Physics1uGrid.OnBodyGeometryChanged(__result);
+        }
+    }
+
+    [HarmonyPatch(typeof(DXPhysicBody), nameof(DXPhysicBody.CreateRectangle), new[] { typeof(float), typeof(RectangleF), typeof(DXBodyType), typeof(object) })]
+    public static class PhysicBodyCreateRectangle1uPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix(DXPhysicBody __result)
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                Physics1uGrid.OnBodyGeometryChanged(__result);
         }
     }
 
