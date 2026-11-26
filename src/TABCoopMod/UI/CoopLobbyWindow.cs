@@ -108,6 +108,8 @@ namespace TABCoopMod.UI
         private static DXTextObject _probeCardText;
         private static DXButton _btnCreateLan;
         private static DXButton _btnJoinLan;
+        private static DXButton _btnJoinLast;
+        private static DXTextObject _lastLanAddressText;
         private static DXButton _btnJoinLoopback;
         private static DXButton _btnRefreshProbe;
         private static DXTextObject _entryMessageText;
@@ -555,9 +557,6 @@ namespace TABCoopMod.UI
             lanDesc.Text = "监听 0.0.0.0，端口可输入（默认 27099），\n适合局域网或 frp / nps 的 TCP 内网穿透。";
             _entryView.AddObject(lanDesc);
 
-            _btnJoinLan = CreateNativeButton("加入局域网房间", padLeft, lanDesc.Y + lanDesc.Height + 8f * u, -30, JoinLanRoomClicked);
-            _entryView.AddObject(_btnJoinLan);
-
             // Right column: Probe & Join
             var rightTitle = CreateTextBox(rightX, 0f, rightW, 28f * u, 13.5f * u, FontStyle.Bold, Color.Gold,
                 ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
@@ -582,10 +581,32 @@ namespace TABCoopMod.UI
             _entryView.AddObject(_btnRefreshProbe);
 
             float tipY = refreshBtnY + _btnRefreshProbe.Height + 14f * u;
-            var joinTip = CreateTextBox(rightX, tipY, rightW, 74f * u, 10f * u, FontStyle.Regular, Color.LightSteelBlue,
+            var joinTip = CreateTextBox(rightX, tipY, rightW, 46f * u, 10f * u, FontStyle.Regular, Color.LightSteelBlue,
                 ContentAlignment.MiddleLeft, PanelBgColor, BorderDimColor, 1f);
-            joinTip.Text = "  Steam 好友联机：\n  直接接受好友发送的 Steam 邀请，\n  游戏将自动连接并进入等候房间。";
+            joinTip.Text = "  Steam 好友联机：\n  接受邀请后自动进入等候房间。";
             _entryView.AddObject(joinTip);
+
+            float lanSectionY = tipY + joinTip.Height + 14f * u;
+            var lanTitle = CreateTextBox(rightX, lanSectionY, rightW, 20f * u, 10f * u, FontStyle.Bold, Color.LightCyan,
+                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
+            lanTitle.Text = "局域网 / frp 联机";
+            _entryView.AddObject(lanTitle);
+
+            float lanJoinY = lanSectionY + 22f * u;
+            _btnJoinLan = CreateNativeButton("加入局域网房间", rightX, lanJoinY, -30, JoinLanRoomClicked);
+            _entryView.AddObject(_btnJoinLan);
+
+            float lastBtnX = rightX + Math.Max(180f * u, _btnJoinLan.Width + 8f * u);
+            float maxLastBtnX = rightX + rightW - 110f * u;
+            if (lastBtnX > maxLastBtnX)
+                lastBtnX = Math.Max(rightX + 170f * u, maxLastBtnX);
+            _btnJoinLast = CreateNativeButton("加入上次", lastBtnX, lanJoinY, 0, JoinLastLanRoomClicked, smallFont: true);
+            _entryView.AddObject(_btnJoinLast);
+
+            _lastLanAddressText = CreateTextBox(rightX, lanJoinY + _btnJoinLan.Height + 6f * u, rightW, 18f * u,
+                9f * u, FontStyle.Regular, Color.Silver, ContentAlignment.MiddleLeft,
+                Color.Transparent, Color.Transparent, 0f);
+            _entryView.AddObject(_lastLanAddressText);
 
             _entryMessageText = CreateTextBox(0f, bodyH - 32f * u, rightX + rightW, 28f * u,
                 10.5f * u, FontStyle.Bold, Color.OrangeRed, ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
@@ -889,10 +910,20 @@ namespace TABCoopMod.UI
 
         private static void RefreshEntryView()
         {
+            LanEndpointStore.EnsureLoaded();
             GameBridge.SetZXButtonSteamText(_btnCreateSteam, "创建 Steam 房间");
             GameBridge.SetZXButtonSteamText(_btnCreateLoopback, "创建本地测试房间");
             GameBridge.SetZXButtonSteamText(_btnCreateLan, "创建局域网房间");
             GameBridge.SetZXButtonSteamText(_btnJoinLan, "加入局域网房间");
+            GameBridge.SetZXButtonSteamText(_btnJoinLast, "加入上次");
+
+            string lastAddress = LanEndpointStore.LastJoinAddress;
+            bool hasLastAddress = !string.IsNullOrWhiteSpace(lastAddress);
+            if (_btnJoinLast != null)
+                _btnJoinLast.Enabled = hasLastAddress;
+            SetDynamicText(_lastLanAddressText,
+                hasLastAddress ? $"上次地址: {lastAddress}" : "上次地址: 无",
+                textColor: hasLastAddress ? Color.LightGreen : Color.Silver);
 
             var probe = _lastProbe;
             if (probe != null && probe.IsOnline)
@@ -1406,13 +1437,17 @@ namespace TABCoopMod.UI
         private static void CreateLanRoomClicked()
         {
             _entryStatusMessage = string.Empty;
-            string defaultPort = Environment.GetEnvironmentVariable("TABCOOP_LAN_PORT");
-            if (!int.TryParse(defaultPort, out int envPort) || envPort <= 0 || envPort > 65535)
-                envPort = LocalTcpLoopbackTransport.DefaultPort;
+            LanEndpointStore.EnsureLoaded();
+            int defaultPort = LanEndpointStore.LastHostPort > 0
+                ? LanEndpointStore.LastHostPort
+                : LocalTcpLoopbackTransport.DefaultPort;
+            string envPortText = Environment.GetEnvironmentVariable("TABCOOP_LAN_PORT");
+            if (int.TryParse(envPortText, out int envPort) && envPort > 0 && envPort <= 65535)
+                defaultPort = envPort;
             GameBridge.ShowInputBox(
                 "创建局域网房间",
                 "请输入监听端口（默认 27099；frp/nps 请映射这个 TCP 端口）：",
-                envPort.ToString(),
+                defaultPort.ToString(),
                 text =>
                 {
                     if (!int.TryParse((text ?? string.Empty).Trim(), out int port) || port <= 0 || port > 65535)
@@ -1425,6 +1460,7 @@ namespace TABCoopMod.UI
                     try
                     {
                         CoopSessionManager.StartHostSession(useLoopback: true, lanPort: port);
+                        LanEndpointStore.SaveLastHostPort(port);
                         RefreshUI();
                     }
                     catch (Exception ex)
@@ -1440,9 +1476,14 @@ namespace TABCoopMod.UI
         private static void JoinLanRoomClicked()
         {
             _entryStatusMessage = string.Empty;
+            LanEndpointStore.EnsureLoaded();
             string defaultTarget = Environment.GetEnvironmentVariable("TABCOOP_LAN_JOIN");
             if (string.IsNullOrWhiteSpace(defaultTarget))
-                defaultTarget = "127.0.0.1:27099";
+            {
+                defaultTarget = !string.IsNullOrWhiteSpace(LanEndpointStore.LastJoinAddress)
+                    ? LanEndpointStore.LastJoinAddress
+                    : "127.0.0.1:27099";
+            }
             GameBridge.ShowInputBox(
                 "加入局域网房间",
                 "请输入房主地址（IP 或域名:端口，例如 192.168.1.10:27099 或 xxx.sakurafrp.com:37099）：",
@@ -1463,6 +1504,7 @@ namespace TABCoopMod.UI
                             useLoopback: true,
                             targetAddressOrSteamId: target,
                             lanMode: true);
+                        LanEndpointStore.SaveLastJoin(target);
                         RefreshUI();
                     }
                     catch (Exception ex)
@@ -1473,6 +1515,34 @@ namespace TABCoopMod.UI
                     }
                 },
                 maxLength: 64);
+        }
+
+        private static void JoinLastLanRoomClicked()
+        {
+            _entryStatusMessage = string.Empty;
+            LanEndpointStore.EnsureLoaded();
+            string target = LanEndpointStore.LastJoinAddress;
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                _entryStatusMessage = "还没有可用的上次地址，请先手动加入一次局域网房间。";
+                RefreshUI();
+                return;
+            }
+
+            try
+            {
+                CoopSessionManager.JoinSession(
+                    useLoopback: true,
+                    targetAddressOrSteamId: target,
+                    lanMode: true);
+                RefreshUI();
+            }
+            catch (Exception ex)
+            {
+                _entryStatusMessage = $"连接上次房间失败: {ex.Message}";
+                CoopSessionManager.StopSession();
+                RefreshUI();
+            }
         }
 
         private static void InviteSteamClicked()
