@@ -51,12 +51,21 @@ namespace TABCoopMod.Networking
         RttPong = 0x43
     }
 
+    public struct PeerConnectionDiag
+    {
+        public byte PlayerId;
+        public bool IsDirectUdp;
+        public string PathSummary;
+        public double DirectRttMs;
+    }
+
     public interface ITransportDiagnostics
     {
         bool IsDirectConnected { get; }
         string ActivePathSummary { get; }
         double ActiveDirectRttMs { get; }
         string GetDebugStatsLine();
+        bool TryGetPeerDiagnostics(byte peerPlayerId, out PeerConnectionDiag diag);
     }
 
     public sealed class PeerInfo
@@ -138,6 +147,24 @@ namespace TABCoopMod.Networking
             : "Local Loopback (127.0.0.1)";
         public double ActiveDirectRttMs => 0.0;
         public string GetDebugStatsLine() => $"LocalTcpLoopback(Active={IsActive}, Peers={_peers.Count})";
+
+        public bool TryGetPeerDiagnostics(byte peerPlayerId, out PeerConnectionDiag diag)
+        {
+            diag = new PeerConnectionDiag
+            {
+                PlayerId = peerPlayerId,
+                IsDirectUdp = false,
+                PathSummary = "Local Loopback (127.0.0.1)",
+                DirectRttMs = -1.0
+            };
+            if (!IsActive) return false;
+            if (!IsHost) return peerPlayerId == 1;
+            for (int i = 0; i < _peers.Count; i++)
+            {
+                if (_peers[i].PlayerId == peerPlayerId) return true;
+            }
+            return false;
+        }
 
         public event Action<byte, PacketType, BinaryReader> OnPacketReceived;
         public event Action<PeerInfo> OnPeerConnected;

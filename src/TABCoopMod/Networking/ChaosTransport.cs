@@ -189,6 +189,28 @@ namespace TABCoopMod.Networking
             return $"{innerLine} | Chaos(lat={_cfg.LatencyMs}ms, jit={_cfg.JitterMs}ms, loss={_cfg.LossRate:P1}, sent={Scheduled}, dlv={Delivered}, drop={Dropped})";
         }
 
+        public bool TryGetPeerDiagnostics(byte peerPlayerId, out PeerConnectionDiag diag)
+        {
+            if (_inner is ITransportDiagnostics innerDiag && innerDiag.TryGetPeerDiagnostics(peerPlayerId, out diag))
+            {
+                if (IsChaosActive)
+                {
+                    diag.IsDirectUdp = false;
+                    diag.DirectRttMs = -1.0;
+                    diag.PathSummary = $"{diag.PathSummary} [波动 {_cfg.LatencyMs}ms ±{_cfg.JitterMs}ms 丢包{_cfg.LossRate * 100.0:0.#}%]";
+                }
+                return true;
+            }
+            diag = new PeerConnectionDiag
+            {
+                PlayerId = peerPlayerId,
+                IsDirectUdp = false,
+                PathSummary = ActivePathSummary,
+                DirectRttMs = -1.0
+            };
+            return IsActive;
+        }
+
         public event Action<byte, PacketType, BinaryReader> OnPacketReceived;
         public event Action<PeerInfo> OnPeerConnected;
         public event Action<byte> OnPeerDisconnected;

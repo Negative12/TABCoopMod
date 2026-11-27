@@ -833,10 +833,17 @@ namespace TABCoopMod.Determinism
             PendingLoadSeed = seed;
             PendingSnapshotEntityIdCounter = snapshotEntityIdCounter;
             HasPendingPostLoadCalibration = true;
-            if (markLoading) LoadingLevel = true;
+            // Always synchronize LoadingLevel with markLoading so an aborted earlier save load cannot
+            // leak LoadingLevel=true into a subsequent New Survival MapGenerator run.
+            LoadingLevel = markLoading;
             AllowPhysicsThisFrame = false;
             DXGame.LastGameTimeIAUpdate = 0.0;
             DXPhysicWorld.LastGameTimeUpdatePhysics = 0.0;
+        }
+
+        internal static void ClearLoadingFlag()
+        {
+            LoadingLevel = false;
         }
 
         /// <summary>
@@ -2213,11 +2220,26 @@ namespace TABCoopMod.Determinism
 
             // Only isolate render-thread transient IDs into the 0x8000... UI range once a synced
             // level or deterministic replay is actually running. Offline/pre-sync map generation
-            // (e.g., Host starting a New Survival Game after clicking Co-op Host in the menu) must
-            // produce normal non-masked entity IDs so StateHasher, ControlServer, and replays track them.
+            // (e.g., Host starting a New Survival Game after clicking Co-op Host in the menu) runs
+            // on a background worker thread and must allocate clean low-bit deterministic IDs so
+            // vanilla DXGuid.New()'s upper bits and NextLocalUiGuid() never hide gameplay entities
+            // from StateHasher and CalibrateEntityIdCounterFromLoadedLevel.
             if (Sync.CoopSessionManager.IsInSyncedLevel || Testing.DeterministicReplayVerifier.IsRunning)
             {
                 __result = LockstepClock.NextLocalUiGuid();
+                return false;
+            }
+
+            if (Sync.CoopSessionManager.IsSessionActive
+                && Sync.CoopSessionManager.Transport != null
+                && Sync.CoopSessionManager.Transport.IsHost
+                && !Sync.CoopSessionManager.IsHostSnapshotReloadPending
+                && (LockstepClock.InMapDrawer
+                    || (LockstepClock.MainThreadId != 0 && Thread.CurrentThread.ManagedThreadId != LockstepClock.MainThreadId)))
+            {
+                __result = LockstepClock.IsInProjectileGuidContext
+                    ? LockstepClock.NextSyncedProjectileGuid()
+                    : LockstepClock.NextSyncedGuid();
                 return false;
             }
 
@@ -2392,6 +2414,7 @@ namespace TABCoopMod.Determinism
                     if (game != null && !game.Disposing && _fastRunLogicLambda != null)
                     {
                         long launchTs = _asyncLaunchTs;
+                        long workerStartTs = System.Diagnostics.Stopwatch.GetTimestamp();
                         try
                         {
                             _fastRunLogicLambda(game);
@@ -2421,6 +2444,7 @@ namespace TABCoopMod.Determinism
                                 DiagPhysStepWindowCount++;
                             }
                         }
+                        Volatile.Write(ref _lastAsyncWorkerWorkTicks, System.Diagnostics.Stopwatch.GetTimestamp() - workerStartTs);
                     }
                 }
                 catch (Exception ex)
@@ -2455,6 +2479,8 @@ namespace TABCoopMod.Determinism
             _asyncWaitStartTs = 0;
             _diagAsyncWaitMs = 0.0;
             _diagWorkerLogicMs = 0.0;
+            Volatile.Write(ref _lastAsyncWorkerWorkTicks, 0L);
+            ResetPerfRingBuffer();
             lock (_deferredAsyncLock) { _deferredAsyncPostMethods.Clear(); }
             LockstepClock._physPullWorkerCount = 0;
             LockstepClock._physPullLevel = null;
@@ -2519,6 +2545,91 @@ namespace TABCoopMod.Determinism
         internal static int DiagTickWindowCount;
         internal static int DiagPhysStepWindowCount;
         private static readonly double _swTickToMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        private static long _lastAsyncWorkerWorkTicks;
+        internal static long LastClientNetGateBlockTs;
+        private static long _lastSimPauseOrLoadWallTs;
+        private const int PerfSampleCap = 512;
+        private static readonly long[] _perfSampleTs = new long[PerfSampleCap];
+        private static readonly double[] _perfSampleWorkMs = new double[PerfSampleCap];
+        private static int _perfSampleHead;
+        private static int _perfSampleCount;
+
+        public static double SecondsSinceLastSimPauseOrLoad =>
+            _lastSimPauseOrLoadWallTs <= 0L
+                ? 999.0
+                : (System.Diagnostics.Stopwatch.GetTimestamp() - _lastSimPauseOrLoadWallTs) * _swTickToMs / 1000.0;
+
+        internal static void ResetPerfRingBuffer()
+        {
+            _perfSampleHead = 0;
+            _perfSampleCount = 0;
+            LastClientNetGateBlockTs = 0L;
+            _lastSimPauseOrLoadWallTs = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+
+        internal static void RecordCompletedTickPerf(double tickWorkMs)
+        {
+            long nowTs = System.Diagnostics.Stopwatch.GetTimestamp();
+            _perfSampleTs[_perfSampleHead] = nowTs;
+            _perfSampleWorkMs[_perfSampleHead] = tickWorkMs > 0.0 ? tickWorkMs : 0.0;
+            _perfSampleHead = (_perfSampleHead + 1) % PerfSampleCap;
+            if (_perfSampleCount < PerfSampleCap) _perfSampleCount++;
+        }
+
+        public static void GetPerfMetrics(out double mspt, out double tps)
+        {
+            mspt = 0.0;
+            tps = 0.0;
+            int total = _perfSampleCount;
+            if (total <= 0) return;
+
+            long nowTs = System.Diagnostics.Stopwatch.GetTimestamp();
+            long windowTicks = System.Diagnostics.Stopwatch.Frequency; // 1.0 second
+            long cutoffTs = nowTs - windowTicks;
+
+            int inWindow = 0;
+            double sumWorkMs = 0.0;
+            long oldestTs = 0L;
+            long newestTs = 0L;
+
+            for (int i = 0; i < total; i++)
+            {
+                int idx = (_perfSampleHead - 1 - i + PerfSampleCap) % PerfSampleCap;
+                long ts = _perfSampleTs[idx];
+                if (ts < cutoffTs) break;
+                if (inWindow == 0) newestTs = ts;
+                oldestTs = ts;
+                sumWorkMs += _perfSampleWorkMs[idx];
+                inWindow++;
+            }
+
+            if (inWindow == 0) return;
+            mspt = sumWorkMs / inWindow;
+
+            double ageNewestMs = (nowTs - newestTs) * _swTickToMs;
+            bool isPaused = LockstepClock.PausedBySession || (DXGame.Current != null && DXGame.Current.Paused);
+            if (isPaused && ageNewestMs > 60.0)
+            {
+                tps = 0.0;
+                return;
+            }
+            if (ageNewestMs > 400.0)
+            {
+                double spanFromOldestSec = (nowTs - oldestTs) * _swTickToMs / 1000.0;
+                tps = inWindow / Math.Max(0.25, spanFromOldestSec);
+                return;
+            }
+
+            if (inWindow >= 2)
+            {
+                double spanSec = (newestTs - oldestTs) * _swTickToMs / 1000.0;
+                tps = spanSec > 0.001 ? (inWindow - 1) / spanSec : 0.0;
+            }
+            else
+            {
+                tps = 1.0;
+            }
+        }
 
         // 3. Fixed-step clock: drive GameTime in exact 33.333..ms increments and only advance a
         //    tick when the active ITickGate allows it. Vanilla's UpdateGameLogic runs a Task and
@@ -2567,6 +2678,7 @@ namespace TABCoopMod.Determinism
             // clobber the save's restored GameTime while ReadSaveFile/InitLevel runs on T9/T11.
             if (LockstepClock.LoadingLevel || DXScene.Current == null || !(DXScene.Current.RootObject is DXIsometricGridObject))
             {
+                _lastSimPauseOrLoadWallTs = System.Diagnostics.Stopwatch.GetTimestamp();
                 LockstepClock.ResetHostTickPacing();
                 LockstepClock.AllowPhysicsThisFrame = false;
                 return false;
@@ -2604,6 +2716,7 @@ namespace TABCoopMod.Determinism
 
             if (LockstepClock.PausedBySession)
             {
+                _lastSimPauseOrLoadWallTs = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (inCoop)
                 {
                     int pausedTick = __instance.IAIterationInt;
@@ -2628,6 +2741,7 @@ namespace TABCoopMod.Determinism
 
             if (__instance.Paused || !Core.GameBridge.IsCurrentLevelSystemEnabled() || Core.GameBridge.IsLevelEnded())
             {
+                _lastSimPauseOrLoadWallTs = System.Diagnostics.Stopwatch.GetTimestamp();
                 LockstepClock.ResetHostTickPacing();
                 LockstepClock.SetDeterministicGameTime(__instance, DXGame.LastGameTimeIAUpdate);
                 LockstepClock.AllowPhysicsThisFrame = false;
@@ -2668,6 +2782,7 @@ namespace TABCoopMod.Determinism
                         : 1;
                     if (readyAhead < 0)
                     {
+                        LastClientNetGateBlockTs = System.Diagnostics.Stopwatch.GetTimestamp();
                         maxTicksThisFrame = 0;
                     }
                     else
@@ -2830,7 +2945,8 @@ namespace TABCoopMod.Determinism
 
                 if (_mUpdateGameLogic == null && _fastRunLogicLambda == null) break;
 
-                double tLogicStart = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs;
+                long tSyncTickStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                double tLogicStart = tSyncTickStart * swFreqMs;
                 if (_fastRunLogicLambda != null)
                 {
                     if (inCoop)
@@ -2927,6 +3043,8 @@ namespace TABCoopMod.Determinism
                     if (samplePerf)
                         DiagTickHashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tHashStart;
                 }
+
+                RecordCompletedTickPerf((System.Diagnostics.Stopwatch.GetTimestamp() - tSyncTickStart) * swFreqMs);
 
                 DiagTickWindowCount++;
                 if (DiagTickWindowCount >= 60)
@@ -3068,6 +3186,7 @@ namespace TABCoopMod.Determinism
                             LockstepClock.AllowPhysicsThisFrame = false;
                             LockstepClock.LogicTickActive = false;
                             LockstepClock.LogicThreadId = 0;
+                            Volatile.Write(ref _lastAsyncWorkerWorkTicks, System.Diagnostics.Stopwatch.GetTimestamp() - launchTs);
                         }
                     }, System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously);
                     _fTaskLogic.SetValue(__instance, cont);
@@ -3125,6 +3244,8 @@ namespace TABCoopMod.Determinism
                     lock (_deferredAsyncLock) { _deferredAsyncPostMethods.Clear(); }
                     return;
                 }
+
+                long mainFinalizeStartTs = System.Diagnostics.Stopwatch.GetTimestamp();
 
                 if (!didChainedPhysics && DXGame.IsIADeterministic && _mUpdatePhysics != null)
                 {
@@ -3188,6 +3309,11 @@ namespace TABCoopMod.Determinism
                     Sync.CoopSessionManager.OnSimulationTickCompleted(__instance.IAIterationInt);
                     DiagTickHashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tHashStart;
                 }
+                long workerTicks = Volatile.Read(ref _lastAsyncWorkerWorkTicks);
+                Volatile.Write(ref _lastAsyncWorkerWorkTicks, 0L);
+                long mainFinalizeTicks = System.Diagnostics.Stopwatch.GetTimestamp() - mainFinalizeStartTs;
+                RecordCompletedTickPerf((workerTicks + mainFinalizeTicks) * swFreqMs);
+
                 RenderVisualInterpolationPatch.OnLogicTickCompleted(1);
 
                 DiagTickWindowCount++;
@@ -7595,25 +7721,33 @@ namespace TABCoopMod.Determinism
             return !_disabledByEnv && _ready && !_needsRebuild && _dynamic1uCount == 0 && _nCells > 0;
         }
 
-        private static bool TryComputePaddedBounds(DXPhysicBody body, int nCells, out CellRect rect)
+        private static bool TryComputePaddedBounds(DXPhysicBody body, int nCells, out CellRect rect, out bool hasEntity)
         {
             rect = default;
+            hasEntity = false;
             if (body == null || body.Handle == IntPtr.Zero || nCells <= 0) return false;
             if (System.Runtime.InteropServices.Marshal.ReadIntPtr(body.Handle, 0x88) == IntPtr.Zero) return false;
 
             float left = float.MaxValue, top = float.MaxValue, right = float.MinValue, bottom = float.MinValue;
-            PointF center = body.PositionComputed;
+            // Read native body center (cpBody->p) and extents; DXPhysicsNative.Body_GetSize returns
+            // negative Height (-h) for cpPolyShape rectangles (including all CAccesibleLayer terrain colliders).
+            PointF center = body.PhysicPosition;
             SizeF ps = body.PhysicSize;
-            if (ps.Width > 0f && ps.Height > 0f)
+            float pw = Math.Abs(ps.Width);
+            float ph = Math.Abs(ps.Height);
+            if (pw > 0f && ph > 0f)
             {
-                left = center.X - ps.Width * 0.5f;
-                right = center.X + ps.Width * 0.5f;
-                top = center.Y - ps.Height * 0.5f;
-                bottom = center.Y + ps.Height * 0.5f;
+                float hx = pw * 0.5f;
+                float hy = ph * 0.5f;
+                left = center.X - hx;
+                right = center.X + hx;
+                top = center.Y - hy;
+                bottom = center.Y + hy;
             }
 
             var e = body.GameEntity;
-            bool isDyn = e != null && e.PhysicalType == DXBodyType.Dynamic;
+            hasEntity = e != null;
+            bool isDyn = e != null ? e.PhysicalType == DXBodyType.Dynamic : body.BodyType == DXBodyType.Dynamic;
             if (e != null)
             {
                 Rectangle cellRect = e.CellArea;
@@ -7696,6 +7830,9 @@ namespace TABCoopMod.Determinism
 
             lock (_sync)
             {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                _ready = false;
+                _needsRebuild = true;
                 _tracked.Clear();
                 _dynamic1uCount = 0;
                 _nCells = nCells;
@@ -7707,6 +7844,9 @@ namespace TABCoopMod.Determinism
                 if (_coarseRefCount.Length < coarseLen) _coarseRefCount = new ushort[coarseLen];
                 else Array.Clear(_coarseRefCount, 0, coarseLen);
 
+                int noEntityCount = 0;
+                int entityCount = 0;
+                int skippedCount = 0;
                 var bodies = DXPhysicWorld.Bodies;
                 if (bodies != null)
                 {
@@ -7716,18 +7856,33 @@ namespace TABCoopMod.Determinism
                         if (b == null || b.Handle == IntPtr.Zero) continue;
                         if (System.Runtime.InteropServices.Marshal.ReadIntPtr(b.Handle, 0x88) == IntPtr.Zero) continue;
                         if ((b.CategoryMask & 1u) == 0u) continue;
-                        if (TryComputePaddedBounds(b, nCells, out CellRect r))
+                        if (TryComputePaddedBounds(b, nCells, out CellRect r, out bool hasEntity))
                         {
                             _tracked[b] = r;
                             if (r.Dynamic1u) _dynamic1uCount++;
+                            if (hasEntity) entityCount++;
+                            else noEntityCount++;
                             ApplyDelta(in r, +1);
+                        }
+                        else
+                        {
+                            skippedCount++;
                         }
                     }
                 }
 
+                int blockedCells = 0;
+                for (int i = 0; i < cellLen; i++)
+                    if (_cellRefCount[i] != 0) blockedCells++;
+                int blockedCoarse = 0;
+                for (int i = 0; i < coarseLen; i++)
+                    if (_coarseRefCount[i] != 0) blockedCoarse++;
+
                 _builtLevel = level;
                 _needsRebuild = false;
                 _ready = true;
+                sw.Stop();
+                ModLogger.Info($"[Perf] Physics1uGrid built: tracked={_tracked.Count} (terrain/noEntity={noEntityCount}, entity={entityCount}, dyn1u={_dynamic1uCount}, skipped={skippedCount}), blockedCells={blockedCells}/{cellLen}, blockedCoarse={blockedCoarse}/{coarseLen}, nCells={nCells}, {sw.Elapsed.TotalMilliseconds:F2}ms");
             }
         }
 
@@ -7741,15 +7896,27 @@ namespace TABCoopMod.Determinism
                 bool wasTracked = _tracked.TryGetValue(body, out CellRect oldRect);
                 if (!has1u && !wasTracked) return;
 
+                CellRect newRect = default;
+                bool hasNew = has1u
+                    && body.Handle != IntPtr.Zero
+                    && System.Runtime.InteropServices.Marshal.ReadIntPtr(body.Handle, 0x88) != IntPtr.Zero
+                    && TryComputePaddedBounds(body, _nCells, out newRect, out _);
+
+                if (wasTracked && hasNew
+                    && oldRect.X0 == newRect.X0 && oldRect.Y0 == newRect.Y0
+                    && oldRect.X1 == newRect.X1 && oldRect.Y1 == newRect.Y1
+                    && oldRect.Dynamic1u == newRect.Dynamic1u)
+                {
+                    return;
+                }
+
                 if (wasTracked)
                 {
                     ApplyDelta(in oldRect, -1);
                     if (oldRect.Dynamic1u && _dynamic1uCount > 0) _dynamic1uCount--;
                     _tracked.Remove(body);
                 }
-                if (has1u && body.Handle != IntPtr.Zero
-                    && System.Runtime.InteropServices.Marshal.ReadIntPtr(body.Handle, 0x88) != IntPtr.Zero
-                    && TryComputePaddedBounds(body, _nCells, out CellRect newRect))
+                if (hasNew)
                 {
                     _tracked[body] = newRect;
                     if (newRect.Dynamic1u) _dynamic1uCount++;
@@ -7761,7 +7928,13 @@ namespace TABCoopMod.Determinism
         internal static void OnBodyGeometryChanged(DXPhysicBody body)
         {
             if (!_ready || _needsRebuild || body == null || LockstepClock.LoadingLevel) return;
-            uint mask = body.Handle != IntPtr.Zero ? body.CategoryMask : 0u;
+            // DXPhysicsNative.Body_GetCategoryMask dereferences [Handle+0x88] (cpShape) without a null
+            // check, unlike Body_SetCategoryMask / Body_GetSize. Shape-less bodies (DXPhysicalShape.None
+            // via DXPhysicBody.Create) leave [Handle+0x88] == IntPtr.Zero and would AV if queried.
+            IntPtr handle = body.Handle;
+            uint mask = (handle != IntPtr.Zero && System.Runtime.InteropServices.Marshal.ReadIntPtr(handle, 0x88) != IntPtr.Zero)
+                ? body.CategoryMask
+                : 0u;
             if ((mask & 1u) == 0u && _tracked.Count == 0) return;
             OnBodyCategoryMaskSet(body, mask);
         }
@@ -7943,6 +8116,62 @@ namespace TABCoopMod.Determinism
         public static void Postfix()
         {
             Physics1uGrid.Invalidate();
+        }
+    }
+
+    /// <summary>
+    /// Defers patching static DXPhysicBody.Create* factory methods until after DXPhysicWorld.Init()
+    /// has allocated DXPhysicWorld.Bodies. Patching them at startup before ZXGame initializes physics
+    /// triggers DXPhysicBody..cctor() (Empty = new DXPhysicBody()) while Bodies == null, permanently
+    /// poisoning DXPhysicBody with a cached TypeInitializationException for the whole AppDomain.
+    /// </summary>
+    [HarmonyPatch(typeof(DXPhysicWorld), nameof(DXPhysicWorld.Init), new[] { typeof(int) })]
+    public static class PhysicWorldInitCreate1uPatches
+    {
+        private static int _applied;
+
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            if (Interlocked.Exchange(ref _applied, 1) != 0)
+                return;
+            var harmony = TABCoopMod.Bootstrap.ModEntry.HarmonyInstance;
+            if (harmony == null || DXPhysicWorld.Bodies == null)
+                return;
+
+            try
+            {
+                var postfix = new HarmonyMethod(typeof(PhysicWorldInitCreate1uPatches), nameof(CreateBodyPostfix));
+                var targets = new MethodInfo[]
+                {
+                    AccessTools.Method(typeof(DXPhysicBody), nameof(DXPhysicBody.Create),
+                        new[] { typeof(float), typeof(PointF), typeof(float), typeof(DXBodyType), typeof(object) }),
+                    AccessTools.Method(typeof(DXPhysicBody), nameof(DXPhysicBody.CreateCircle),
+                        new[] { typeof(float), typeof(PointF), typeof(float), typeof(DXBodyType), typeof(object) }),
+                    AccessTools.Method(typeof(DXPhysicBody), nameof(DXPhysicBody.CreateRectangle),
+                        new[] { typeof(float), typeof(RectangleF), typeof(DXBodyType), typeof(object) })
+                };
+                int patched = 0;
+                for (int i = 0; i < targets.Length; i++)
+                {
+                    if (targets[i] != null)
+                    {
+                        harmony.Patch(targets[i], postfix: postfix);
+                        patched++;
+                    }
+                }
+                ModLogger.Info($"[Perf] Applied deferred DXPhysicBody.Create* Physics1uGrid patches ({patched}/3).");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[Perf] Failed to apply deferred DXPhysicBody.Create* patches: {ex.Message}");
+            }
+        }
+
+        public static void CreateBodyPostfix(DXPhysicBody __result)
+        {
+            if (LockstepClock.IsDeterministicModeActive)
+                Physics1uGrid.OnBodyGeometryChanged(__result);
         }
     }
 

@@ -39,6 +39,17 @@ namespace TABCoopMod.Patches
             return t != null ? AccessTools.Method(t, "#=zv7139RDgRLf_PO97vA==", Type.EmptyTypes) : null;
         }
 
+        [HarmonyPrefix]
+        public static void Prefix()
+        {
+            // In single-faction deterministic mode, invalidate Building.UnderEnhancerBuilding's render-frame
+            // cache before vanilla ZXLevelState.#=zBpC6By32LAqv() sums totals (RecalculateAllFactions does
+            // this per-faction in Multi-Faction mode). Note: #=zBpC6By32LAqv() itself contains Eazfuscator
+            // 'catch when' IL and must not be patched directly.
+            if (LockstepClock.IsDeterministicModeActive && !LockstepClock.LoadingLevel && !CoopSessionManager.IsMultiFactionActive)
+                GameBridge.InvalidateAllBuildingsEnhancerCache();
+        }
+
         [HarmonyPostfix]
         public static void Postfix(ref bool __result)
         {
@@ -136,7 +147,7 @@ namespace TABCoopMod.Patches
             if (!ShouldPushContextForGenerator(__instance))
                 return;
 
-            byte owner = FactionOwnershipTracker.GetOwner(ent.ID);
+            byte owner = FactionOwnershipTracker.ResolveOrAssignOwner(ent);
             if (owner != 0)
             {
                 FactionContextManager.PushContext(owner);
@@ -148,6 +159,28 @@ namespace TABCoopMod.Patches
         public static void Finalizer(bool __state)
         {
             if (__state) FactionContextManager.PopContext();
+        }
+    }
+
+    /// <summary>
+    /// Ensures Building.UnderEnhancerBuilding cache stamps are invalidated deterministically before
+    /// single-faction ZXLevelState recalculation or 8-hour tax steps so local FPS differences never
+    /// skew Bank/Market/Warehouse aura refresh timing across peers.
+    /// </summary>
+    [HarmonyPatch]
+    public static class Patch_ZXLevelState_Determinism_EnhancerCacheReset
+    {
+        public static MethodBase TargetMethod()
+        {
+            Type lsType = GameBridge.LevelStateType ?? GameBridge.GameAssembly?.GetType("ZX.ZXLevelState");
+            return lsType != null ? AccessTools.Method(lsType, ObfuscatedSymbols.Method_LevelState_8hStep, new[] { typeof(int) }) : null;
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix()
+        {
+            if (LockstepClock.IsDeterministicModeActive && !LockstepClock.LoadingLevel)
+                GameBridge.InvalidateAllBuildingsEnhancerCache();
         }
     }
 
@@ -172,7 +205,7 @@ namespace TABCoopMod.Patches
             if (!CoopSessionManager.IsMultiFactionActive || !FactionContextManager.IsInitialized || !(__instance is DXEntity ent))
                 return;
 
-            byte owner = FactionOwnershipTracker.GetOwner(ent.ID);
+            byte owner = FactionOwnershipTracker.ResolveOrAssignOwner(ent);
             if (owner != 0)
             {
                 FactionContextManager.PushContext(owner);
@@ -336,7 +369,7 @@ namespace TABCoopMod.Patches
             if (ReferenceEquals(__originalMethod, _mUpdateTick) && !HasProgressCmdFast(__instance))
                 return;
 
-            byte owner = FactionOwnershipTracker.GetOwner(__instance.Entity.ID);
+            byte owner = FactionOwnershipTracker.ResolveOrAssignOwner(__instance.Entity);
             if (owner != 0)
             {
                 FactionContextManager.PushContext(owner);
@@ -428,7 +461,7 @@ namespace TABCoopMod.Patches
                     }
                 }
 
-                byte owner = FactionOwnershipTracker.GetOwner(exec.ID);
+                byte owner = FactionOwnershipTracker.ResolveOrAssignOwner(exec);
                 if (owner != 0)
                 {
                     FactionContextManager.PushContext(owner);
@@ -1056,7 +1089,7 @@ namespace TABCoopMod.Patches
             if (!GameBridge.HasBuildingOnlyOnceCommandsExecuted(ent))
                 return;
 
-            byte owner = FactionOwnershipTracker.GetOwner(ent.ID);
+            byte owner = FactionOwnershipTracker.ResolveOrAssignOwner(ent);
             if (owner != 0)
             {
                 FactionContextManager.PushContext(owner);
