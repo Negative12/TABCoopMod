@@ -38,10 +38,16 @@ namespace TABCoopMod.UI
 
         public static void Tick()
         {
+            // Do not attach/remove HUD objects while the level system is still initializing or
+            // the native render pass is iterating scene children (this caused a startup NRE during
+            // survival map generation). In co-op, wait until the synced level is actually entered.
+            bool inCoop = CoopSessionManager.IsSessionActive;
             bool shouldShow = GameBridge.CurrentLevelState != null
                 && !LockstepClock.LoadingLevel
+                && !GameBridge.IsGameLoading()
                 && !GameBridge.IsLevelEnded()
-                && (CoopSessionManager.IsInSyncedLevel || LockstepClock.IsDeterministicModeActive);
+                && (DXGame.Current?.IAIterationInt ?? 0) > 0
+                && (inCoop ? CoopSessionManager.IsInSyncedLevel : LockstepClock.IsDeterministicModeActive);
 
             if (!shouldShow)
             {
