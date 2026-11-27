@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 using DXVision;
 using Steamworks;
 using TABCoopMod.Commands;
@@ -133,6 +134,7 @@ namespace TABCoopMod.Networking
         public int ListenPort { get; set; } = DefaultPort;
         public string JoinAddress { get; set; } = "127.0.0.1";
         public int JoinPort { get; set; } = DefaultPort;
+        public string ConnectedRemoteAddress { get; private set; } = string.Empty;
 
         /// <summary>
         /// Client-side hint: target is loopback/private LAN, so the host should not
@@ -151,9 +153,18 @@ namespace TABCoopMod.Networking
         public IReadOnlyList<PeerInfo> ConnectedPeers => _peers;
 
         public bool IsDirectConnected => IsActive;
-        public string ActivePathSummary => IsLanMode
-            ? $"LAN TCP ({(IsHost ? $"{BindAddress}:{ListenPort}" : $"{JoinAddress}:{JoinPort}")})"
-            : "Local Loopback (127.0.0.1)";
+        public string ActivePathSummary
+        {
+            get
+            {
+                if (!IsLanMode) return "Local Loopback (127.0.0.1)";
+                string target = IsHost ? $"{BindAddress}:{ListenPort}" : $"{JoinAddress}:{JoinPort}";
+                if (!IsHost && !string.IsNullOrEmpty(ConnectedRemoteAddress)
+                    && !string.Equals(ConnectedRemoteAddress, JoinAddress, StringComparison.Ordinal))
+                    target += $" [{ConnectedRemoteAddress}]";
+                return $"LAN TCP ({target})";
+            }
+        }
         public double ActiveDirectRttMs => 0.0;
         public string GetDebugStatsLine() => $"LocalTcpLoopback(Active={IsActive}, Peers={_peers.Count})";
 
@@ -259,21 +270,16 @@ namespace TABCoopMod.Networking
 
             JoinAddress = host;
             JoinPort = port;
+            ConnectedRemoteAddress = string.Empty;
 
-            _clientToHost = new TcpClient { NoDelay = true };
             int timeoutMs = 8000;
             if (int.TryParse(Environment.GetEnvironmentVariable("TABCOOP_LAN_CONNECT_TIMEOUT_MS"), out int envTimeout) && envTimeout > 0)
                 timeoutMs = envTimeout;
 
             try
             {
-                var iar = _clientToHost.BeginConnect(host, port, null, null);
-                if (!iar.AsyncWaitHandle.WaitOne(timeoutMs))
-                {
-                    try { _clientToHost.Close(); } catch { }
-                    throw new TimeoutException($"连接 {host}:{port} 超时（{timeoutMs}ms）。");
-                }
-                _clientToHost.EndConnect(iar);
+                _clientToHost = ConnectTcpFastest(host, port, timeoutMs, out string connectedAddress);
+                ConnectedRemoteAddress = connectedAddress;
             }
             catch
             {
@@ -284,7 +290,7 @@ namespace TABCoopMod.Networking
             _streamToHost = _clientToHost.GetStream();
             IsActive = true;
 
-            ModLogger.Info($"[LocalTcpLoopbackTransport] Connected to Host at {host}:{port}, sending HandshakeRequest...");
+            ModLogger.Info($"[LocalTcpLoopbackTransport] Connected to Host at {host}:{port} ({ConnectedRemoteAddress}), sending HandshakeRequest...");
             SendToPeer(1, SendChannel.ReliableCommand, PacketType.HandshakeRequest, w =>
             {
                 w.Write(Environment.UserName ?? "ClientPlayer");
@@ -488,6 +494,93 @@ namespace TABCoopMod.Networking
             }
             _peers.RemoveAll(p => p.PlayerId == playerId);
             OnPeerDisconnected?.Invoke(playerId);
+        }
+
+        /// <summary>
+        /// A public LAN/frp hostname can resolve to multiple IPs with very different routes.
+        /// Connect to all resolved addresses in parallel and keep the first TCP handshake that
+        /// succeeds, so a slow/bad A record cannot mask a nearby one.
+        /// </summary>
+        private static TcpClient ConnectTcpFastest(string host, int port, int timeoutMs, out string connectedAddress)
+        {
+            connectedAddress = string.Empty;
+            IPAddress[] addresses;
+            try
+            {
+                addresses = Dns.GetHostAddresses(host);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"解析 {host} 失败。", ex);
+            }
+
+            var pending = new List<(TcpClient Client, IAsyncResult Result, IPAddress Address)>();
+            if (addresses != null)
+            {
+                foreach (var address in addresses)
+                {
+                    if (address == null) continue;
+                    TcpClient client = null;
+                    try
+                    {
+                        client = new TcpClient(address.AddressFamily) { NoDelay = true };
+                        var result = client.BeginConnect(address, port, null, null);
+                        pending.Add((client, result, address));
+                    }
+                    catch
+                    {
+                        try { client?.Close(); } catch { }
+                    }
+                }
+            }
+
+            if (pending.Count == 0)
+                throw new TimeoutException($"连接 {host}:{port} 失败：没有可用地址。");
+
+            var started = System.Diagnostics.Stopwatch.StartNew();
+            TcpClient winner = null;
+            while (pending.Count > 0)
+            {
+                int remaining = timeoutMs - (int)started.ElapsedMilliseconds;
+                if (remaining <= 0) break;
+
+                var handles = new WaitHandle[pending.Count];
+                for (int i = 0; i < pending.Count; i++) handles[i] = pending[i].Result.AsyncWaitHandle;
+
+                int index;
+                try
+                {
+                    index = WaitHandle.WaitAny(handles, remaining);
+                }
+                catch
+                {
+                    break;
+                }
+                if (index == WaitHandle.WaitTimeout) break;
+
+                var entry = pending[index];
+                pending.RemoveAt(index);
+                try
+                {
+                    entry.Client.EndConnect(entry.Result);
+                    winner = entry.Client;
+                    connectedAddress = entry.Address.ToString();
+                    break;
+                }
+                catch
+                {
+                    try { entry.Client.Close(); } catch { }
+                }
+            }
+
+            foreach (var entry in pending)
+            {
+                try { entry.Client.Close(); } catch { }
+            }
+
+            if (winner == null)
+                throw new TimeoutException($"连接 {host}:{port} 超时（{timeoutMs}ms）。");
+            return winner;
         }
 
         private static bool IsLoopbackOrPrivateAddress(string host)
