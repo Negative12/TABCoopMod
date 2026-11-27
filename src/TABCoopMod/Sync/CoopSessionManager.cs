@@ -207,6 +207,11 @@ namespace TABCoopMod.Sync
         private static double _gateWaitStartTicks = -1.0;
         private static double _gateLastWarnTicks = -1.0;
         private const double GateTimeoutMs = 3000.0;
+        private static int _hostWaitLastTick = -1;
+        private static double _hostWaitLastTickChangeTicks = -1000.0;
+        private static double _hostWaitLastLogTicks = -1000.0;
+        public static bool HostWaitStatusActive { get; private set; }
+        public static string HostWaitStatusText { get; private set; } = string.Empty;
 
         private static bool _awaitingSnapshotLoad;
         private static bool _awaitingClientSnapshotAck;
@@ -638,6 +643,10 @@ namespace TABCoopMod.Sync
             CommandInterceptor.ClearPendingLocalBuilds();
             PauseSyncController.CancelCountdown();
             Patches.MayorSyncPatch.ResetTracking();
+            ClearHostWaitStatus();
+            _hostWaitLastTick = -1;
+            _hostWaitLastTickChangeTicks = -1000.0;
+            _hostWaitLastLogTicks = -1000.0;
         }
 
         public static int RollNewGameSeed()
@@ -1012,6 +1021,7 @@ namespace TABCoopMod.Sync
             _pendingTurnCommands.Clear();
             UI.MultiFactionPanel.Reset();
             UI.ManualSyncButton.Reset();
+            UI.HostWaitStatusOverlay.Reset();
             UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
@@ -1095,6 +1105,7 @@ namespace TABCoopMod.Sync
             _pendingTurnCommands.Clear();
             UI.MultiFactionPanel.Reset();
             UI.ManualSyncButton.Reset();
+            UI.HostWaitStatusOverlay.Reset();
             UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
@@ -2008,9 +2019,76 @@ namespace TABCoopMod.Sync
             {
                 _gateLastWarnTicks = now;
                 double waited = (now - _gateWaitStartTicks) / 1000.0;
-                ModLogger.Warn($"[CoopSessionManager] Tick gate waiting {waited:F1}s at tick {cur} — packets from Host are delayed or lost.");
+                ModLogger.Warn($"[CoopSessionManager] Tick gate waiting {waited:F1}s at tick {cur} ? packets from Host are delayed or lost.");
                 if (waited >= GateTimeoutMs / 1000.0)
                     GameBridge.ShowTopBanner("Waiting for Host network...", Color.Orange, 1200);
+            }
+        }
+
+        private static void ClearHostWaitStatus()
+        {
+            if (HostWaitStatusActive)
+                ModLogger.Info("[HostWait] cleared.");
+            HostWaitStatusActive = false;
+            HostWaitStatusText = string.Empty;
+        }
+
+        /// <summary>
+        /// Host-only stall indicator. If the host simulation tick stops advancing for 500ms,
+        /// identify the slowest/last-known client and expose a short status string for the HUD.
+        /// </summary>
+        private static void UpdateHostWaitStatus()
+        {
+            if (Transport == null || !Transport.IsHost || !IsSessionActive || !IsInSyncedLevel
+                || LockstepClock.LoadingLevel || GameBridge.IsGameLoading()
+                || LockstepClock.PausedBySession
+                || (DXGame.Current != null && DXGame.Current.Paused)
+                || GameBridge.IsLevelEnded()
+                || DXVision.GUI.DXModalScreen.IsInModal)
+            {
+                ClearHostWaitStatus();
+                return;
+            }
+
+            int cur = DXGame.Current?.IAIterationInt ?? 0;
+            double now = DXHelper_Environment.Ticks;
+            if (cur != _hostWaitLastTick)
+            {
+                _hostWaitLastTick = cur;
+                _hostWaitLastTickChangeTicks = now;
+                ClearHostWaitStatus();
+                return;
+            }
+
+            if (now - _hostWaitLastTickChangeTicks < 500.0)
+            {
+                ClearHostWaitStatus();
+                return;
+            }
+
+            string text;
+            if (TryGetSlowestClientLagTicks(out byte slowPid, out int lagTicks, out double sampleAgeMs, includeStale: true))
+            {
+                if (sampleAgeMs >= 1200.0)
+                    text = $"等待 P{slowPid} 响应（{sampleAgeMs / 1000.0:F1}s 无上报）";
+                else if (lagTicks > 0)
+                    text = $"等待 P{slowPid} 输入（落后 {lagTicks}t）";
+                else
+                    text = "本机处理中...";
+            }
+            else
+            {
+                text = "等待客机响应...";
+            }
+
+            bool changed = !HostWaitStatusActive
+                || !string.Equals(HostWaitStatusText, text, StringComparison.Ordinal);
+            HostWaitStatusActive = true;
+            HostWaitStatusText = text;
+            if (changed && now - _hostWaitLastLogTicks >= 1000.0)
+            {
+                _hostWaitLastLogTicks = now;
+                ModLogger.Info($"[HostWait] {text} (tick={cur})");
             }
         }
 
@@ -2129,6 +2207,7 @@ namespace TABCoopMod.Sync
             CoopLobbyWindow.Tick();
             UI.MultiFactionPanel.Tick();
             UI.ManualSyncButton.Tick();
+            UI.HostWaitStatusOverlay.Tick();
             UI.AllyOverlayRenderer.UpdateUnitFactionRings();
 
             if (!string.IsNullOrEmpty(_pendingVersionMismatchAlert)
@@ -2259,6 +2338,9 @@ namespace TABCoopMod.Sync
             {
                 MonitorGateWait();
             }
+
+            if (Transport != null && Transport.IsHost)
+                UpdateHostWaitStatus();
 
             LogPeriodicLatencyStats();
 
@@ -2682,9 +2764,15 @@ namespace TABCoopMod.Sync
             _peerLastSimTickWallMs[peerId] = DXHelper_Environment.Ticks;
         }
 
-        private static bool TryGetSlowestClientLagTicks(out int maxLagTicks)
+        private static bool TryGetSlowestClientLagTicks(
+            out byte slowestPlayerId,
+            out int maxLagTicks,
+            out double slowestSampleAgeMs,
+            bool includeStale = false)
         {
+            slowestPlayerId = 0;
             maxLagTicks = 0;
+            slowestSampleAgeMs = double.MaxValue;
             if (!IsSessionActive || !IsInSyncedLevel || Transport == null || !Transport.IsHost)
                 return false;
 
@@ -2697,13 +2785,18 @@ namespace TABCoopMod.Sync
                 if (p.PlayerId == 1) continue;
                 if (_peerLastSimTick.TryGetValue(p.PlayerId, out int peerTick)
                     && _peerLastSimTickWallMs.TryGetValue(p.PlayerId, out double sampleTs)
-                    && now >= sampleTs
-                    && (now - sampleTs) <= ClientLagStaleMs)
+                    && now >= sampleTs)
                 {
+                    double ageMs = now - sampleTs;
+                    if (!includeStale && ageMs > ClientLagStaleMs)
+                        continue;
+
                     int lag = Math.Max(0, hostTick - peerTick);
                     if (!found || lag > maxLagTicks)
                     {
+                        slowestPlayerId = p.PlayerId;
                         maxLagTicks = lag;
+                        slowestSampleAgeMs = ageMs;
                         found = true;
                     }
                 }
@@ -2728,7 +2821,7 @@ namespace TABCoopMod.Sync
             if (LockstepClock.PausedBySession || _awaitingClientSnapshotAck || _hostWaitingOwnReload
                 || Testing.DeterministicReplayVerifier.IsRunning)
                 return;
-            if (!TryGetSlowestClientLagTicks(out int maxLagTicks))
+            if (!TryGetSlowestClientLagTicks(out _, out int maxLagTicks, out _))
                 return;
 
             // During heavy final-wave slow ticks (DiagAvgTickLogicMs > 30ms), avoid the abrupt 9t hard-stop
@@ -2806,8 +2899,8 @@ namespace TABCoopMod.Sync
             string lagPart = string.Empty;
             if (Transport.IsHost)
             {
-                if (TryGetSlowestClientLagTicks(out int cLag))
-                    lagPart = $" clientLag={cLag}t({cLag * 33.3:F0}ms)";
+                if (TryGetSlowestClientLagTicks(out byte slowPid, out int cLag, out _))
+                    lagPart = $" slow=P{slowPid} clientLag={cLag}t({cLag * 33.3:F0}ms)";
             }
             else
             {
