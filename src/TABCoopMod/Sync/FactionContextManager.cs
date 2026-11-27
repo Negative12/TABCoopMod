@@ -35,6 +35,8 @@ namespace TABCoopMod.Sync
             public int OwnEnergyNeeded;
             public int TestExtraStorage;
             public int TestExtraWorkers;
+            public int TestExtraFood;
+            public int TestExtraEnergy;
             public int TestExtraColonists;
             public bool ShowFullMap;
             public Dictionary<ulong, int> BonusEntityTemplates = new Dictionary<ulong, int>();
@@ -49,6 +51,8 @@ namespace TABCoopMod.Sync
                     OwnEnergyNeeded = OwnEnergyNeeded,
                     TestExtraStorage = TestExtraStorage,
                     TestExtraWorkers = TestExtraWorkers,
+                    TestExtraFood = TestExtraFood,
+                    TestExtraEnergy = TestExtraEnergy,
                     TestExtraColonists = TestExtraColonists,
                     BonusEntityTemplates = new Dictionary<ulong, int>(BonusEntityTemplates),
                     OnlyOneExecutedCommands = new Dictionary<int, int>(OnlyOneExecutedCommands)
@@ -513,6 +517,8 @@ namespace TABCoopMod.Sync
 
                 e.ResourceStorage = Math.Max(50, e.ResourceStorage + ledger.TestExtraStorage);
                 e.WorkersSupply += ledger.TestExtraWorkers;
+                e.FoodSupply += ledger.TestExtraFood;
+                e.EnergySupply += ledger.TestExtraEnergy;
                 e.Colonists += ledger.TestExtraColonists;
 
                 int armyFoodPen = 0;
@@ -821,7 +827,7 @@ namespace TABCoopMod.Sync
             }
         }
 
-        public static void AdjustResourcesForTesting(byte pid, int gold, int wood, int stone, int iron, int oil, int extraStorage = 0, int extraWorkers = 0, int extraColonists = 0)
+        public static void AdjustResourcesForTesting(byte pid, int gold, int wood, int stone, int iron, int oil, int extraStorage = 0, int extraWorkers = 0, int extraColonists = 0, int extraFood = 0, int extraEnergy = 0)
         {
             if (!IsInitialized || pid < 1 || pid > 3) return;
             FlushActiveOwnerFromLevelState();
@@ -837,6 +843,16 @@ namespace TABCoopMod.Sync
                 {
                     l.TestExtraWorkers = Math.Max(0, l.TestExtraWorkers + extraWorkers);
                     l.Economy.WorkersSupply += extraWorkers;
+                }
+                if (extraFood != 0)
+                {
+                    l.TestExtraFood = Math.Max(0, l.TestExtraFood + extraFood);
+                    l.Economy.FoodSupply += extraFood;
+                }
+                if (extraEnergy != 0)
+                {
+                    l.TestExtraEnergy = Math.Max(0, l.TestExtraEnergy + extraEnergy);
+                    l.Economy.EnergySupply += extraEnergy;
                 }
                 if (extraColonists != 0)
                 {
@@ -940,7 +956,7 @@ namespace TABCoopMod.Sync
                 w.Write(e.Colonists); w.Write(e.GoldByCc); w.Write(e.TotalStock);
                 w.Write(e.WoodProd); w.Write(e.StoneProd); w.Write(e.IronProd); w.Write(e.OilProd); w.Write(e.GoldProd);
                 w.Write(e.NMarkets); w.Write(e.MaxGoldExport); w.Write(e.ArmyGold); w.Write(e.ArmyFoodPen); w.Write(e.StructGold); w.Write(e.GoldPerColonist);
-                w.Write(l.OwnEnergySupply); w.Write(l.OwnEnergyNeeded); w.Write(l.TestExtraStorage); w.Write(l.TestExtraWorkers); w.Write(l.ShowFullMap);
+                w.Write(l.OwnEnergySupply); w.Write(l.OwnEnergyNeeded); w.Write(l.TestExtraStorage); w.Write(l.TestExtraWorkers); w.Write(l.TestExtraFood); w.Write(l.TestExtraEnergy); w.Write(l.ShowFullMap);
 
                 w.Write(l.BonusEntityTemplates.Count);
                 foreach (var kv in l.BonusEntityTemplates.OrderBy(k => k.Key))
@@ -983,6 +999,8 @@ namespace TABCoopMod.Sync
                 l.OwnEnergySupply = r.ReadInt32(); l.OwnEnergyNeeded = r.ReadInt32();
                 l.TestExtraStorage = r.ReadInt32();
                 l.TestExtraWorkers = r.ReadInt32();
+                l.TestExtraFood = r.ReadInt32();
+                l.TestExtraEnergy = r.ReadInt32();
                 l.ShowFullMap = r.ReadBoolean();
                 l.Economy = e;
 
