@@ -78,7 +78,8 @@ namespace TABCoopMod.UI
                     InheritImageAttributes = false
                 };
                 _button.State.AreaStyle = DXObjectState.TAreaStyle.AreaInPixels;
-                _button.TextRenderer.Font = new Font("Microsoft YaHei", 9.0f, FontStyle.Bold);
+                float u = DXScene.Unit > 0f ? DXScene.Unit : 1f;
+                _button.TextRenderer.Font = new Font("Microsoft YaHei", Math.Max(8f, 9f * u), FontStyle.Bold);
                 _button.TextRenderer.TextAlign = ContentAlignment.MiddleCenter;
                 _button.TextRenderer.ColorText = Color.White;
                 _button.TextRenderer.ColorBackground = Color.FromArgb(235, 24, 44, 66);
