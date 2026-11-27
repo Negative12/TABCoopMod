@@ -848,6 +848,16 @@ namespace TABCoopMod.Networking
             }
         }
 
+        public void DisconnectPeer(byte playerId)
+        {
+            if (playerId == 0 || playerId == LocalPlayerId) return;
+            _playerToSteamId.Remove(playerId);
+            _peers.RemoveAll(p => p.PlayerId == playerId);
+            _cutoverPendingTs.Remove(playerId);
+            _cutoverHoldQueue.Remove(playerId);
+            _direct?.RemovePeer(playerId);
+        }
+
         private void InitializeDirectFastPath(bool isHost)
         {
             DisposeDirectOnly();

@@ -108,6 +108,7 @@ namespace TABCoopMod.Networking
         void Broadcast(SendChannel channel, PacketType type, Action<BinaryWriter> writePayload);
         void PollEvents();
         void SyncPeers(IEnumerable<PeerInfo> peers);
+        void DisconnectPeer(byte playerId);
     }
 
     /// <summary>
@@ -209,6 +210,10 @@ namespace TABCoopMod.Networking
                 {
                     bindAddr = IPAddress.Any;
                 }
+                else if (bind == "::")
+                {
+                    bindAddr = IPAddress.IPv6Any;
+                }
                 else if (!IPAddress.TryParse(bind, out bindAddr))
                 {
                     bindAddr = IPAddress.Any;
@@ -216,8 +221,30 @@ namespace TABCoopMod.Networking
             }
 
             int port = (ListenPort > 0 && ListenPort <= 65535) ? ListenPort : DefaultPort;
-            _listener = new TcpListener(bindAddr, port);
-            _listener.Start();
+            bool started = false;
+            if (IsLanMode && (bindAddr.Equals(IPAddress.Any) || bindAddr.Equals(IPAddress.IPv6Any)))
+            {
+                try
+                {
+                    var dualListener = new TcpListener(IPAddress.IPv6Any, port);
+                    dualListener.Server.DualMode = true;
+                    dualListener.Start();
+                    _listener = dualListener;
+                    bindAddr = IPAddress.IPv6Any;
+                    started = true;
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[LocalTcpLoopbackTransport] Dual-stack listener unavailable ({ex.Message}); falling back to IPv4.");
+                    if (bindAddr.Equals(IPAddress.IPv6Any)) bindAddr = IPAddress.Any;
+                }
+            }
+
+            if (!started)
+            {
+                _listener = new TcpListener(bindAddr, port);
+                _listener.Start();
+            }
             IsActive = true;
             ModLogger.Info($"[LocalTcpLoopbackTransport] Host listening on {bindAddr}:{port} (LanMode={IsLanMode})");
         }
@@ -241,7 +268,8 @@ namespace TABCoopMod.Networking
                     {
                         host = target.Substring(1, close - 1);
                         if (close + 1 < target.Length && target[close + 1] == ':'
-                            && int.TryParse(target.Substring(close + 2), out int ipv6Port))
+                            && int.TryParse(target.Substring(close + 2), out int ipv6Port)
+                            && ipv6Port >= 1 && ipv6Port <= 65535)
                         {
                             port = ipv6Port;
                         }
@@ -254,7 +282,8 @@ namespace TABCoopMod.Networking
                     if (firstColon == lastColon)
                     {
                         host = target.Substring(0, lastColon);
-                        if (int.TryParse(target.Substring(lastColon + 1), out int parsedPort))
+                        if (int.TryParse(target.Substring(lastColon + 1), out int parsedPort)
+                            && parsedPort >= 1 && parsedPort <= 65535)
                             port = parsedPort;
                     }
                     else
@@ -417,6 +446,17 @@ namespace TABCoopMod.Networking
                                 HandleInternalOrDispatch(assignedId, pktType, reader);
                             }
 
+                            bool stillConnected = false;
+                            for (int c = 0; c < _clients.Count; c++)
+                            {
+                                if (_clients[c].PlayerId == assignedId)
+                                {
+                                    stillConnected = true;
+                                    break;
+                                }
+                            }
+                            if (!stillConnected) continue;
+
                             if (!ReadAvailableFrames(pending.Stream, assignedId))
                             {
                                 RemoveClientById(assignedId);
@@ -486,6 +526,21 @@ namespace TABCoopMod.Networking
             try { p.Stream?.Close(); p.Client?.Close(); } catch { }
         }
 
+        public void DisconnectPeer(byte playerId)
+        {
+            if (!IsHost || playerId == 0 || playerId == 1) return;
+            for (int i = _clients.Count - 1; i >= 0; i--)
+            {
+                if (_clients[i].PlayerId == playerId)
+                {
+                    var entry = _clients[i];
+                    try { entry.Stream?.Close(); entry.Client?.Close(); } catch { }
+                    _clients.RemoveAt(i);
+                }
+            }
+            _peers.RemoveAll(p => p.PlayerId == playerId);
+        }
+
         private void RemoveClientById(byte playerId)
         {
             for (int i = _clients.Count - 1; i >= 0; i--)
@@ -519,18 +574,20 @@ namespace TABCoopMod.Networking
                 throw new InvalidOperationException($"解析 {host} 失败。", ex);
             }
 
-            var pending = new List<(TcpClient Client, IAsyncResult Result, IPAddress Address)>();
+            const int maxWaitHandles = 64;
+            var pending = new List<(TcpClient Client, IAsyncResult Result, WaitHandle WaitHandle, IPAddress Address)>();
             if (addresses != null)
             {
                 foreach (var address in addresses)
                 {
                     if (address == null) continue;
+                    if (pending.Count >= maxWaitHandles) break;
                     TcpClient client = null;
                     try
                     {
                         client = new TcpClient(address.AddressFamily) { NoDelay = true };
                         var result = client.BeginConnect(address, port, null, null);
-                        pending.Add((client, result, address));
+                        pending.Add((client, result, result.AsyncWaitHandle, address));
                     }
                     catch
                     {
@@ -550,7 +607,7 @@ namespace TABCoopMod.Networking
                 if (remaining <= 0) break;
 
                 var handles = new WaitHandle[pending.Count];
-                for (int i = 0; i < pending.Count; i++) handles[i] = pending[i].Result.AsyncWaitHandle;
+                for (int i = 0; i < pending.Count; i++) handles[i] = pending[i].WaitHandle;
 
                 int index;
                 try
@@ -570,16 +627,19 @@ namespace TABCoopMod.Networking
                     entry.Client.EndConnect(entry.Result);
                     winner = entry.Client;
                     connectedAddress = entry.Address.ToString();
+                    try { entry.WaitHandle?.Close(); } catch { }
                     break;
                 }
                 catch
                 {
+                    try { entry.WaitHandle?.Close(); } catch { }
                     try { entry.Client.Close(); } catch { }
                 }
             }
 
             foreach (var entry in pending)
             {
+                try { entry.WaitHandle?.Close(); } catch { }
                 try { entry.Client.Close(); } catch { }
             }
 
@@ -738,6 +798,11 @@ namespace TABCoopMod.Networking
                     var pktType = (PacketType)header[2];
                     byte senderId = header[3] != 0 ? header[3] : defaultSenderId;
                     int payloadLen = BitConverter.ToInt32(header, 4);
+                    if (payloadLen < 0 || payloadLen > 16 * 1024 * 1024)
+                    {
+                        ModLogger.Warn($"[LocalTcpLoopbackTransport] Invalid TCP frame payloadLen={payloadLen}; closing stream.");
+                        return false;
+                    }
 
                     byte[] payload = new byte[payloadLen];
                     int offset = 0;

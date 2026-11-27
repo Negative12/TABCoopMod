@@ -92,11 +92,19 @@ namespace TABCoopMod.Sync
 
                 if (!(UnwrapTransport() is LocalTcpLoopbackTransport local)) return false;
                 if (!local.IsLanMode) return true;
-                if (!local.IsHost) return local.IsLoopbackOrPrivateLanTarget;
+                if (!local.IsHost)
+                {
+                    if (!local.IsLoopbackOrPrivateLanTarget) return false;
+                    // Mixed rooms (e.g. LAN + frp WAN) raise InputDelayTicks above 1t, and
+                    // Client-to-Host frp tunnels still appear as 127.0.0.1 despite WAN RTT.
+                    return InputDelayTicks <= MinInputDelayTicks
+                        && (LocalRttToHostMs < 0.0 || LocalRttToHostMs <= 15.0);
+                }
 
                 var peers = Transport.ConnectedPeers;
                 if (peers == null || peers.Count == 0) return false;
 
+                double now = DXHelper_Environment.Ticks;
                 bool hasClient = false;
                 for (int i = 0; i < peers.Count; i++)
                 {
@@ -104,6 +112,13 @@ namespace TABCoopMod.Sync
                     if (p == null || p.PlayerId == 1) continue;
                     hasClient = true;
                     if (!p.IsLocalOrPrivateLan) return false;
+                    if (_peerSmoothedRttMs.TryGetValue(p.PlayerId, out double peerRtt)
+                        && _peerRttSampleTicks.TryGetValue(p.PlayerId, out double sampleTs)
+                        && (now - sampleTs <= RttStalePeerMs || now < sampleTs)
+                        && peerRtt > 15.0)
+                    {
+                        return false;
+                    }
                 }
                 return hasClient;
             }
@@ -293,6 +308,12 @@ namespace TABCoopMod.Sync
         private static double _gateLastWarnTicks = -1.0;
         private const double GateTimeoutMs = 3000.0;
         private static bool _pendingOpenGameMenuAfterPause;
+        private static double _pendingOpenGameMenuRequestedAtTicks = -1.0;
+        private static bool _allowDirectGameMenuOpenOnce;
+        private static bool _coopGameMenuModalOpened;
+        private static double _lastManualResyncRequestTicks = -100000.0;
+        private const double GameMenuPauseWaitTimeoutMs = 1500.0;
+        private const double ManualResyncCooldownMs = 5000.0;
         private static int _hostWaitLastTick = -1;
         private static double _hostWaitLastTickChangeTicks = -1000.0;
         private static double _hostWaitLastLogTicks = -1000.0;
@@ -317,6 +338,7 @@ namespace TABCoopMod.Sync
         private static ulong[][] _pendingResyncSelectionGroups;
         private static bool _lateJoinInProgress;
         private static byte _lateJoinPeerId;
+        private static bool _lateJoinForcedPause;
         private static string _pendingJoinRejectReason;
         public static bool IsHostSnapshotReloadPending => _hostSnapshotReloadPending;
 
@@ -1096,7 +1118,7 @@ namespace TABCoopMod.Sync
             LobbyStateChanged?.Invoke();
         }
 
-        public static void StopSession()
+        public static void StopSession(bool preserveRejectReason = false)
         {
             CommandInterceptor.IsInterceptionEnabled = false;
             CommandInterceptor.OnLocalCommandCaptured = null;
@@ -1133,6 +1155,10 @@ namespace TABCoopMod.Sync
             UI.ManualSyncButton.Reset();
             UI.PerfOverlayRenderer.Reset();
             _pendingOpenGameMenuAfterPause = false;
+            _pendingOpenGameMenuRequestedAtTicks = -1.0;
+            _allowDirectGameMenuOpenOnce = false;
+            _coopGameMenuModalOpened = false;
+            _lastManualResyncRequestTicks = -100000.0;
             UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
@@ -1166,7 +1192,9 @@ namespace TABCoopMod.Sync
             _pendingClientSnapshotLoadPath = null;
             _lateJoinInProgress = false;
             _lateJoinPeerId = 0;
-            _pendingJoinRejectReason = null;
+            _lateJoinForcedPause = false;
+            if (!preserveRejectReason)
+                _pendingJoinRejectReason = null;
             _pendingBroadcastSavBytes = null;
             _pendingBroadcastChkText = null;
             _kickingLoadFade = false;
@@ -1225,6 +1253,10 @@ namespace TABCoopMod.Sync
             UI.ManualSyncButton.Reset();
             UI.PerfOverlayRenderer.Reset();
             _pendingOpenGameMenuAfterPause = false;
+            _pendingOpenGameMenuRequestedAtTicks = -1.0;
+            _allowDirectGameMenuOpenOnce = false;
+            _coopGameMenuModalOpened = false;
+            _lastManualResyncRequestTicks = -100000.0;
             UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
@@ -1256,6 +1288,7 @@ namespace TABCoopMod.Sync
             _pendingClientSnapshotLoadPath = null;
             _lateJoinInProgress = false;
             _lateJoinPeerId = 0;
+            _lateJoinForcedPause = false;
             _pendingJoinRejectReason = null;
             _pendingBroadcastSavBytes = null;
             _pendingBroadcastChkText = null;
@@ -1353,36 +1386,45 @@ namespace TABCoopMod.Sync
             {
                 CommandInterceptor.LocalPlayerId = Transport.LocalPlayerId;
                 ModLogger.Info($"[CoopSessionManager] Peer connected: {peer?.PlayerName} (PlayerId={peer?.PlayerId}, LocalId={Transport.LocalPlayerId})");
-                GameBridge.ShowTopBanner($"Co-op Peer Connected: {peer?.PlayerName}", Color.SpringGreen, 3000);
 
                 if (Transport.IsHost)
                 {
-                    if (peer != null)
+                    if (GameBridge.CurrentLevelState != null && peer != null)
                     {
-                        _lobbyRoster.RemoveAll(p =>
-                            p.PlayerId == peer.PlayerId
-                            || (peer.SteamId64 != 0 && p.SteamId64 == peer.SteamId64 && p.PlayerId != 1));
-                        _lobbyRoster.Add(new PeerInfo
+                        bool isDuplicateActivePeer = peer.SteamId64 != 0 && _lobbyRoster.Exists(p =>
+                            p.PlayerId == peer.PlayerId && p.SteamId64 == peer.SteamId64);
+                        if (isDuplicateActivePeer
+                            && ((_lateJoinInProgress && _lateJoinPeerId == peer.PlayerId)
+                                || _pendingHostSnapshotExport
+                                || _awaitingClientSnapshotAck
+                                || _hostSnapshotReloadPending))
                         {
-                            PlayerId = peer.PlayerId,
-                            PlayerName = peer.PlayerName,
-                            SteamId64 = peer.SteamId64,
-                            IsReady = peer.PlayerId == 1 || peer.IsReady,
-                            IsLocalOrPrivateLan = peer.IsLocalOrPrivateLan
-                        });
-                        _lobbyRoster.Sort((a, b) => a.PlayerId.CompareTo(b.PlayerId));
-                    }
-                    BroadcastLobbyRoster();
+                            ModLogger.Info($"[LateJoin] Ignoring duplicate handshake for active P{peer.PlayerId} while sync is in progress.");
+                            return;
+                        }
 
-                    // If Host is already inside a level when a peer connects, start a late join.
-                    if (GameBridge.CurrentLevelState != null)
+                        if (!TryAcceptLateJoin(peer))
+                        {
+                            LobbyStateChanged?.Invoke();
+                            return;
+                        }
+
+                        UpsertHostLobbyPeer(peer, ready: true);
+                        BroadcastLobbyRoster();
+                        GameBridge.ShowTopBanner($"P{peer.PlayerId} 正在加入，正在同步战局...", Color.Cyan, 4000);
+                        RequestSnapshotBroadcast();
+                    }
+                    else
                     {
-                        if (TryAcceptLateJoin(peer))
-                            RequestSnapshotBroadcast();
+                        if (peer != null)
+                            UpsertHostLobbyPeer(peer, ready: peer.PlayerId == 1 || peer.IsReady);
+                        GameBridge.ShowTopBanner($"Co-op Peer Connected: {peer?.PlayerName}", Color.SpringGreen, 3000);
+                        BroadcastLobbyRoster();
                     }
                 }
                 else
                 {
+                    GameBridge.ShowTopBanner($"Co-op Peer Connected: {peer?.PlayerName}", Color.SpringGreen, 3000);
                     if (Transport.ConnectedPeers != null && Transport.ConnectedPeers.Count > 0)
                     {
                         _lobbyRoster.Clear();
@@ -1416,8 +1458,16 @@ namespace TABCoopMod.Sync
                 _clientSnapshotAckPeers.Remove(playerId);
                 if (playerId == _lateJoinPeerId)
                 {
+                    bool abortedLateJoinExport = _lateJoinInProgress && _pendingHostSnapshotExport;
                     _lateJoinInProgress = false;
                     _lateJoinPeerId = 0;
+                    if (abortedLateJoinExport)
+                    {
+                        _pendingHostSnapshotExport = false;
+                        if (_lateJoinForcedPause)
+                            LockstepClock.SetSessionPause(false);
+                    }
+                    _lateJoinForcedPause = false;
                 }
                 _lobbyRoster.RemoveAll(p => p.PlayerId == playerId);
                 if (Transport != null && Transport.IsHost)
@@ -1440,8 +1490,10 @@ namespace TABCoopMod.Sync
                     IsInSyncedLevel = false;
                     if (playerId == 1)
                     {
-                        GameBridge.ShowTopBanner("Host disconnected / Room disbanded", Color.OrangeRed, 3500);
-                        StopSession();
+                        bool hasRejectReason = !string.IsNullOrEmpty(_pendingJoinRejectReason);
+                        if (!hasRejectReason)
+                            GameBridge.ShowTopBanner("Host disconnected / Room disbanded", Color.OrangeRed, 3500);
+                        StopSession(preserveRejectReason: hasRejectReason);
                     }
                     else
                     {
@@ -1499,6 +1551,23 @@ namespace TABCoopMod.Sync
         /// Host accepts a peer that connected while a level is running. The existing
         /// full-resync path pauses everyone, lets the new client load, then resumes.
         /// </summary>
+        private static void UpsertHostLobbyPeer(PeerInfo peer, bool ready)
+        {
+            if (peer == null) return;
+            _lobbyRoster.RemoveAll(p =>
+                p.PlayerId == peer.PlayerId
+                || (peer.SteamId64 != 0 && p.SteamId64 == peer.SteamId64 && p.PlayerId != 1));
+            _lobbyRoster.Add(new PeerInfo
+            {
+                PlayerId = peer.PlayerId,
+                PlayerName = peer.PlayerName,
+                SteamId64 = peer.SteamId64,
+                IsReady = peer.PlayerId == 1 || ready,
+                IsLocalOrPrivateLan = peer.IsLocalOrPrivateLan
+            });
+            _lobbyRoster.Sort((a, b) => a.PlayerId.CompareTo(b.PlayerId));
+        }
+
         private static bool TryAcceptLateJoin(PeerInfo peer)
         {
             if (peer == null || !IsSessionActive || Transport == null || !Transport.IsHost)
@@ -1518,10 +1587,19 @@ namespace TABCoopMod.Sync
             else if (GameBridge.IsLevelEnded())
                 reason = "本局已结束";
             else if (_pendingHostSnapshotExport || _awaitingClientSnapshotAck
-                || _hostSnapshotReloadPending || _lateJoinInProgress)
+                || _hostSnapshotReloadPending || _hostWaitingOwnReload || _lateJoinInProgress)
                 reason = "房主正在同步，请稍后再试";
-            else if (GetEffectivePeers().Count > 3)
-                reason = "房间已满（最多 3 人）";
+            else
+            {
+                int otherClientCount = 0;
+                foreach (var p in GetEffectivePeers())
+                {
+                    if (p != null && p.PlayerId != 1 && p.PlayerId != peer.PlayerId)
+                        otherClientCount++;
+                }
+                if (otherClientCount >= 2)
+                    reason = "房间已满（最多 3 人）";
+            }
 
             if (!string.IsNullOrEmpty(reason))
             {
@@ -1531,13 +1609,9 @@ namespace TABCoopMod.Sync
 
             _lateJoinInProgress = true;
             _lateJoinPeerId = peer.PlayerId;
-
-            var lobbyPeer = _lobbyRoster.Find(p => p.PlayerId == peer.PlayerId);
-            if (lobbyPeer != null) lobbyPeer.IsReady = true;
-            BroadcastLobbyRoster();
+            _lateJoinForcedPause = !LockstepClock.PausedBySession;
 
             ModLogger.Info($"[LateJoin] Accepted P{peer.PlayerId}; pausing for full snapshot resync.");
-            GameBridge.ShowTopBanner($"P{peer.PlayerId} 正在加入，正在同步战局...", Color.Cyan, 4000);
             LockstepClock.SetSessionPause(true);
             return true;
         }
@@ -1552,8 +1626,10 @@ namespace TABCoopMod.Sync
                     w => w.Write(reason));
             }
             catch { }
-            _lobbyRoster.RemoveAll(p => p.PlayerId == peer.PlayerId);
-            BroadcastLobbyRoster();
+            int removed = _lobbyRoster.RemoveAll(p => p.PlayerId == peer.PlayerId);
+            try { Transport?.DisconnectPeer(peer.PlayerId); } catch { }
+            if (removed > 0)
+                BroadcastLobbyRoster();
             GameBridge.ShowTopBanner(reason, Color.OrangeRed, 3500);
         }
 
@@ -1577,21 +1653,32 @@ namespace TABCoopMod.Sync
             if (!IsSessionActive || !IsInSyncedLevel || Transport == null)
                 return false;
 
-            if (LockstepClock.LoadingLevel || GameBridge.IsGameLoading())
+            if (GameBridge.IsLevelEnded())
             {
-                GameBridge.ShowTopBanner("正在加载，暂时无法手动同步", Color.Orange, 1600);
+                GameBridge.ShowTopBanner("本局已结束，无法手动同步", Color.Orange, 1600);
                 return false;
             }
 
+            if (LockstepClock.LoadingLevel || GameBridge.IsGameLoading()
+                || _pendingHostSnapshotExport || _awaitingClientSnapshotAck
+                || _hostSnapshotReloadPending || _hostWaitingOwnReload
+                || _awaitingSnapshotLoad || _lateJoinInProgress)
+            {
+                GameBridge.ShowTopBanner("同步已在进行中...", Color.Gold, 1600);
+                return false;
+            }
+
+            double now = DXHelper_Environment.Ticks;
+            if (now - _lastManualResyncRequestTicks < ManualResyncCooldownMs && now >= _lastManualResyncRequestTicks)
+            {
+                GameBridge.ShowTopBanner("手动同步冷却中，请稍候", Color.Gold, 1400);
+                return false;
+            }
+            _lastManualResyncRequestTicks = now;
+
             if (Transport.IsHost)
             {
-                if (_pendingHostSnapshotExport || _awaitingClientSnapshotAck)
-                {
-                    GameBridge.ShowTopBanner("同步已在进行中...", Color.Gold, 1600);
-                    return false;
-                }
-
-                _lastAutoResyncTicks = DXHelper_Environment.Ticks;
+                _lastAutoResyncTicks = now;
                 ResetTieredResyncState();
                 ModLogger.WarnImmediate("[CoopSessionManager] Manual resync requested by Host.");
                 GameBridge.ShowTopBanner("手动同步：正在导出并广播快照...", Color.Cyan, 3000);
@@ -1615,18 +1702,55 @@ namespace TABCoopMod.Sync
                 return;
             if (LockstepClock.PausedBySession)
             {
+                _pendingOpenGameMenuAfterPause = false;
+                _pendingOpenGameMenuRequestedAtTicks = -1.0;
+                _allowDirectGameMenuOpenOnce = true;
                 GameBridge.OpenLevelGameMenu();
                 return;
             }
-            if (_pendingOpenGameMenuAfterPause) return;
+
+            double now = DXHelper_Environment.Ticks;
+            if (_pendingOpenGameMenuAfterPause)
+            {
+                if (now - _pendingOpenGameMenuRequestedAtTicks >= 250.0)
+                {
+                    _pendingOpenGameMenuAfterPause = false;
+                    _pendingOpenGameMenuRequestedAtTicks = -1.0;
+                    _allowDirectGameMenuOpenOnce = true;
+                    GameBridge.OpenLevelGameMenu();
+                }
+                return;
+            }
 
             _pendingOpenGameMenuAfterPause = true;
+            _pendingOpenGameMenuRequestedAtTicks = now;
             PauseSyncController.RequestPause(true);
+        }
+
+        internal static bool ConsumeDirectGameMenuBypass()
+        {
+            if (!_allowDirectGameMenuOpenOnce) return false;
+            _allowDirectGameMenuOpenOnce = false;
+            return true;
+        }
+
+        internal static void NotifyCoopGameMenuOpened()
+        {
+            if (!IsSessionActive || !IsInSyncedLevel) return;
+            _coopGameMenuModalOpened = true;
+            if (!DXVision.GUI.DXModalScreen.IsInModal
+                && !LockstepClock.PausedBySession
+                && DXGame.Current != null && DXGame.Current.Paused)
+            {
+                _coopGameMenuModalOpened = false;
+                DXGame.Current.Paused = false;
+            }
         }
 
         public static void CancelPendingGameMenuOpen()
         {
             _pendingOpenGameMenuAfterPause = false;
+            _pendingOpenGameMenuRequestedAtTicks = -1.0;
         }
 
         /// <summary>
@@ -1768,6 +1892,17 @@ namespace TABCoopMod.Sync
             catch (Exception ex)
             {
                 ModLogger.Error("[CoopSessionManager] Failed to broadcast level snapshot", ex);
+                _hostSnapshotReloadPending = false;
+                _hostWaitingOwnReload = false;
+                _awaitingClientSnapshotAck = false;
+                _awaitingClientAckStartTicks = -1.0;
+                _lateJoinInProgress = false;
+                _lateJoinPeerId = 0;
+                if (_lateJoinForcedPause)
+                {
+                    _lateJoinForcedPause = false;
+                    LockstepClock.SetSessionPause(false);
+                }
             }
             finally
             {
@@ -1843,6 +1978,7 @@ namespace TABCoopMod.Sync
             byte lateJoinPeerId = _lateJoinPeerId;
             _lateJoinInProgress = false;
             _lateJoinPeerId = 0;
+            _lateJoinForcedPause = false;
 
             EnterSyncedLevel();
 
@@ -1965,6 +2101,8 @@ namespace TABCoopMod.Sync
         public static void EnterSyncedLevel()
         {
             if (!IsSessionActive) return;
+
+            UI.CoopLobbyWindow.ClearStaleWindowOnLevelEnter();
 
             _pendingTurnCommands.Clear();
             _hostSymmetricQueue.Clear();
@@ -2306,7 +2444,7 @@ namespace TABCoopMod.Sync
             if (Transport == null || !Transport.IsHost || !IsSessionActive || !IsInSyncedLevel
                 || LockstepClock.LoadingLevel || GameBridge.IsGameLoading()
                 || LockstepClock.PausedBySession
-                || (DXGame.Current != null && DXGame.Current.Paused)
+                || (DXGame.Current != null && (DXGame.Current.Paused || DXGame.Current.GameSpeed <= 0.1))
                 || GameBridge.IsLevelEnded()
                 || DXVision.GUI.DXModalScreen.IsInModal)
             {
@@ -2333,9 +2471,12 @@ namespace TABCoopMod.Sync
             string text;
             if (TryGetSlowestClientLagTicks(out byte slowPid, out int lagTicks, out double sampleAgeMs, includeStale: true))
             {
+                int backpressureLagThreshold = DeterministicSandboxPatches.DiagAvgTickLogicMs > 30.0
+                    ? 4
+                    : HostBackpressureSlowLagTicks;
                 if (sampleAgeMs >= 1200.0)
                     text = $"等待 P{slowPid} 响应（{sampleAgeMs / 1000.0:F1}s 无上报）";
-                else if (lagTicks > 0)
+                else if (lagTicks >= backpressureLagThreshold)
                     text = $"等待 P{slowPid} 输入（落后 {lagTicks}t）";
                 else
                     text = "本机处理中...";
@@ -2464,21 +2605,36 @@ namespace TABCoopMod.Sync
             }
         }
 
+        private static bool FlushPendingJoinRejectNotice()
+        {
+            if (string.IsNullOrEmpty(_pendingJoinRejectReason)) return false;
+            string rejectReason = _pendingJoinRejectReason;
+            _pendingJoinRejectReason = null;
+            ModLogger.Warn($"[CoopSessionManager] Join rejected by Host: {rejectReason}");
+            StopSession(preserveRejectReason: false);
+            if (GameBridge.CurrentLevelState == null)
+            {
+                UI.CoopLobbyWindow.NotifyEntryError(rejectReason);
+                if (!TestHarnessConfig.Enabled && !TestHarnessConfig.ControlEnabled && !GameBridge.IsGameLoading())
+                {
+                    try { GameBridge.ShowAlertMessageBox("加入房间被拒绝", rejectReason); } catch { }
+                }
+            }
+            else
+            {
+                GameBridge.ShowTopBanner(rejectReason, Color.OrangeRed, 5000);
+            }
+            return true;
+        }
+
         public static void OnFrameTick()
         {
             var frameGame = DXGame.Current;
             if (frameGame == null || frameGame.Disposing)
                 return;
 
-            if (!string.IsNullOrEmpty(_pendingJoinRejectReason))
-            {
-                string rejectReason = _pendingJoinRejectReason;
-                _pendingJoinRejectReason = null;
-                ModLogger.Warn($"[CoopSessionManager] Join rejected by Host: {rejectReason}");
-                GameBridge.ShowTopBanner(rejectReason, Color.OrangeRed, 5000);
-                StopSession();
+            if (FlushPendingJoinRejectNotice())
                 return;
-            }
 
             if (!TestHarnessConfig.Enabled && !TestHarnessConfig.ControlEnabled)
             {
@@ -2562,6 +2718,8 @@ namespace TABCoopMod.Sync
             }
 
             Transport?.PollEvents();
+            if (FlushPendingJoinRejectNotice())
+                return;
             ProbeNetworkRtt();
 
             // Keep the engine's loader fades advancing while the Client waits to enter the level.
@@ -2661,14 +2819,37 @@ namespace TABCoopMod.Sync
 
             // Deferred game-menu open: the menu request first applies a synchronized pause, then
             // opens the native menu on a later frame so the client never freezes alone.
+            // Fallback after GameMenuPauseWaitTimeoutMs so Client is never locked out of ESC if Host stalls.
             if (_pendingOpenGameMenuAfterPause
-                && LockstepClock.PausedBySession
                 && !LockstepClock.LoadingLevel
                 && !GameBridge.IsGameLoading()
                 && !DXVision.GUI.DXModalScreen.IsInModal)
             {
-                _pendingOpenGameMenuAfterPause = false;
-                GameBridge.OpenLevelGameMenu();
+                double nowMenuWait = DXHelper_Environment.Ticks;
+                bool pauseSettled = LockstepClock.PausedBySession;
+                bool timedOut = _pendingOpenGameMenuRequestedAtTicks > 0.0
+                    && (nowMenuWait - _pendingOpenGameMenuRequestedAtTicks) >= GameMenuPauseWaitTimeoutMs;
+                if (pauseSettled || timedOut)
+                {
+                    _pendingOpenGameMenuAfterPause = false;
+                    _pendingOpenGameMenuRequestedAtTicks = -1.0;
+                    _allowDirectGameMenuOpenOnce = true;
+                    if (timedOut && !pauseSettled)
+                        ModLogger.Warn("[CoopSessionManager] Pause sync timed out before opening game menu; falling back to local open.");
+                    GameBridge.OpenLevelGameMenu();
+                }
+            }
+
+            // Reconcile native game-menu Paused capture: if a peer unpaused the match while our
+            // menu was open, native menu close restores Paused=true even though PausedBySession=false.
+            if (_coopGameMenuModalOpened && !DXVision.GUI.DXModalScreen.IsInModal)
+            {
+                _coopGameMenuModalOpened = false;
+                if (!LockstepClock.PausedBySession && DXGame.Current != null && DXGame.Current.Paused)
+                {
+                    DXGame.Current.Paused = false;
+                    ModLogger.Info("[CoopSessionManager] Cleared stale native game-menu pause after peer resume.");
+                }
             }
 
             // 3. Broadcast Ally Cursor & Camera Viewport at 20Hz when moving, 4Hz heartbeat when idle
@@ -3860,15 +4041,29 @@ namespace TABCoopMod.Sync
 
                 case PacketType.ManualResyncRequest:
                 {
-                    if (!Transport.IsHost) break;
+                    if (!Transport.IsHost || !IsInSyncedLevel) break;
+                    if (GameBridge.IsLevelEnded())
+                    {
+                        GameBridge.ShowTopBanner("本局已结束，无法手动同步", Color.Orange, 1600);
+                        break;
+                    }
                     if (LockstepClock.LoadingLevel || GameBridge.IsGameLoading()
-                        || _pendingHostSnapshotExport || _awaitingClientSnapshotAck)
+                        || _pendingHostSnapshotExport || _awaitingClientSnapshotAck
+                        || _hostSnapshotReloadPending || _hostWaitingOwnReload
+                        || _awaitingSnapshotLoad || _lateJoinInProgress)
                     {
                         GameBridge.ShowTopBanner("同步已在进行中...", Color.Gold, 1600);
                         break;
                     }
 
-                    _lastAutoResyncTicks = DXHelper_Environment.Ticks;
+                    double nowReq = DXHelper_Environment.Ticks;
+                    if (nowReq - _lastManualResyncRequestTicks < ManualResyncCooldownMs && nowReq >= _lastManualResyncRequestTicks)
+                    {
+                        GameBridge.ShowTopBanner("手动同步冷却中，请稍候", Color.Gold, 1400);
+                        break;
+                    }
+                    _lastManualResyncRequestTicks = nowReq;
+                    _lastAutoResyncTicks = nowReq;
                     ResetTieredResyncState();
                     ModLogger.WarnImmediate($"[CoopSessionManager] Manual resync requested by Client P{senderId}.");
                     GameBridge.ShowTopBanner($"P{senderId} 请求手动同步，正在导出快照...", Color.Cyan, 3000);
@@ -6699,7 +6894,7 @@ namespace TABCoopMod.Sync
 
         private static void WriteSnapshotFileSharedSafe(string path, byte[] data)
         {
-            const int maxAttempts = 30;
+            const int maxAttempts = 120;
             for (int attempt = 0; attempt < maxAttempts; attempt++)
             {
                 if (SnapshotFileMatches(path, data))
@@ -6732,6 +6927,7 @@ namespace TABCoopMod.Sync
         {
             try
             {
+                UI.CoopLobbyWindow.ClearStaleWindowOnLevelEnter();
                 CaptureLocalControlGroupsForMidGameReload();
                 if (_pendingResyncSelectionGroups == null)
                 {

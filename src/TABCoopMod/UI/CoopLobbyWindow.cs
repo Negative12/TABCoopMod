@@ -286,6 +286,23 @@ namespace TABCoopMod.UI
             }
         }
 
+        /// <summary>Called when a join attempt is rejected after returning to entry view.</summary>
+        public static void NotifyEntryError(string message)
+        {
+            _entryStatusMessage = message ?? string.Empty;
+            if (_window != null && !_isClosing)
+                RefreshUI();
+        }
+
+        /// <summary>Clears stale lobby window reference when a level load resets the scene.</summary>
+        internal static void ClearStaleWindowOnLevelEnter()
+        {
+            _reopenAfterSingleplayerMenu = false;
+            _noModalSinceTicks = -1.0;
+            _window = null;
+            _isClosing = false;
+        }
+
         /// <summary>Called from ReturnToMainMenuPrefix so no dangling modal reference remains.</summary>
         public static void ForceHideWithoutStopping()
         {
