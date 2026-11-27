@@ -34,6 +34,7 @@ namespace TABCoopMod.Networking
         SnapshotChunk = 0x11,
         SnapshotLoadedAck = 0x12,
         SessionStart = 0x13,
+        JoinRejected = 0x14,
         ClientInputReport = 0x20,
         TurnInputBroadcast = 0x21,
         HostPauseKeepalive = 0x22,
@@ -398,6 +399,10 @@ namespace TABCoopMod.Networking
                             byte assignedId = AllocateLowestFreePlayerId();
                             if (_peers.Count >= _maxPlayers || assignedId == 0)
                             {
+                                byte[] reject = BuildFrame(1, PacketType.JoinRejected,
+                                    w => w.Write("房间已满（最多 3 人）"));
+                                TryWriteFrame(pending.Stream, reject);
+                                ModLogger.Info($"[LocalTcpLoopbackTransport] Rejected client: room full ({_peers.Count}/{_maxPlayers}).");
                                 ClosePending(i);
                                 continue;
                             }
