@@ -563,11 +563,14 @@ namespace TABCoopMod.Patches
             var game = DXGame.Current;
             if (game == null || entType == null) return 0;
             int count = 0;
-            foreach (var ent in game.EntitiesOfType(entType))
+            lock (DXGame.SyncLogic)
             {
-                if (ent == null || ent.Disposed) continue;
-                if (FactionOwnershipTracker.GetOwner(ent.ID) == owner)
-                    count++;
+                foreach (var ent in game.EntitiesOfType(entType))
+                {
+                    if (ent == null || ent.Disposed) continue;
+                    if (FactionOwnershipTracker.GetOwner(ent.ID) == owner)
+                        count++;
+                }
             }
             return count;
         }
@@ -576,11 +579,14 @@ namespace TABCoopMod.Patches
         {
             var game = DXGame.Current;
             if (game == null || entType == null) return false;
-            foreach (var ent in game.EntitiesOfType(entType))
+            lock (DXGame.SyncLogic)
             {
-                if (ent == null || ent.Disposed) continue;
-                if (FactionOwnershipTracker.GetOwner(ent.ID) == owner && GameBridge.IsEntityEnabled(ent))
-                    return true;
+                foreach (var ent in game.EntitiesOfType(entType))
+                {
+                    if (ent == null || ent.Disposed) continue;
+                    if (FactionOwnershipTracker.GetOwner(ent.ID) == owner && GameBridge.IsEntityEnabled(ent))
+                        return true;
+                }
             }
             return false;
         }

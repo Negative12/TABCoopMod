@@ -380,6 +380,13 @@ namespace TABCoopMod.Sync
         private static string _incomingCheckContent = string.Empty;
         private static int _incomingRandomSeed = 1337;
         private static long _incomingEntityIdCounter;
+        private static double _lastSnapshotRxTicks = -1.0;
+        private static double _lastSnapshotChunkRequestTicks = -1.0;
+        private static byte[] _activeSnapshotSavBytes;
+        private static int _activeSnapshotTotalChunks;
+        private static string _activeSnapshotCheckContent = string.Empty;
+        private static int _activeSnapshotSeed;
+        private static long _activeSnapshotIdCounter;
 
         // Ally Cursor & Camera State
         public sealed class AllyVisualState
@@ -504,6 +511,143 @@ namespace TABCoopMod.Sync
             public byte OwnerPlayerId;
         }
 
+        private struct ZombieFavorKeepFarFix
+        {
+            public ulong Id;
+            public float X;
+            public float Y;
+        }
+
+        private sealed class PendingZombieFavorAlign
+        {
+            public int Generation;
+            public int Tick;
+            public byte SenderPlayerId;
+            public List<ulong> KillZombieIds;
+            public List<ZombieFavorKeepFarFix> KeepFarFixes;
+        }
+
+        /// <summary>
+        /// Lightweight 16x16 coarse spatial grid of live player units and buildings used to evaluate
+        /// player-favorable zombie position alignment with O(1) pruning for non-frontline zombies.
+        /// </summary>
+        private sealed class PlayerDefenseCoarseGrid
+        {
+            public const int CoarseCellSize = 16;
+            public const float MaxSafeRadiusSq = 18.0f * 18.0f;
+            public const float MinFarAdvantageCells = 0.35f;
+
+            private readonly int _nCells;
+            private readonly int _gridSide;
+            private readonly bool[] _dangerMask;
+            private readonly List<PointF>[] _buckets;
+
+            public PlayerDefenseCoarseGrid(DXGame game, int nCells)
+            {
+                _nCells = Math.Max(32, nCells);
+                _gridSide = (_nCells + CoarseCellSize - 1) / CoarseCellSize;
+                int totalBuckets = _gridSide * _gridSide;
+                _dangerMask = new bool[totalBuckets];
+                _buckets = new List<PointF>[totalBuckets];
+
+                if (game == null) return;
+                lock (DXGame.SyncLogic)
+                {
+                    AddPlayerEntities(game.EntitiesOfType(GameBridge.TypeBuilding));
+                    AddPlayerEntities(game.EntitiesOfType(GameBridge.TypeUnit));
+                }
+            }
+
+            private void AddPlayerEntities(IEnumerable<DXEntity> entities)
+            {
+                if (entities == null) return;
+                foreach (var ent in entities)
+                {
+                    if (ent == null || ent.Disposed) continue;
+                    if (!GameBridge.IsPlayerEntity(ent)) continue;
+
+                    PointF p = ent.Position;
+                    if (float.IsNaN(p.X) || float.IsInfinity(p.X) || float.IsNaN(p.Y) || float.IsInfinity(p.Y)) continue;
+
+                    int gx = Math.Max(0, Math.Min(_gridSide - 1, (int)(p.X / CoarseCellSize)));
+                    int gy = Math.Max(0, Math.Min(_gridSide - 1, (int)(p.Y / CoarseCellSize)));
+                    int idx = gy * _gridSide + gx;
+                    var bucket = _buckets[idx];
+                    if (bucket == null)
+                    {
+                        bucket = new List<PointF>(4);
+                        _buckets[idx] = bucket;
+                    }
+                    bucket.Add(p);
+
+                    int minX = Math.Max(0, gx - 1);
+                    int maxX = Math.Min(_gridSide - 1, gx + 1);
+                    int minY = Math.Max(0, gy - 1);
+                    int maxY = Math.Min(_gridSide - 1, gy + 1);
+                    for (int ny = minY; ny <= maxY; ny++)
+                    {
+                        int row = ny * _gridSide;
+                        for (int nx = minX; nx <= maxX; nx++)
+                            _dangerMask[row + nx] = true;
+                    }
+                }
+            }
+
+            public bool HasDangerNear(float x, float y)
+            {
+                int gx = Math.Max(0, Math.Min(_gridSide - 1, (int)(x / CoarseCellSize)));
+                int gy = Math.Max(0, Math.Min(_gridSide - 1, (int)(y / CoarseCellSize)));
+                return _dangerMask[gy * _gridSide + gx];
+            }
+
+            public bool TryGetMinDistSqToPlayer(float x, float y, out float minDistSq)
+            {
+                minDistSq = float.MaxValue;
+                int gx = Math.Max(0, Math.Min(_gridSide - 1, (int)(x / CoarseCellSize)));
+                int gy = Math.Max(0, Math.Min(_gridSide - 1, (int)(y / CoarseCellSize)));
+                if (!_dangerMask[gy * _gridSide + gx])
+                    return false;
+
+                int minX = Math.Max(0, gx - 1);
+                int maxX = Math.Min(_gridSide - 1, gx + 1);
+                int minY = Math.Max(0, gy - 1);
+                int maxY = Math.Min(_gridSide - 1, gy + 1);
+                bool found = false;
+                for (int ny = minY; ny <= maxY; ny++)
+                {
+                    int row = ny * _gridSide;
+                    for (int nx = minX; nx <= maxX; nx++)
+                    {
+                        var bucket = _buckets[row + nx];
+                        if (bucket == null) continue;
+                        for (int i = 0; i < bucket.Count; i++)
+                        {
+                            float dx = bucket[i].X - x;
+                            float dy = bucket[i].Y - y;
+                            float d2 = dx * dx + dy * dy;
+                            if (d2 < minDistSq)
+                            {
+                                minDistSq = d2;
+                                found = true;
+                            }
+                        }
+                    }
+                }
+                return found;
+            }
+
+            public static bool IsZombieFallbackCellWalkable(float x, float y, int nCells)
+            {
+                if (float.IsNaN(x) || float.IsInfinity(x) || float.IsNaN(y) || float.IsInfinity(y))
+                    return false;
+                int cx = (int)x;
+                int cy = (int)y;
+                if (cx < 1 || cy < 1 || cx >= nCells - 1 || cy >= nCells - 1)
+                    return false;
+                return DXWorldGrid.ExistCell(cx, cy) && DXWorldGrid.IsCellAvailable(cx, cy);
+            }
+        }
+
         private struct DynamicSpawnSample
         {
             public ulong Id;
@@ -551,6 +695,9 @@ namespace TABCoopMod.Sync
             public Dictionary<ulong, DynamicTargetSample> TargetFixes;
             public HashSet<ulong> DriftedPosIds15;
             public List<DynamicSpawnSample> DynamicSpawns;
+            public List<ulong> FavorKillZombiesForHost;
+            public int BaselineAckSeq;
+            public bool SkipApplyBaselineOnly;
         }
 
         public static readonly Dictionary<byte, AllyVisualState> AllyStates = new Dictionary<byte, AllyVisualState>();
@@ -561,6 +708,11 @@ namespace TABCoopMod.Sync
             new ConcurrentQueue<PendingPosAlignApply>();
         private static readonly ConcurrentQueue<PendingReverseAlignApply> _incomingReverseAlignQueue =
             new ConcurrentQueue<PendingReverseAlignApply>();
+        private static readonly ConcurrentQueue<PendingZombieFavorAlign> _incomingZombieFavorAlignQueue =
+            new ConcurrentQueue<PendingZombieFavorAlign>();
+        private static readonly object _clientEpochZombieLock = new object();
+        private static readonly HashSet<ulong> _clientLastEpochAliveZombies = new HashSet<ulong>();
+        private static int _clientLastEpochZombieTick = -1;
         private static readonly object _unitOwnershipSync = new object();
         private static readonly Dictionary<ulong, UnitOwnershipEntry> _unitOwnership =
             new Dictionary<ulong, UnitOwnershipEntry>();
@@ -638,8 +790,12 @@ namespace TABCoopMod.Sync
             new Dictionary<byte, (int, Dictionary<ulong, DriftBaselineEntry>)>();
         private static readonly Dictionary<int, HostPendingBaseline> _hostPendingBaselinesBySeq =
             new Dictionary<int, HostPendingBaseline>();
+        private const int ClientDriftBaselineHistoryLimit = 8;
         private static int _clientPrevDriftSeq;
         private static Dictionary<ulong, StateHasher.EntityPosSample> _clientPrevDriftSamples;
+        private static readonly Dictionary<int, Dictionary<ulong, StateHasher.EntityPosSample>> _clientDriftBaselinesBySeq =
+            new Dictionary<int, Dictionary<ulong, StateHasher.EntityPosSample>>();
+        private static readonly Queue<int> _clientDriftBaselineOrder = new Queue<int>();
 
         private static ushort QuantizeCursorCoord(float value)
         {
@@ -745,6 +901,8 @@ namespace TABCoopMod.Sync
                 _hostPendingBaselinesBySeq.Clear();
                 _clientPrevDriftSeq = 0;
                 _clientPrevDriftSamples = null;
+                _clientDriftBaselinesBySeq.Clear();
+                _clientDriftBaselineOrder.Clear();
             }
             _lastCheckedSimTick = -1;
             _peerLastPosSyncSentTicks.Clear();
@@ -782,6 +940,12 @@ namespace TABCoopMod.Sync
             while (_outgoingPosSyncQueue.TryDequeue(out _)) { }
             while (_incomingPosAlignQueue.TryDequeue(out _)) { }
             while (_incomingReverseAlignQueue.TryDequeue(out _)) { }
+            while (_incomingZombieFavorAlignQueue.TryDequeue(out _)) { }
+            lock (_clientEpochZombieLock)
+            {
+                _clientLastEpochAliveZombies.Clear();
+                _clientLastEpochZombieTick = -1;
+            }
             lock (_unitOwnershipSync) _unitOwnership.Clear();
             _peerLastSimTick.Clear();
             _peerLastSimTickWallMs.Clear();
@@ -1425,6 +1589,9 @@ namespace TABCoopMod.Sync
             _loadFadeKickStartTicks = -1.0;
             _incomingChunks.Clear();
             _expectedChunks = 0;
+            _lastSnapshotRxTicks = -1.0;
+            _lastSnapshotChunkRequestTicks = -1.0;
+            ClearActiveSnapshotCache();
             _networkGate = new TurnInputTickGate();
             DXGame.LastGameTimeIAUpdate = 0.0;
             DXPhysicWorld.LastGameTimeUpdatePhysics = 0.0;
@@ -1521,6 +1688,9 @@ namespace TABCoopMod.Sync
             _loadFadeKickStartTicks = -1.0;
             _incomingChunks.Clear();
             _expectedChunks = 0;
+            _lastSnapshotRxTicks = -1.0;
+            _lastSnapshotChunkRequestTicks = -1.0;
+            ClearActiveSnapshotCache();
             _networkGate = new TurnInputTickGate();
             DXGame.LastGameTimeIAUpdate = 0.0;
             DXPhysicWorld.LastGameTimeUpdatePhysics = 0.0;
@@ -2253,10 +2423,24 @@ namespace TABCoopMod.Sync
             }
         }
 
+        private static void ClearActiveSnapshotCache()
+        {
+            _activeSnapshotSavBytes = null;
+            _activeSnapshotTotalChunks = 0;
+            _activeSnapshotCheckContent = string.Empty;
+            _activeSnapshotSeed = 0;
+            _activeSnapshotIdCounter = 0;
+        }
+
         private static void BroadcastSnapshotChunksToClients(byte[] savBytes, string chkText, int syncSeed, long idCounter)
         {
             if (savBytes == null || Transport == null || !Transport.IsHost) return;
             int totalChunks = (savBytes.Length + ChunkSizeBytes - 1) / ChunkSizeBytes;
+            _activeSnapshotSavBytes = savBytes;
+            _activeSnapshotTotalChunks = totalChunks;
+            _activeSnapshotCheckContent = chkText ?? string.Empty;
+            _activeSnapshotSeed = syncSeed;
+            _activeSnapshotIdCounter = idCounter;
             _clientSnapshotAckReceived = false;
             _clientSnapshotAckPeers.Clear();
             _awaitingClientSnapshotAck = true;
@@ -2307,6 +2491,7 @@ namespace TABCoopMod.Sync
             _awaitingClientAckStartTicks = -1.0;
             _clientSnapshotAckReceived = false;
             _clientSnapshotAckPeers.Clear();
+            ClearActiveSnapshotCache();
 
             ResetSyncTrackingState();
 
@@ -3107,6 +3292,7 @@ namespace TABCoopMod.Sync
 
             // Keep the engine's loader fades advancing while the Client waits to enter the level.
             TickLoadingFade();
+            PumpClientSnapshotMissingCheck();
 
             if (!IsSessionActive || Transport == null || DXGame.Current == null || DXGame.Current.Disposing)
                 return;
@@ -3126,6 +3312,7 @@ namespace TABCoopMod.Sync
                     _clientSnapshotAckPeers.Clear();
                     _lateJoinInProgress = false;
                     _lateJoinPeerId = 0;
+                    ClearActiveSnapshotCache();
                     EnterSyncedLevel();
                 }
                 else
@@ -4244,11 +4431,17 @@ namespace TABCoopMod.Sync
 
                 case PacketType.SnapshotBegin:
                 {
+                    if (_expectedChunks > 0)
+                    {
+                        _incomingChunks.Clear();
+                    }
                     _expectedSaveBytes = r.ReadInt32();
                     _expectedChunks = r.ReadInt32();
                     _incomingCheckContent = r.ReadString();
                     _incomingRandomSeed = r.ReadInt32();
                     _incomingEntityIdCounter = r.ReadInt64();
+                    _lastSnapshotRxTicks = DXHelper_Environment.Ticks;
+                    _lastSnapshotChunkRequestTicks = _lastSnapshotRxTicks;
                     ModLogger.Info($"[CoopSessionManager] Receiving Snapshot from Host ({_expectedSaveBytes:N0} bytes, {_expectedChunks} chunks, seed={_incomingRandomSeed}, idCounter={_incomingEntityIdCounter}); buffered={_incomingChunks.Count}.");
                     GameBridge.ShowTopBanner("Receiving Map Snapshot from Host...", Color.Cyan, 3000);
                     TryAssembleSnapshot();
@@ -4262,9 +4455,59 @@ namespace TABCoopMod.Sync
                     byte[] data = r.ReadBytes(len);
                     // Chunks may arrive before SnapshotBegin and out of order (ChaosTransport jitter
                     // reorders even ReliableOrdered). Buffer by index; assemble once complete.
-                    if (chunkIdx >= 0) _incomingChunks[chunkIdx] = data;
+                    if (chunkIdx >= 0)
+                    {
+                        _incomingChunks[chunkIdx] = data;
+                        _lastSnapshotRxTicks = DXHelper_Environment.Ticks;
+                    }
                     ModLogger.Info($"[CoopSessionManager] Snapshot chunk {chunkIdx} received ({len:N0} bytes, buffered={_incomingChunks.Count}/{_expectedChunks}).");
                     TryAssembleSnapshot();
+                    break;
+                }
+
+                case PacketType.SnapshotChunkRequest:
+                {
+                    if (!Transport.IsHost || _activeSnapshotSavBytes == null || _activeSnapshotTotalChunks <= 0) break;
+                    bool needBegin = r.ReadBoolean();
+                    ushort reqCount = r.ReadUInt16();
+                    var requested = new List<int>(Math.Min((int)reqCount, 64));
+                    for (int i = 0; i < reqCount && r.BaseStream.Position + 4 <= r.BaseStream.Length; i++)
+                    {
+                        int idx = r.ReadInt32();
+                        if (idx >= 0 && idx < _activeSnapshotTotalChunks && requested.Count < 64)
+                            requested.Add(idx);
+                    }
+                    if (needBegin)
+                    {
+                        byte[] savCopy = _activeSnapshotSavBytes;
+                        int total = _activeSnapshotTotalChunks;
+                        string chk = _activeSnapshotCheckContent ?? string.Empty;
+                        int seed = _activeSnapshotSeed;
+                        long idc = _activeSnapshotIdCounter;
+                        Transport.SendToPeer(senderId, SendChannel.ReliableOrdered, PacketType.SnapshotBegin, w =>
+                        {
+                            w.Write(savCopy.Length);
+                            w.Write(total);
+                            w.Write(chk);
+                            w.Write(seed);
+                            w.Write(idc);
+                        });
+                    }
+                    for (int i = 0; i < requested.Count; i++)
+                    {
+                        int idx = requested[i];
+                        int off = idx * ChunkSizeBytes;
+                        int len = Math.Min(ChunkSizeBytes, _activeSnapshotSavBytes.Length - off);
+                        if (len <= 0) continue;
+                        byte[] savRef = _activeSnapshotSavBytes;
+                        Transport.SendToPeer(senderId, SendChannel.ReliableOrdered, PacketType.SnapshotChunk, w =>
+                        {
+                            w.Write(idx);
+                            w.Write(len);
+                            w.Write(savRef, off, len);
+                        });
+                    }
+                    ModLogger.Info($"[CoopSessionManager] Retransmitted {requested.Count} missing snapshot chunk(s) to Client({senderId}) (needBegin={needBegin}).");
                     break;
                 }
 
@@ -4503,23 +4746,6 @@ namespace TABCoopMod.Sync
                 {
                     if (!Transport.IsHost) break;
                     int pTick = r.ReadInt32();
-                    lock (_driftBaselineLock)
-                    {
-                        int ackSeq = 0;
-                        foreach (var kvp in _hostPendingBaselinesBySeq)
-                        {
-                            if (kvp.Value.PeerId == senderId && kvp.Value.Tick == pTick && kvp.Value.Seq > ackSeq)
-                                ackSeq = kvp.Value.Seq;
-                        }
-                        if (ackSeq > 0 && _hostPendingBaselinesBySeq.TryGetValue(ackSeq, out var confirmed))
-                        {
-                            _hostAckedBaselineByPeer[senderId] = (confirmed.Seq, confirmed.Samples);
-                            var rm = new List<int>();
-                            foreach (var k in _hostPendingBaselinesBySeq.Keys)
-                                if (_hostPendingBaselinesBySeq[k].PeerId == senderId && k <= ackSeq) rm.Add(k);
-                            for (int ri = 0; ri < rm.Count; ri++) _hostPendingBaselinesBySeq.Remove(rm[ri]);
-                        }
-                    }
                     bool wasApplied = r.ReadBoolean();
                     int appliedCount = r.ReadInt32();
                     int comparedCount = r.ReadInt32();
@@ -4536,6 +4762,93 @@ namespace TABCoopMod.Sync
                     int killsApplied = r.ReadInt32();
                     int missingOnHost = r.ReadInt32();
                     int missingOnClient = r.ReadInt32();
+                    bool hasExplicitAck = r.BaseStream.Position + 4 <= r.BaseStream.Length;
+                    int explicitAckSeq = hasExplicitAck ? r.ReadInt32() : 0;
+
+                    lock (_driftBaselineLock)
+                    {
+                        if (hasExplicitAck && explicitAckSeq < 0)
+                        {
+                            _hostAckedBaselineByPeer.Remove(senderId);
+                            var rmAll = new List<int>();
+                            foreach (var k in _hostPendingBaselinesBySeq.Keys)
+                                if (_hostPendingBaselinesBySeq[k].PeerId == senderId) rmAll.Add(k);
+                            for (int ri = 0; ri < rmAll.Count; ri++) _hostPendingBaselinesBySeq.Remove(rmAll[ri]);
+                        }
+                        else
+                        {
+                            int ackSeq = 0;
+                            if (hasExplicitAck && explicitAckSeq > 0)
+                            {
+                                if (_hostPendingBaselinesBySeq.TryGetValue(explicitAckSeq, out var exact) && exact.PeerId == senderId)
+                                    ackSeq = explicitAckSeq;
+                            }
+                            else
+                            {
+                                foreach (var kvp in _hostPendingBaselinesBySeq)
+                                {
+                                    if (kvp.Value.PeerId == senderId && kvp.Value.Tick == pTick && kvp.Value.Seq > ackSeq)
+                                        ackSeq = kvp.Value.Seq;
+                                }
+                            }
+                            if (ackSeq > 0 && _hostPendingBaselinesBySeq.TryGetValue(ackSeq, out var confirmed))
+                            {
+                                _hostAckedBaselineByPeer[senderId] = (confirmed.Seq, confirmed.Samples);
+                                var rm = new List<int>();
+                                foreach (var k in _hostPendingBaselinesBySeq.Keys)
+                                    if (_hostPendingBaselinesBySeq[k].PeerId == senderId && k <= ackSeq) rm.Add(k);
+                                for (int ri = 0; ri < rm.Count; ri++) _hostPendingBaselinesBySeq.Remove(rm[ri]);
+                            }
+                        }
+                    }
+
+                    // Baseline-only ACK/NACK reports (from cache-miss or corrupt-baseline skip) must not mutate streak counters.
+                    if (hasExplicitAck && comparedCount == 0 && lifeDiffCount == 0 && missingOnClient == 0 && missingOnHost == 0 && !exceededThreshold)
+                        break;
+
+                    List<ulong> favorKillIds = null;
+                    List<ZombieFavorKeepFarFix> favorKeepFar = null;
+                    if (r.BaseStream.Position + 2 <= r.BaseStream.Length)
+                    {
+                        ushort fkCount = r.ReadUInt16();
+                        if (fkCount > 0)
+                        {
+                            int take = Math.Min((int)fkCount, 64);
+                            favorKillIds = new List<ulong>(Math.Min(take, 32));
+                            for (int fi = 0; fi < fkCount && r.BaseStream.Position + 8 <= r.BaseStream.Length; fi++)
+                            {
+                                ulong fid = r.ReadUInt64();
+                                if (fi < 32) favorKillIds.Add(fid);
+                            }
+                        }
+                        if (r.BaseStream.Position + 2 <= r.BaseStream.Length)
+                        {
+                            ushort fpCount = r.ReadUInt16();
+                            if (fpCount > 0)
+                            {
+                                favorKeepFar = new List<ZombieFavorKeepFarFix>(Math.Min((int)fpCount, 64));
+                                for (int fi = 0; fi < fpCount && r.BaseStream.Position + 16 <= r.BaseStream.Length; fi++)
+                                {
+                                    ulong pid = r.ReadUInt64();
+                                    float px = r.ReadSingle();
+                                    float py = r.ReadSingle();
+                                    if (fi < 64)
+                                        favorKeepFar.Add(new ZombieFavorKeepFarFix { Id = pid, X = px, Y = py });
+                                }
+                            }
+                        }
+                    }
+                    if ((favorKillIds != null && favorKillIds.Count > 0) || (favorKeepFar != null && favorKeepFar.Count > 0))
+                    {
+                        _incomingZombieFavorAlignQueue.Enqueue(new PendingZombieFavorAlign
+                        {
+                            Generation = _asyncGeneration,
+                            Tick = pTick,
+                            SenderPlayerId = senderId,
+                            KillZombieIds = favorKillIds,
+                            KeepFarFixes = favorKeepFar
+                        });
+                    }
 
                     var peerState = GetOrCreatePeerDesyncState(senderId);
 
@@ -5544,6 +5857,35 @@ namespace TABCoopMod.Sync
             {
                 if (item.Generation != curGen || Transport == null) continue;
 
+                if (item.SkipApplyBaselineOnly)
+                {
+                    if (item.BaselineAckSeq != 0 && Transport.IsActive)
+                    {
+                        Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.PosDriftStatsReport, w =>
+                        {
+                            w.Write(item.Tick);
+                            w.Write(false);
+                            w.Write(0);
+                            w.Write(0);
+                            w.Write(0);
+                            w.Write(0);
+                            w.Write(0);
+                            w.Write(0);
+                            w.Write(0f);
+                            w.Write(0f);
+                            w.Write(false);
+                            w.Write("None");
+                            w.Write(0);
+                            w.Write(0);
+                            w.Write(0);
+                            w.Write(0);
+                            w.Write(0);
+                            w.Write(item.BaselineAckSeq);
+                        });
+                    }
+                    continue;
+                }
+
                 var game = DXGame.Current;
                 int nCells = DXWorldGrid.NCells;
                 float maxCoord = nCells > 1 ? nCells - 0.5f : 10000f;
@@ -5684,8 +6026,11 @@ namespace TABCoopMod.Sync
 
                 int appliedCount = 0;
                 int protectedSelfOwned = 0;
+                int favorFarKept = 0;
                 int targetAligned = 0;
                 HashSet<ulong> targetAlignedIds = null;
+                List<ZombieFavorKeepFarFix> favorKeepFarFixes = null;
+                PlayerDefenseCoarseGrid defenseGrid = null;
                 byte localPid = CommandInterceptor.LocalPlayerId;
                 if (item.ApplyPosCorrection && item.Deltas != null && game != null)
                 {
@@ -5739,6 +6084,34 @@ namespace TABCoopMod.Sync
 
                         nx = Math.Max(0.5f, Math.Min(maxCoord, nx));
                         ny = Math.Max(0.5f, Math.Min(maxCoord, ny));
+
+                        // Player-favorable micro-snap: for small zombie nudges near any player unit/building,
+                        // keep the position farther from players and tell Host to converge to that safe spot.
+                        if (isZombie && dist <= MaxAsyncNudgeCells)
+                        {
+                            if (defenseGrid == null)
+                                defenseGrid = new PlayerDefenseCoarseGrid(game, nCells);
+                            PointF curPos = e.Position;
+                            if ((defenseGrid.HasDangerNear(curPos.X, curPos.Y) || defenseGrid.HasDangerNear(nx, ny))
+                                && defenseGrid.TryGetMinDistSqToPlayer(nx, ny, out float distSqH)
+                                && distSqH <= PlayerDefenseCoarseGrid.MaxSafeRadiusSq
+                                && defenseGrid.TryGetMinDistSqToPlayer(curPos.X, curPos.Y, out float distSqC)
+                                && distSqC > distSqH
+                                && (Math.Sqrt(distSqC) - Math.Sqrt(distSqH)) >= PlayerDefenseCoarseGrid.MinFarAdvantageCells
+                                && PlayerDefenseCoarseGrid.IsZombieFallbackCellWalkable(curPos.X, curPos.Y, nCells))
+                            {
+                                float safeX = LockstepClock.QuantizeCoord(Math.Max(0.5f, Math.Min(maxCoord, curPos.X)));
+                                float safeY = LockstepClock.QuantizeCoord(Math.Max(0.5f, Math.Min(maxCoord, curPos.Y)));
+                                _lastEntityPosCorrectedTick[e.ID] = item.Tick;
+                                if (favorKeepFarFixes == null)
+                                    favorKeepFarFixes = new List<ZombieFavorKeepFarFix>(16);
+                                if (favorKeepFarFixes.Count < 64)
+                                    favorKeepFarFixes.Add(new ZombieFavorKeepFarFix { Id = e.ID, X = safeX, Y = safeY });
+                                favorFarKept++;
+                                continue;
+                            }
+                        }
+
                         float actualDx = nx - e.Position.X;
                         float actualDy = ny - e.Position.Y;
                         var newPos = new PointF(nx, ny);
@@ -5836,18 +6209,20 @@ namespace TABCoopMod.Sync
                 }
 
                 double alignNow = DXHelper_Environment.Ticks;
-                bool notableAlign = killsApplied > 0 || lifeApplied > 0
+                bool notableAlign = killsApplied > 0 || lifeApplied > 0 || favorFarKept > 0
+                    || (item.FavorKillZombiesForHost != null && item.FavorKillZombiesForHost.Count > 0)
                     || item.MissingOnClient >= 5 || item.MissingOnHost >= 5
                     || item.MaxDelta >= 2.0f || item.ExceededThreshold
                     || ModLogger.IsVerbose;
                 if (notableAlign || targetAligned > 0 || alignNow < _lastAsyncPosAlignLogMs || (alignNow - _lastAsyncPosAlignLogMs) >= PosAlignLogIntervalMs)
                 {
                     _lastAsyncPosAlignLogMs = alignNow;
+                    int favorKillCount = item.FavorKillZombiesForHost != null ? item.FavorKillZombiesForHost.Count : 0;
                     ModLogger.Info(
-                        $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}(pos={(item.ApplyPosCorrection ? 1 : 0)}:{appliedCount}/{item.ComparedCount}, selfProt={protectedSelfOwned}, tgt={targetAligned}) " +
+                        $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}(pos={(item.ApplyPosCorrection ? 1 : 0)}:{appliedCount}/{item.ComparedCount}, selfProt={protectedSelfOwned}, favorFar={favorFarKept}, tgt={targetAligned}) " +
                         $"Drifted(>0.001={item.Drifted001}, >0.01={item.Drifted01}, >0.1={item.Drifted1}, >0.5={item.Drifted5}) " +
                         $"MaxDelta={item.MaxDelta:F4} Rms={item.RmsDelta:F4} MaxType={maxType} Exceeded={item.ExceededThreshold} " +
-                        $"LifeDiff={item.LifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={item.MissingOnHost} MissingOnClient={item.MissingOnClient}");
+                        $"LifeDiff={item.LifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} FavorKills={favorKillCount} MissingOnHost={item.MissingOnHost} MissingOnClient={item.MissingOnClient}");
                 }
 
                 Transport.SendToPeer(1, SendChannel.ReliableOrdered, PacketType.PosDriftStatsReport, w =>
@@ -5869,7 +6244,102 @@ namespace TABCoopMod.Sync
                     w.Write(killsApplied);
                     w.Write(item.MissingOnHost);
                     w.Write(item.MissingOnClient);
+                    w.Write(item.BaselineAckSeq);
+                    ushort fkCount = (ushort)(item.FavorKillZombiesForHost != null ? Math.Min(32, item.FavorKillZombiesForHost.Count) : 0);
+                    w.Write(fkCount);
+                    for (int fi = 0; fi < fkCount; fi++)
+                        w.Write(item.FavorKillZombiesForHost[fi]);
+                    ushort fpCount = (ushort)(favorKeepFarFixes != null ? Math.Min(64, favorKeepFarFixes.Count) : 0);
+                    w.Write(fpCount);
+                    for (int fi = 0; fi < fpCount; fi++)
+                    {
+                        var ff = favorKeepFarFixes[fi];
+                        w.Write(ff.Id);
+                        w.Write(ff.X);
+                        w.Write(ff.Y);
+                    }
                 });
+            }
+
+            PlayerDefenseCoarseGrid hostDefenseGrid = null;
+            while (_incomingZombieFavorAlignQueue.TryDequeue(out var favor))
+            {
+                if (favor.Generation != curGen || Transport == null || !Transport.IsHost) continue;
+                if (!EnableAsyncPosAlign) continue;
+                var game = DXGame.Current;
+                if (game == null) continue;
+
+                int curTick = game.IAIterationInt;
+                int nCells = DXWorldGrid.NCells;
+                float maxCoord = nCells > 1 ? nCells - 0.5f : 10000f;
+                int hostFavorKills = 0;
+                int hostFavorMoves = 0;
+
+                if (favor.KillZombieIds != null && favor.KillZombieIds.Count > 0)
+                {
+                    for (int i = 0; i < favor.KillZombieIds.Count; i++)
+                    {
+                        DXEntity e = game.GetEntityByID(favor.KillZombieIds[i]);
+                        if (e == null || e.Disposed || !GameBridge.IsZombieType(e.GetType())) continue;
+                        if (GameBridge.TryCorrectLife(e, 0, forceKill: true))
+                            hostFavorKills++;
+                    }
+                }
+
+                if (favor.KeepFarFixes != null && favor.KeepFarFixes.Count > 0)
+                {
+                    if (hostDefenseGrid == null)
+                        hostDefenseGrid = new PlayerDefenseCoarseGrid(game, nCells);
+                    for (int i = 0; i < favor.KeepFarFixes.Count; i++)
+                    {
+                        var ff = favor.KeepFarFixes[i];
+                        if (_lastEntityPosCorrectedTick.TryGetValue(ff.Id, out int prevTick))
+                        {
+                            int elapsed = curTick - prevTick;
+                            if (elapsed >= 0 && elapsed < EntityPosRealignCooldownTicks)
+                                continue;
+                        }
+
+                        DXEntity e = game.GetEntityByID(ff.Id);
+                        if (e == null || e.Disposed || e.PhysicalType != DXBodyType.Dynamic) continue;
+                        if (!GameBridge.IsZombieType(e.GetType())) continue;
+
+                        float nx = LockstepClock.QuantizeCoord(Math.Max(0.5f, Math.Min(maxCoord, ff.X)));
+                        float ny = LockstepClock.QuantizeCoord(Math.Max(0.5f, Math.Min(maxCoord, ff.Y)));
+                        if (!PlayerDefenseCoarseGrid.IsZombieFallbackCellWalkable(nx, ny, nCells))
+                            continue;
+
+                        float dx = nx - e.Position.X;
+                        float dy = ny - e.Position.Y;
+                        float dist = (float)Math.Sqrt(dx * dx + dy * dy);
+                        if (dist < MinAsyncPosSnapCells || dist > MaxAsyncNudgeCells)
+                            continue;
+
+                        if (hostDefenseGrid.TryGetMinDistSqToPlayer(e.Position.X, e.Position.Y, out float curDistSq)
+                            && (!hostDefenseGrid.TryGetMinDistSqToPlayer(nx, ny, out float targetDistSq) || targetDistSq > curDistSq))
+                        {
+                            float actualDx = nx - e.Position.X;
+                            float actualDy = ny - e.Position.Y;
+                            var newPos = new PointF(nx, ny);
+                            e.LastPosition = newPos;
+                            e.Position = newPos;
+                            var body = e.Body;
+                            if (body != null && body.Handle != IntPtr.Zero)
+                            {
+                                body.LastPositionComputed = newPos;
+                                body.PositionComputed = newPos;
+                                body.PhysicPosition = newPos;
+                            }
+                            _lastEntityPosCorrectedTick[e.ID] = curTick;
+                            if (dist <= 3.5f)
+                                RenderVisualInterpolationPatch.RecordVisualSnapOffset(e.ID, -actualDx, -actualDy);
+                            hostFavorMoves++;
+                        }
+                    }
+                }
+
+                if (hostFavorKills > 0 || hostFavorMoves > 0)
+                    ModLogger.Info($"[ZombieFavorAlign] Applied from P{favor.SenderPlayerId} Tick={favor.Tick}: favorKills={hostFavorKills}, favorFar={hostFavorMoves}");
             }
 
             while (_incomingReverseAlignQueue.TryDequeue(out var rev))
@@ -6494,16 +6964,15 @@ namespace TABCoopMod.Sync
                 offset += p.Length;
             }
 
-            if (!_tickPosCache.TryGetValue(buf.SimTick, out var clientSamples) || clientSamples == null)
-            {
-                ModLogger.Warn($"[AsyncPosAlign] No cached client positions for Tick {buf.SimTick}; cannot measure/apply delta.");
-                return;
-            }
+            bool hasClientPos = _tickPosCache.TryGetValue(buf.SimTick, out var clientSamples) && clientSamples != null;
+            if (!hasClientPos)
+                ModLogger.Warn($"[AsyncPosAlign] No cached client positions for Tick {buf.SimTick}; updating baseline only.");
 
-            var clientSnapshot = clientSamples.ToArray();
-            bool hasClientEcon = _tickEconCache.TryGetValue(buf.SimTick, out EconSnapshot clientEcon);
+            var clientSnapshot = hasClientPos ? clientSamples.ToArray() : Array.Empty<StateHasher.EntityPosSample>();
+            EconSnapshot clientEcon = default;
+            bool hasClientEcon = hasClientPos && _tickEconCache.TryGetValue(buf.SimTick, out clientEcon);
             StateHasher.ProdQueueSample[] clientProdSnap =
-                _tickProdCache.TryGetValue(buf.SimTick, out var clientProdList) && clientProdList != null
+                hasClientPos && _tickProdCache.TryGetValue(buf.SimTick, out var clientProdList) && clientProdList != null
                     ? clientProdList.ToArray()
                     : Array.Empty<StateHasher.ProdQueueSample>();
             int gen = _asyncGeneration;
@@ -6516,10 +6985,6 @@ namespace TABCoopMod.Sync
                 {
                     if (gen != _asyncGeneration) return;
 
-                    var clientMap = new Dictionary<ulong, StateHasher.EntityPosSample>(clientSnapshot.Length);
-                    for (int i = 0; i < clientSnapshot.Length; i++)
-                        clientMap[clientSnapshot[i].Id] = clientSnapshot[i];
-
                     int count;
                     ushort hostMask;
                     bool flagApplyLife;
@@ -6530,6 +6995,9 @@ namespace TABCoopMod.Sync
                     bool flagHasStructMeta;
                     bool flagHasTargetMeta;
                     bool flagHasSpawnMeta;
+                    int decodedChunkSeq = 0;
+                    int baselineSeqUsed = 0;
+                    int missingBaselineCount = 0;
                     List<StateHasher.EntityPosSample> hostSamples;
                     EconSnapshot hostEcon = default;
                     List<StateHasher.ProdQueueSample> hostProds = null;
@@ -6557,6 +7025,8 @@ namespace TABCoopMod.Sync
                             flagHasSpawnMeta = (flags & 128) != 0;
                             int chunkSeq = br.ReadInt32();
                             int baselineSeq = br.ReadInt32();
+                            decodedChunkSeq = chunkSeq;
+                            baselineSeqUsed = baselineSeq;
                             count = (int)NetCommand.ReadVarUInt32(br);
 
                             Dictionary<ulong, StateHasher.EntityPosSample> prevBase = null;
@@ -6564,8 +7034,11 @@ namespace TABCoopMod.Sync
                             {
                                 lock (_driftBaselineLock)
                                 {
-                                    if (_clientPrevDriftSeq == baselineSeq && _clientPrevDriftSamples != null)
+                                    if (!_clientDriftBaselinesBySeq.TryGetValue(baselineSeq, out prevBase)
+                                        && _clientPrevDriftSeq == baselineSeq && _clientPrevDriftSamples != null)
+                                    {
                                         prevBase = _clientPrevDriftSamples;
+                                    }
                                 }
                             }
 
@@ -6587,7 +7060,11 @@ namespace TABCoopMod.Sync
                                     if (prevBase != null && prevBase.TryGetValue(id, out var bs))
                                         sample = bs;
                                     else
-                                        sample = new StateHasher.EntityPosSample { Id = id };
+                                    {
+                                        // Never fabricate a zero (X=0, Y=0, Life=0) sample when baseline history is missing.
+                                        missingBaselineCount++;
+                                        continue;
+                                    }
                                 }
                                 else
                                 {
@@ -6646,8 +7123,27 @@ namespace TABCoopMod.Sync
 
                             lock (_driftBaselineLock)
                             {
-                                _clientPrevDriftSeq = chunkSeq;
-                                _clientPrevDriftSamples = nextBase;
+                                if (missingBaselineCount == 0 && chunkSeq > 0)
+                                {
+                                    _clientPrevDriftSeq = chunkSeq;
+                                    _clientPrevDriftSamples = nextBase;
+                                    if (!_clientDriftBaselinesBySeq.ContainsKey(chunkSeq))
+                                        _clientDriftBaselineOrder.Enqueue(chunkSeq);
+                                    _clientDriftBaselinesBySeq[chunkSeq] = nextBase;
+                                    while (_clientDriftBaselineOrder.Count > ClientDriftBaselineHistoryLimit)
+                                    {
+                                        int evictSeq = _clientDriftBaselineOrder.Dequeue();
+                                        if (evictSeq != chunkSeq)
+                                            _clientDriftBaselinesBySeq.Remove(evictSeq);
+                                    }
+                                }
+                                else if (missingBaselineCount > 0)
+                                {
+                                    _clientPrevDriftSeq = 0;
+                                    _clientPrevDriftSamples = null;
+                                    _clientDriftBaselinesBySeq.Clear();
+                                    _clientDriftBaselineOrder.Clear();
+                                }
                             }
 
                             if (flagHasEcon)
@@ -6846,6 +7342,52 @@ namespace TABCoopMod.Sync
 
                     if (gen != _asyncGeneration) return;
 
+                    if (missingBaselineCount > 0)
+                    {
+                        ModLogger.Warn($"[AsyncPosAlign] Missing baseline seq={baselineSeqUsed} at Tick {simTick} (missing={missingBaselineCount}/{count}); requesting full baseline.");
+                        _incomingPosAlignQueue.Enqueue(new PendingPosAlignApply
+                        {
+                            Generation = gen,
+                            Tick = simTick,
+                            BaselineAckSeq = -1,
+                            SkipApplyBaselineOnly = true
+                        });
+                        return;
+                    }
+
+                    if (!hasClientPos)
+                    {
+                        _incomingPosAlignQueue.Enqueue(new PendingPosAlignApply
+                        {
+                            Generation = gen,
+                            Tick = simTick,
+                            BaselineAckSeq = decodedChunkSeq,
+                            SkipApplyBaselineOnly = true
+                        });
+                        return;
+                    }
+
+                    var clientMap = new Dictionary<ulong, StateHasher.EntityPosSample>(clientSnapshot.Length);
+                    for (int i = 0; i < clientSnapshot.Length; i++)
+                        clientMap[clientSnapshot[i].Id] = clientSnapshot[i];
+
+                    HashSet<ulong> prevAliveZombies = null;
+                    lock (_clientEpochZombieLock)
+                    {
+                        if (simTick > _clientLastEpochZombieTick)
+                        {
+                            if (_clientLastEpochAliveZombies.Count > 0)
+                                prevAliveZombies = new HashSet<ulong>(_clientLastEpochAliveZombies);
+                            _clientLastEpochAliveZombies.Clear();
+                            for (int zi = 0; zi < clientSnapshot.Length; zi++)
+                            {
+                                if (clientSnapshot[zi].IsZombie && clientSnapshot[zi].Life > 0)
+                                    _clientLastEpochAliveZombies.Add(clientSnapshot[zi].Id);
+                            }
+                            _clientLastEpochZombieTick = simTick;
+                        }
+                    }
+
                     bool effectiveApplyLife = apply && flagApplyLife;
                     int comparedCount = 0;
                     int drifted001 = 0, drifted01 = 0, drifted1 = 0, drifted5 = 0;
@@ -6857,6 +7399,8 @@ namespace TABCoopMod.Sync
                     List<EntityDeltaFix> deltas = apply ? new List<EntityDeltaFix>(64) : null;
                     HashSet<ulong> driftedPosIds15 = (apply && flagHasTargetMeta) ? new HashSet<ulong>() : null;
                     List<EntityLifeFix> lifeFixes = effectiveApplyLife ? new List<EntityLifeFix>(64) : null;
+                    List<ulong> favorKillZombiesForHost = null;
+                    HashSet<ulong> favorLocallyDeadZombieIds = null;
                     var hostIds = new HashSet<ulong>();
                     var hostSampleMap = (flagHasSpawnMeta || flagHasStructMeta)
                         ? new Dictionary<ulong, StateHasher.EntityPosSample>(hostSamples.Count)
@@ -6877,6 +7421,19 @@ namespace TABCoopMod.Sync
                         if (hs.Id > hostMaxId) hostMaxId = hs.Id;
                         if (!clientMap.TryGetValue(hs.Id, out StateHasher.EntityPosSample cs))
                         {
+                            bool isTeamCollision = hostSpawnTeamMap != null
+                                && hostSpawnTeamMap.TryGetValue(hs.Id, out byte ht)
+                                && ht == 0;
+                            // Zombie alive on Client in previous epoch and now gone locally => killed by players on Client.
+                            // Keep it dead locally and forward to Host rather than respawning it via DynamicSpawns.
+                            if (effectiveApplyLife && !isTeamCollision && hs.Life > 0
+                                && prevAliveZombies != null && prevAliveZombies.Contains(hs.Id)
+                                && (favorKillZombiesForHost == null || favorKillZombiesForHost.Count < 32))
+                            {
+                                (favorKillZombiesForHost ?? (favorKillZombiesForHost = new List<ulong>(8))).Add(hs.Id);
+                                (favorLocallyDeadZombieIds ?? (favorLocallyDeadZombieIds = new HashSet<ulong>())).Add(hs.Id);
+                                continue;
+                            }
                             missingOnClient++;
                             continue;
                         }
@@ -6891,13 +7448,23 @@ namespace TABCoopMod.Sync
                             expTeamFilter = hIsPlayer ? (byte)1 : (byte)2;
                         }
 
-                        // Host-authoritative HP: apply the delta measured at the same epoch tick so
-                        // damage taken locally since then is preserved.
+                        // Host-authoritative HP, except Zombie death/alive divergence favors Death on both peers.
                         if (hs.Life != cs.Life)
                         {
                             lifeDiffCount++;
                             if (effectiveApplyLife)
-                                lifeFixes.Add(new EntityLifeFix { Id = hs.Id, Delta = hs.Life - cs.Life, Kill = hs.Life <= 0, ExpectedTeamFilter = expTeamFilter });
+                            {
+                                if (cs.IsZombie && cs.Life <= 0 && hs.Life > 0
+                                    && (favorKillZombiesForHost == null || favorKillZombiesForHost.Count < 32))
+                                {
+                                    (favorKillZombiesForHost ?? (favorKillZombiesForHost = new List<ulong>(8))).Add(hs.Id);
+                                    (favorLocallyDeadZombieIds ?? (favorLocallyDeadZombieIds = new HashSet<ulong>())).Add(hs.Id);
+                                }
+                                else
+                                {
+                                    lifeFixes.Add(new EntityLifeFix { Id = hs.Id, Delta = hs.Life - cs.Life, Kill = hs.Life <= 0, ExpectedTeamFilter = expTeamFilter });
+                                }
+                            }
                         }
 
                         if (!cs.IsDynamic) continue;
@@ -7107,6 +7674,7 @@ namespace TABCoopMod.Sync
                         {
                             var dsm = hostSpawnMetas[i];
                             if (clientMap.ContainsKey(dsm.Id)) continue;
+                            if (favorLocallyDeadZombieIds != null && favorLocallyDeadZombieIds.Contains(dsm.Id)) continue;
                             if (!hostSampleMap.TryGetValue(dsm.Id, out var hs)) continue;
                             pendingSpawns.Add(new DynamicSpawnSample
                             {
@@ -7131,6 +7699,8 @@ namespace TABCoopMod.Sync
                     bool exceededThreshold = maxDelta >= MaxAsyncTeleportCells;
                     bool emergencyPosOverride = maxDelta >= 3.5f || rmsDelta >= 1.2f;
                     bool effectiveApplyPos = apply && (flagApplyPos || emergencyPosOverride);
+                    if (exceededThreshold || missingOnClient > 16 || !effectiveApplyLife)
+                        favorKillZombiesForHost = null;
 
                     if (gen != _asyncGeneration) return;
 
@@ -7175,7 +7745,10 @@ namespace TABCoopMod.Sync
                         StructDestroys = structDestroys,
                         TargetFixes = (apply && flagHasTargetMeta) ? hostTargetMetas : null,
                         DriftedPosIds15 = driftedPosIds15,
-                        DynamicSpawns = dynamicSpawns
+                        DynamicSpawns = dynamicSpawns,
+                        FavorKillZombiesForHost = favorKillZombiesForHost,
+                        BaselineAckSeq = decodedChunkSeq,
+                        SkipApplyBaselineOnly = false
                     });
                 }
                 catch (Exception ex)
@@ -7229,6 +7802,33 @@ namespace TABCoopMod.Sync
             }
         }
 
+        private static void PumpClientSnapshotMissingCheck()
+        {
+            if (Transport == null || Transport.IsHost || !IsSessionActive) return;
+            if (_expectedChunks <= 0 || _incomingChunks.Count >= _expectedChunks) return;
+            double now = DXHelper_Environment.Ticks;
+            if (_lastSnapshotRxTicks <= 0.0 || now - _lastSnapshotRxTicks < 4000.0) return;
+            if (_lastSnapshotChunkRequestTicks > 0.0 && now - _lastSnapshotChunkRequestTicks < 4000.0) return;
+
+            _lastSnapshotChunkRequestTicks = now;
+            var missing = new List<int>(64);
+            for (int i = 0; i < _expectedChunks && missing.Count < 64; i++)
+            {
+                if (!_incomingChunks.ContainsKey(i))
+                    missing.Add(i);
+            }
+            if (missing.Count == 0) return;
+
+            ModLogger.Warn($"[CoopSessionManager] Snapshot stalled ({_incomingChunks.Count}/{_expectedChunks}); requesting {missing.Count} missing chunk(s) from Host...");
+            Transport.SendToPeer(1, SendChannel.ReliableCommand, PacketType.SnapshotChunkRequest, w =>
+            {
+                w.Write(false);
+                w.Write((ushort)missing.Count);
+                for (int i = 0; i < missing.Count; i++)
+                    w.Write(missing[i]);
+            });
+        }
+
         private static void TryAssembleSnapshot()
         {
             if (_expectedChunks <= 0 || _incomingChunks.Count < _expectedChunks) return;
@@ -7248,6 +7848,8 @@ namespace TABCoopMod.Sync
             }
             _incomingChunks.Clear();
             _expectedChunks = 0;
+            _lastSnapshotRxTicks = -1.0;
+            _lastSnapshotChunkRequestTicks = -1.0;
 
             ApplyReceivedSnapshotOnClient(savBytes, _incomingCheckContent, _incomingRandomSeed, _incomingEntityIdCounter);
         }

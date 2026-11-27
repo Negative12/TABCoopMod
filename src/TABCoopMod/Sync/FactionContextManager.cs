@@ -220,10 +220,21 @@ namespace TABCoopMod.Sync
             RecalculateAllFactions();
         }
 
+        private static void EnsureSimIdleOnMainThread()
+        {
+            if (!Determinism.DeterministicSandboxPatches.IsAsyncTickInFlight)
+                return;
+            int mainId = Determinism.LockstepClock.MainThreadId;
+            int curId = System.Threading.Thread.CurrentThread.ManagedThreadId;
+            if (mainId != 0 && curId == mainId && Determinism.LockstepClock.LogicThreadId != curId)
+                Determinism.DeterministicSandboxPatches.FlushPendingAsyncTick(DXGame.Current);
+        }
+
         public static void PushContext(byte playerId)
         {
             if (!CoopSessionManager.IsMultiFactionActive || !IsInitialized)
                 return;
+            EnsureSimIdleOnMainThread();
             if (playerId < 1 || playerId > 3)
                 playerId = 1;
 
@@ -240,6 +251,9 @@ namespace TABCoopMod.Sync
         public static void PopContext()
         {
             if (!CoopSessionManager.IsMultiFactionActive || !IsInitialized || _contextStack.Count == 0)
+                return;
+            EnsureSimIdleOnMainThread();
+            if (_contextStack.Count == 0)
                 return;
 
             _contextStack.Pop();

@@ -237,16 +237,19 @@ namespace TABCoopMod.Sync
             var game = DXGame.Current;
             if (reqType == null || game == null) return false;
 
-            foreach (var ent in game.EntitiesOfType(reqType))
+            lock (DXGame.SyncLogic)
             {
-                if (ent == null || ent.Disposed) continue;
-                if (GameBridge.IsBuildingBeingBuilt(ent)) continue;
-                if (!GameBridge.IsPlayerEntity(ent)) continue;
+                foreach (var ent in game.EntitiesOfType(reqType))
+                {
+                    if (ent == null || ent.Disposed) continue;
+                    if (GameBridge.IsBuildingBeingBuilt(ent)) continue;
+                    if (!GameBridge.IsPlayerEntity(ent)) continue;
 
-                byte owner = FactionOwnershipTracker.GetOwner(ent.ID);
-                if (owner >= 1 && owner <= 3 && FactionOwnershipTracker.IsExiled(owner))
-                    continue;
-                return true;
+                    byte owner = FactionOwnershipTracker.GetOwner(ent.ID);
+                    if (owner >= 1 && owner <= 3 && FactionOwnershipTracker.IsExiled(owner))
+                        continue;
+                    return true;
+                }
             }
             return false;
         }

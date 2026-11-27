@@ -37,6 +37,7 @@ namespace TABCoopMod.Networking
         SnapshotLoadedAck = 0x12,
         SessionStart = 0x13,
         JoinRejected = 0x14,
+        SnapshotChunkRequest = 0x15,
         ClientInputReport = 0x20,
         TurnInputBroadcast = 0x21,
         HostPauseKeepalive = 0x22,

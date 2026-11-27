@@ -3869,6 +3869,7 @@ namespace TABCoopMod.Core
 
                 PointF origPos = templateEntity.Position;
                 SizeF origSize = templateEntity.Size;
+                Point origCell = templateEntity.Cell;
                 try
                 {
                     templateEntity.CellArea = rect;
@@ -3886,6 +3887,8 @@ namespace TABCoopMod.Core
                 {
                     templateEntity.Size = origSize;
                     templateEntity.Position = origPos;
+                    templateEntity.Cell = origCell;
+                    _methodEntityUpdateCellPosition?.Invoke(templateEntity, null);
                 }
             }
             catch (Exception ex)
@@ -3903,6 +3906,9 @@ namespace TABCoopMod.Core
         public static object SuspendLocalBuildCursorEnergyPreview()
         {
             if (_fieldLevelSysBuildAreaCursor == null || _fieldCursorLastEnergyCell == null || _methodCursorClearEnergyPreview == null)
+                return null;
+            int mainId = Determinism.LockstepClock.MainThreadId;
+            if (mainId != 0 && System.Threading.Thread.CurrentThread.ManagedThreadId != mainId)
                 return null;
             try
             {
@@ -3924,6 +3930,9 @@ namespace TABCoopMod.Core
         public static void RestoreLocalBuildCursorEnergyPreview(object cursor)
         {
             if (cursor == null || _methodCursorUpdateVisual == null) return;
+            int mainId = Determinism.LockstepClock.MainThreadId;
+            if (mainId != 0 && System.Threading.Thread.CurrentThread.ManagedThreadId != mainId)
+                return;
             try
             {
                 if (cursor is DXObject obj && obj.Scene != null)
