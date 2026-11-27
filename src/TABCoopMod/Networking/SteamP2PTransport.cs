@@ -753,6 +753,9 @@ namespace TABCoopMod.Networking
                         w.Write(p.IsReady);
                     }
                     w.Write(ModInfo.Version);
+                    w.Write((byte)_peers.Count);
+                    foreach (var p in _peers)
+                        w.Write(p.EffectiveFactionSlot);
                 });
 
                 if (isDuplicate)
@@ -775,15 +778,19 @@ namespace TABCoopMod.Networking
                 byte count = reader.ReadByte();
                 _peers.Clear();
                 _playerToSteamId.Clear();
+                var acceptedPeers = new List<PeerInfo>(count);
                 for (int i = 0; i < count; i++)
                 {
+                    byte pid = reader.ReadByte();
                     var p = new PeerInfo
                     {
-                        PlayerId = reader.ReadByte(),
+                        PlayerId = pid,
+                        FactionSlot = pid,
                         PlayerName = reader.ReadString(),
                         SteamId64 = reader.ReadUInt64(),
                         IsReady = reader.ReadBoolean()
                     };
+                    acceptedPeers.Add(p);
                     _peers.RemoveAll(existing => existing.PlayerId == p.PlayerId || (p.SteamId64 != 0 && existing.SteamId64 == p.SteamId64 && existing.PlayerId != 1));
                     _peers.Add(p);
                     if (p.SteamId64 != 0)
@@ -794,6 +801,16 @@ namespace TABCoopMod.Networking
                     : (_currentLobbyId.IsValid() ? SteamMatchmaking.GetLobbyData(_currentLobbyId, "tab_coop_ver") : string.Empty);
                 if (string.IsNullOrEmpty(hostVer))
                     hostVer = "<=0.1.1 (未知旧版本)";
+                if (reader.BaseStream.Position < reader.BaseStream.Length)
+                {
+                    byte slotCount = reader.ReadByte();
+                    for (int i = 0; i < slotCount && reader.BaseStream.Position < reader.BaseStream.Length; i++)
+                    {
+                        byte slot = reader.ReadByte();
+                        if (i < acceptedPeers.Count && slot >= 1 && slot <= 3)
+                            acceptedPeers[i].FactionSlot = slot;
+                    }
+                }
 
                 _direct?.SetLocalPlayerId(LocalPlayerId);
                 _direct?.RefreshExternalCandidatesAsync();
@@ -839,12 +856,26 @@ namespace TABCoopMod.Networking
                 _peers.Add(new PeerInfo
                 {
                     PlayerId = p.PlayerId,
+                    FactionSlot = p.EffectiveFactionSlot,
                     PlayerName = p.PlayerName ?? string.Empty,
                     SteamId64 = p.SteamId64,
                     IsReady = p.IsReady
                 });
                 if (p.SteamId64 != 0)
                     _playerToSteamId[p.PlayerId] = new CSteamID(p.SteamId64);
+            }
+        }
+
+        public void SetLobbyJoinable(bool joinable)
+        {
+            if (_disposed || !IsActive || !IsHost || !_currentLobbyId.IsValid()) return;
+            try
+            {
+                SteamMatchmaking.SetLobbyJoinable(_currentLobbyId, joinable);
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[SteamP2PTransport] SetLobbyJoinable({joinable}) failed: {ex.Message}");
             }
         }
 

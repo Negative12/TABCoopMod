@@ -65,6 +65,21 @@ namespace TABCoopMod.Sync
         public static bool IsMultiFactionActive => IsSessionActive && GameMode == CoopGameMode.MultiFaction;
         public static string HostActionHint { get; private set; } = string.Empty;
         public static bool ShouldOpenLobbyOnMainMenu { get; set; }
+        public static string HostOriginalSaveName { get; private set; } = string.Empty;
+
+        public sealed class DisconnectedPeerReservation
+        {
+            public ulong SteamId64;
+            public string PlayerName;
+            public byte FactionSlot;
+            public double DisconnectedAtTicks;
+        }
+
+        public static readonly List<DisconnectedPeerReservation> DisconnectedMatchPeers = new List<DisconnectedPeerReservation>();
+        public static bool HasDisconnectAlert { get; private set; }
+        public static byte DisconnectAlertSlot { get; private set; }
+        public static string DisconnectAlertPlayerName { get; private set; } = string.Empty;
+        public static bool DisconnectAlertDismissed { get; set; }
 
         // Local loopback network fluctuation simulation (only applies to LocalTcpLoopbackTransport).
         public static bool LocalChaosEnabled { get; private set; }
@@ -339,6 +354,7 @@ namespace TABCoopMod.Sync
         private static bool _lateJoinInProgress;
         private static byte _lateJoinPeerId;
         private static bool _lateJoinForcedPause;
+        private static bool _lateJoinWasAlreadyPaused;
         private static string _pendingJoinRejectReason;
         public static bool IsHostSnapshotReloadPending => _hostSnapshotReloadPending;
 
@@ -587,6 +603,7 @@ namespace TABCoopMod.Sync
 
         private const byte SessionStartProtoFlag_CompactBinary = 1 << 0;
         private const byte SessionStartProtoFlag_AdaptivePhysIter = 1 << 1;
+        private const byte SessionStartProtoFlag_StartPaused = 1 << 2;
         private static bool _useCompactWireProtocol;
         public static bool SyncedAdaptivePhysicsIterations { get; private set; }
         private static PointF _lastSentCursorWorldPos = new PointF(-9999f, -9999f);
@@ -1043,7 +1060,213 @@ namespace TABCoopMod.Sync
                 w.Write((byte)GameMode);
                 w.Write((byte)DefeatRule);
                 w.Write((byte)SpawnMode);
+                w.Write((byte)_lobbyRoster.Count);
+                foreach (var p in _lobbyRoster)
+                    w.Write(p.EffectiveFactionSlot);
             });
+            SyncLocalFactionSlotFromRoster();
+        }
+
+        public static byte GetFactionSlotForTransportId(byte transportPlayerId)
+        {
+            if (transportPlayerId == 0) return 1;
+            for (int i = 0; i < _lobbyRoster.Count; i++)
+            {
+                var p = _lobbyRoster[i];
+                if (p != null && p.PlayerId == transportPlayerId)
+                    return p.EffectiveFactionSlot;
+            }
+            var peers = Transport?.ConnectedPeers;
+            if (peers != null)
+            {
+                for (int i = 0; i < peers.Count; i++)
+                {
+                    var p = peers[i];
+                    if (p != null && p.PlayerId == transportPlayerId)
+                        return p.EffectiveFactionSlot;
+                }
+            }
+            return transportPlayerId;
+        }
+
+        public static byte[] GetOccupiedFactionSlotsSorted()
+        {
+            var set = new SortedSet<byte>();
+            if (IsSessionActive)
+            {
+                foreach (var p in GetEffectivePeers())
+                {
+                    if (p == null) continue;
+                    byte s = p.EffectiveFactionSlot;
+                    if (s >= 1 && s <= 3) set.Add(s);
+                }
+            }
+            if (set.Count == 0)
+            {
+                byte fallback = (byte)(CommandInterceptor.LocalPlayerId >= 1 && CommandInterceptor.LocalPlayerId <= 3 ? CommandInterceptor.LocalPlayerId : 1);
+                set.Add(fallback);
+            }
+            var arr = new byte[set.Count];
+            set.CopyTo(arr);
+            return arr;
+        }
+
+        private static void SyncLocalFactionSlotFromRoster()
+        {
+            if (Transport == null || Transport.LocalPlayerId == 0)
+            {
+                CommandInterceptor.LocalPlayerId = 1;
+                return;
+            }
+            byte slot = GetFactionSlotForTransportId(Transport.LocalPlayerId);
+            if (slot < 1 || slot > 3) slot = Transport.LocalPlayerId;
+            if (CommandInterceptor.LocalPlayerId != slot)
+            {
+                CommandInterceptor.LocalPlayerId = slot;
+                ModLogger.Info($"[CoopSessionManager] Local FactionSlot bound to P{slot} (TransportPlayerId={Transport.LocalPlayerId}).");
+            }
+        }
+
+        private static byte AllocateFreeFactionSlotForJoiningPeer(PeerInfo peer, byte? preferredSlot = null)
+        {
+            var used = new HashSet<byte>();
+            for (int i = 0; i < _lobbyRoster.Count; i++)
+            {
+                var p = _lobbyRoster[i];
+                if (p == null || (peer != null && p.PlayerId == peer.PlayerId)) continue;
+                used.Add(p.EffectiveFactionSlot);
+            }
+
+            if (preferredSlot.HasValue && preferredSlot.Value >= 1 && preferredSlot.Value <= 3 && !used.Contains(preferredSlot.Value))
+                return preferredSlot.Value;
+            if (peer != null && peer.FactionSlot >= 1 && peer.FactionSlot <= 3 && !used.Contains(peer.FactionSlot))
+                return peer.FactionSlot;
+            if (peer != null && peer.PlayerId >= 1 && peer.PlayerId <= 3 && !used.Contains(peer.PlayerId))
+                return peer.PlayerId;
+
+            for (byte s = 1; s <= 3; s++)
+            {
+                if (!used.Contains(s)) return s;
+            }
+            return peer != null && peer.PlayerId >= 1 ? peer.PlayerId : (byte)1;
+        }
+
+        public static void RequestSeatSwap(byte targetSlot)
+        {
+            if (targetSlot < 1 || targetSlot > 3) return;
+            if (!IsSessionActive || Transport == null || IsInSyncedLevel || RoomPhase != LobbyRoomPhase.InLobby)
+                return;
+            if (Transport.LocalPlayerId == 0) return;
+
+            if (Transport.IsHost)
+            {
+                ApplyHostSeatSwap(Transport.LocalPlayerId, targetSlot);
+                return;
+            }
+
+            Transport.SendToPeer(1, SendChannel.ReliableCommand, PacketType.LobbySeatSwapRequest, w =>
+            {
+                w.Write(targetSlot);
+            });
+        }
+
+        private static void ApplyHostSeatSwap(byte requesterTransportId, byte targetSlot)
+        {
+            if (!IsSessionActive || Transport == null || !Transport.IsHost) return;
+            if (IsInSyncedLevel || RoomPhase != LobbyRoomPhase.InLobby || targetSlot < 1 || targetSlot > 3) return;
+
+            var requester = _lobbyRoster.Find(p => p.PlayerId == requesterTransportId);
+            if (requester == null) return;
+            byte oldSlot = requester.EffectiveFactionSlot;
+            if (oldSlot == targetSlot) return;
+
+            var occupant = _lobbyRoster.Find(p => p.PlayerId != requesterTransportId && p.EffectiveFactionSlot == targetSlot);
+            if (occupant != null)
+                occupant.FactionSlot = oldSlot;
+            requester.FactionSlot = targetSlot;
+
+            ModLogger.Info($"[CoopSessionManager] Lobby seat swap: Transport P{requesterTransportId} ({requester.PlayerName}) P{oldSlot} -> P{targetSlot}" +
+                (occupant != null ? $" (swapped with Transport P{occupant.PlayerId})" : " (empty slot)"));
+            BroadcastLobbyRoster();
+            LobbyStateChanged?.Invoke();
+        }
+
+        public static void DismissDisconnectAlert()
+        {
+            DisconnectAlertDismissed = true;
+        }
+
+        public static void ClearDisconnectAlertAndReservations()
+        {
+            DisconnectedMatchPeers.Clear();
+            HasDisconnectAlert = false;
+            DisconnectAlertSlot = 0;
+            DisconnectAlertPlayerName = string.Empty;
+            DisconnectAlertDismissed = false;
+            UI.DisconnectNoticeOverlay.Reset();
+        }
+
+        private static void EnsureDisconnectAlertUpdated(bool broadcastToClients = false)
+        {
+            if (DisconnectedMatchPeers.Count == 0)
+            {
+                bool wasActive = HasDisconnectAlert;
+                HasDisconnectAlert = false;
+                DisconnectAlertSlot = 0;
+                DisconnectAlertPlayerName = string.Empty;
+                DisconnectAlertDismissed = false;
+                if (wasActive && broadcastToClients)
+                    BroadcastDisconnectNotice(false, 0, string.Empty);
+                return;
+            }
+
+            var latest = DisconnectedMatchPeers[DisconnectedMatchPeers.Count - 1];
+            HasDisconnectAlert = true;
+            DisconnectAlertSlot = latest.FactionSlot;
+            DisconnectAlertPlayerName = latest.PlayerName ?? $"Player {latest.FactionSlot}";
+            DisconnectAlertDismissed = false;
+            if (broadcastToClients)
+                BroadcastDisconnectNotice(true, DisconnectAlertSlot, DisconnectAlertPlayerName);
+        }
+
+        private static void BroadcastDisconnectNotice(bool active, byte slot, string playerName)
+        {
+            if (Transport == null || !Transport.IsHost || !IsSessionActive) return;
+            Transport.Broadcast(SendChannel.ReliableCommand, PacketType.PeerDisconnectNotice, w =>
+            {
+                w.Write(active);
+                w.Write(slot);
+                w.Write(playerName ?? string.Empty);
+            });
+        }
+
+        public static void TogglePauseForDisconnectWait()
+        {
+            if (!IsSessionActive || !IsInSyncedLevel) return;
+            bool curPaused = LockstepClock.PausedBySession || (DXGame.Current != null && DXGame.Current.Paused);
+            bool nextPaused = !curPaused;
+
+            if (Transport == null || Transport.ConnectedPeers == null || Transport.ConnectedPeers.Count <= 1)
+            {
+                // Host is alone waiting for disconnect reconnect; toggle session pause immediately.
+                LockstepClock.SetSessionPause(nextPaused);
+                if (DXGame.Current != null)
+                    DXGame.Current.Paused = nextPaused;
+                GameBridge.ShowTopBanner(
+                    nextPaused ? "已暂停游戏，等待断线玩家通过 Steam 加入重连" : "已恢复游戏",
+                    nextPaused ? Color.Gold : Color.SpringGreen,
+                    3000);
+                return;
+            }
+
+            PauseSyncController.RequestPause(nextPaused);
+        }
+
+        public static bool HostSaveAndExitFromAlert(string overrideSaveName = null)
+        {
+            if (!IsSessionActive || Transport == null || !Transport.IsHost)
+                return false;
+            return GameBridge.SaveCurrentLevelAndExit(overrideSaveName);
         }
 
         public static void StartHostSession(bool useLoopback, int lanPort = 0)
@@ -1154,6 +1377,7 @@ namespace TABCoopMod.Sync
             UI.MultiFactionPanel.Reset();
             UI.ManualSyncButton.Reset();
             UI.PerfOverlayRenderer.Reset();
+            ClearDisconnectAlertAndReservations();
             _pendingOpenGameMenuAfterPause = false;
             _pendingOpenGameMenuRequestedAtTicks = -1.0;
             _allowDirectGameMenuOpenOnce = false;
@@ -1252,6 +1476,7 @@ namespace TABCoopMod.Sync
             UI.MultiFactionPanel.Reset();
             UI.ManualSyncButton.Reset();
             UI.PerfOverlayRenderer.Reset();
+            ClearDisconnectAlertAndReservations();
             _pendingOpenGameMenuAfterPause = false;
             _pendingOpenGameMenuRequestedAtTicks = -1.0;
             _allowDirectGameMenuOpenOnce = false;
@@ -1384,8 +1609,7 @@ namespace TABCoopMod.Sync
         {
             Transport.OnPeerConnected += peer =>
             {
-                CommandInterceptor.LocalPlayerId = Transport.LocalPlayerId;
-                ModLogger.Info($"[CoopSessionManager] Peer connected: {peer?.PlayerName} (PlayerId={peer?.PlayerId}, LocalId={Transport.LocalPlayerId})");
+                ModLogger.Info($"[CoopSessionManager] Peer connected: {peer?.PlayerName} (PlayerId={peer?.PlayerId}, Slot={peer?.EffectiveFactionSlot}, LocalId={Transport.LocalPlayerId})");
 
                 if (Transport.IsHost)
                 {
@@ -1409,9 +1633,11 @@ namespace TABCoopMod.Sync
                             return;
                         }
 
-                        UpsertHostLobbyPeer(peer, ready: true);
+                        UpsertHostLobbyPeer(peer, ready: true, forcedFactionSlot: peer.FactionSlot);
+                        RemoveDisconnectedReservationForPeer(peer);
+                        EnsureDisconnectAlertUpdated(broadcastToClients: true);
                         BroadcastLobbyRoster();
-                        GameBridge.ShowTopBanner($"P{peer.PlayerId} 正在加入，正在同步战局...", Color.Cyan, 4000);
+                        GameBridge.ShowTopBanner($"P{peer.EffectiveFactionSlot} ({peer.PlayerName}) 正在重连加入，正在同步战局...", Color.Cyan, 4000);
                         RequestSnapshotBroadcast();
                     }
                     else
@@ -1433,6 +1659,7 @@ namespace TABCoopMod.Sync
                             _lobbyRoster.Add(new PeerInfo
                             {
                                 PlayerId = p.PlayerId,
+                                FactionSlot = p.EffectiveFactionSlot,
                                 PlayerName = p.PlayerName,
                                 SteamId64 = p.SteamId64,
                                 IsReady = p.IsReady,
@@ -1440,13 +1667,19 @@ namespace TABCoopMod.Sync
                             });
                         }
                     }
+                    SyncLocalFactionSlotFromRoster();
                 }
                 LobbyStateChanged?.Invoke();
             };
 
             Transport.OnPeerDisconnected += playerId =>
             {
-                AllyStates.Remove(playerId);
+                var deadPeer = _lobbyRoster.Find(p => p.PlayerId == playerId);
+                byte deadSlot = deadPeer?.EffectiveFactionSlot ?? playerId;
+                string deadName = !string.IsNullOrEmpty(deadPeer?.PlayerName) ? deadPeer.PlayerName : $"Player {deadSlot}";
+                ulong deadSteamId = deadPeer?.SteamId64 ?? 0UL;
+
+                AllyStates.Remove(deadSlot);
                 _peerSmoothedRttMs.Remove(playerId);
                 _peerRttSampleTicks.Remove(playerId);
                 _syncedRoomPeerLinks.Remove(playerId);
@@ -1468,6 +1701,7 @@ namespace TABCoopMod.Sync
                             LockstepClock.SetSessionPause(false);
                     }
                     _lateJoinForcedPause = false;
+                    _lateJoinWasAlreadyPaused = false;
                 }
                 _lobbyRoster.RemoveAll(p => p.PlayerId == playerId);
                 if (Transport != null && Transport.IsHost)
@@ -1475,8 +1709,33 @@ namespace TABCoopMod.Sync
 
                 if (Transport != null && Transport.IsHost)
                 {
+                    bool inActiveMatch = playerId != 1
+                        && (IsInSyncedLevel || (GameBridge.CurrentLevelState != null && !GameBridge.IsLevelEnded()));
+                    if (inActiveMatch)
+                    {
+                        DisconnectedMatchPeers.RemoveAll(r =>
+                            (deadSteamId != 0UL && r.SteamId64 == deadSteamId)
+                            || r.FactionSlot == deadSlot);
+                        DisconnectedMatchPeers.Add(new DisconnectedPeerReservation
+                        {
+                            SteamId64 = deadSteamId,
+                            PlayerName = deadName,
+                            FactionSlot = deadSlot,
+                            DisconnectedAtTicks = DXHelper_Environment.Ticks
+                        });
+                        if (UnwrapTransport() is SteamP2PTransport steamTrans)
+                            steamTrans.SetLobbyJoinable(true);
+
+                        EnsureDisconnectAlertUpdated(broadcastToClients: true);
+                        ModLogger.Warn($"[Disconnect] Mid-game peer {deadName} (TransportP{playerId}, FactionSlot P{deadSlot}) disconnected. Ownership preserved; slot P{deadSlot} reserved for Steam rejoin.");
+                        GameBridge.ShowTopBanner($"玩家 {deadName} (P{deadSlot}) 已断线（基地已保留）！可暂停等待 Steam 加入重连或保存退出", Color.OrangeRed, 6000);
+                    }
+                    else
+                    {
+                        GameBridge.ShowTopBanner($"Player {deadSlot} Disconnected", Color.OrangeRed, 3000);
+                    }
+
                     BroadcastLobbyRoster();
-                    GameBridge.ShowTopBanner($"Player {playerId} Disconnected", Color.OrangeRed, 3000);
                     LobbyStateChanged?.Invoke();
                     if (_awaitingClientSnapshotAck && AreAllConnectedClientsSnapshotAcked())
                     {
@@ -1486,10 +1745,10 @@ namespace TABCoopMod.Sync
                 }
                 else if (Transport != null && !Transport.IsHost)
                 {
-                    _networkGate.MarkReady(int.MaxValue);
-                    IsInSyncedLevel = false;
                     if (playerId == 1)
                     {
+                        _networkGate.MarkReady(int.MaxValue);
+                        IsInSyncedLevel = false;
                         bool hasRejectReason = !string.IsNullOrEmpty(_pendingJoinRejectReason);
                         if (!hasRejectReason)
                             GameBridge.ShowTopBanner("Host disconnected / Room disbanded", Color.OrangeRed, 3500);
@@ -1497,7 +1756,18 @@ namespace TABCoopMod.Sync
                     }
                     else
                     {
-                        GameBridge.ShowTopBanner($"Player {playerId} Disconnected", Color.OrangeRed, 3000);
+                        if (IsInSyncedLevel || (GameBridge.CurrentLevelState != null && !GameBridge.IsLevelEnded()))
+                        {
+                            HasDisconnectAlert = true;
+                            DisconnectAlertSlot = deadSlot;
+                            DisconnectAlertPlayerName = deadName;
+                            DisconnectAlertDismissed = false;
+                            GameBridge.ShowTopBanner($"玩家 {deadName} (P{deadSlot}) 已断线（基地保留，等待房主处理）", Color.OrangeRed, 5000);
+                        }
+                        else
+                        {
+                            GameBridge.ShowTopBanner($"Player {deadSlot} Disconnected", Color.OrangeRed, 3000);
+                        }
                         LobbyStateChanged?.Invoke();
                     }
                 }
@@ -1551,21 +1821,69 @@ namespace TABCoopMod.Sync
         /// Host accepts a peer that connected while a level is running. The existing
         /// full-resync path pauses everyone, lets the new client load, then resumes.
         /// </summary>
-        private static void UpsertHostLobbyPeer(PeerInfo peer, bool ready)
+        private static void RemoveDisconnectedReservationForPeer(PeerInfo peer)
+        {
+            if (peer == null || DisconnectedMatchPeers.Count == 0) return;
+            DisconnectedMatchPeers.RemoveAll(r =>
+                (peer.SteamId64 != 0 && r.SteamId64 == peer.SteamId64)
+                || r.FactionSlot == peer.EffectiveFactionSlot);
+        }
+
+        private static byte ResolveReconnectingFactionSlot(PeerInfo peer)
+        {
+            var occupied = new HashSet<byte>();
+            foreach (var p in _lobbyRoster)
+            {
+                if (p != null && p.PlayerId != 0 && p.PlayerId != peer.PlayerId)
+                    occupied.Add(p.EffectiveFactionSlot);
+            }
+
+            if (peer.SteamId64 != 0)
+            {
+                var exactSteam = DisconnectedMatchPeers.Find(r => r.SteamId64 == peer.SteamId64 && !occupied.Contains(r.FactionSlot));
+                if (exactSteam != null) return exactSteam.FactionSlot;
+            }
+
+            if (DisconnectedMatchPeers.Count > 0)
+            {
+                string cleanName = (peer.PlayerName ?? string.Empty).Split('#')[0];
+                var nameMatch = DisconnectedMatchPeers.Find(r =>
+                    !occupied.Contains(r.FactionSlot)
+                    && !string.IsNullOrEmpty(r.PlayerName)
+                    && string.Equals(r.PlayerName.Split('#')[0], cleanName, StringComparison.OrdinalIgnoreCase));
+                if (nameMatch != null) return nameMatch.FactionSlot;
+
+                var anyRes = DisconnectedMatchPeers.Find(r => !occupied.Contains(r.FactionSlot));
+                if (anyRes != null) return anyRes.FactionSlot;
+            }
+
+            if (GameMode == CoopGameMode.MultiFaction)
+                return FactionOwnershipTracker.PickReconnectFactionSlot(peer.SteamId64, occupied);
+
+            for (byte s = 2; s <= 3; s++)
+                if (!occupied.Contains(s)) return s;
+            return !occupied.Contains(1) ? (byte)1 : (byte)0;
+        }
+
+        private static void UpsertHostLobbyPeer(PeerInfo peer, bool ready, byte? forcedFactionSlot = null)
         {
             if (peer == null) return;
             _lobbyRoster.RemoveAll(p =>
                 p.PlayerId == peer.PlayerId
                 || (peer.SteamId64 != 0 && p.SteamId64 == peer.SteamId64 && p.PlayerId != 1));
+            byte slot = AllocateFreeFactionSlotForJoiningPeer(peer, forcedFactionSlot);
+            peer.FactionSlot = slot;
             _lobbyRoster.Add(new PeerInfo
             {
                 PlayerId = peer.PlayerId,
+                FactionSlot = slot,
                 PlayerName = peer.PlayerName,
                 SteamId64 = peer.SteamId64,
                 IsReady = peer.PlayerId == 1 || ready,
                 IsLocalOrPrivateLan = peer.IsLocalOrPrivateLan
             });
             _lobbyRoster.Sort((a, b) => a.PlayerId.CompareTo(b.PlayerId));
+            SyncLocalFactionSlotFromRoster();
         }
 
         private static bool TryAcceptLateJoin(PeerInfo peer)
@@ -1580,9 +1898,8 @@ namespace TABCoopMod.Sync
             }
 
             string reason = null;
-            if (GameMode != CoopGameMode.Archon)
-                reason = "独立基地模式暂不支持中途加入";
-            else if (LockstepClock.LoadingLevel || GameBridge.IsGameLoading())
+            byte resolvedSlot = 0;
+            if (LockstepClock.LoadingLevel || GameBridge.IsGameLoading())
                 reason = "房主正在加载，暂不能加入";
             else if (GameBridge.IsLevelEnded())
                 reason = "本局已结束";
@@ -1598,7 +1915,17 @@ namespace TABCoopMod.Sync
                         otherClientCount++;
                 }
                 if (otherClientCount >= 2)
+                {
                     reason = "房间已满（最多 3 人）";
+                }
+                else
+                {
+                    resolvedSlot = ResolveReconnectingFactionSlot(peer);
+                    if (resolvedSlot == 0)
+                        reason = GameMode == CoopGameMode.MultiFaction
+                            ? "当前独立基地对局无可用空闲阵营槽位"
+                            : "当前对局无可用空闲位置";
+                }
             }
 
             if (!string.IsNullOrEmpty(reason))
@@ -1607,11 +1934,13 @@ namespace TABCoopMod.Sync
                 return false;
             }
 
+            peer.FactionSlot = resolvedSlot;
             _lateJoinInProgress = true;
             _lateJoinPeerId = peer.PlayerId;
-            _lateJoinForcedPause = !LockstepClock.PausedBySession;
+            _lateJoinWasAlreadyPaused = LockstepClock.PausedBySession;
+            _lateJoinForcedPause = !_lateJoinWasAlreadyPaused;
 
-            ModLogger.Info($"[LateJoin] Accepted P{peer.PlayerId}; pausing for full snapshot resync.");
+            ModLogger.Info($"[LateJoin] Accepted Transport P{peer.PlayerId} into FactionSlot P{resolvedSlot} (wasAlreadyPaused={_lateJoinWasAlreadyPaused}); pausing for full snapshot resync.");
             LockstepClock.SetSessionPause(true);
             return true;
         }
@@ -1805,11 +2134,18 @@ namespace TABCoopMod.Sync
                 {
                     if (!FactionOwnershipTracker.IsInitialized)
                     {
-                        int pCount = Math.Max(1, GetEffectivePeers().Count);
-                        FactionOwnershipTracker.EnsureExtraCommandCentersInLiveLevel(pCount);
-                        FactionOwnershipTracker.AssignInitialOwnershipFromLevel(pCount);
+                        byte[] slots = GetOccupiedFactionSlotsSorted();
+                        FactionOwnershipTracker.EnsureExtraCommandCentersInLiveLevel(slots.Length, slots);
+                        FactionOwnershipTracker.AssignInitialOwnershipFromLevel(slots.Length, slots);
                     }
                     FactionOwnershipTracker.SaveToLevelScriptVariables();
+                }
+
+                string curSaveName = GameBridge.CurrentGameStateName;
+                if (!string.IsNullOrWhiteSpace(curSaveName)
+                    && !string.Equals(curSaveName, "coop_host_snapshot", StringComparison.OrdinalIgnoreCase))
+                {
+                    HostOriginalSaveName = curSaveName;
                 }
 
                 ModLogger.Info($"[CoopSessionManager] Exporting Host snapshot to {savPath}...");
@@ -1976,16 +2312,20 @@ namespace TABCoopMod.Sync
 
             bool lateJoinCompleted = _lateJoinInProgress;
             byte lateJoinPeerId = _lateJoinPeerId;
+            bool startPaused = lateJoinCompleted && _lateJoinWasAlreadyPaused;
             _lateJoinInProgress = false;
             _lateJoinPeerId = 0;
             _lateJoinForcedPause = false;
+            _lateJoinWasAlreadyPaused = false;
 
-            EnterSyncedLevel();
+            EnterSyncedLevel(startPaused);
 
             if (lateJoinCompleted)
             {
-                ModLogger.Info($"[LateJoin] P{lateJoinPeerId} completed snapshot load; resuming session.");
-                GameBridge.ShowTopBanner($"P{lateJoinPeerId} 已加入战局", Color.SpringGreen, 3000);
+                EnsureDisconnectAlertUpdated(broadcastToClients: true);
+                byte joinedSlot = GetFactionSlotForTransportId(lateJoinPeerId);
+                ModLogger.Info($"[LateJoin] P{joinedSlot} (Transport P{lateJoinPeerId}) completed snapshot load; paused={startPaused}.");
+                GameBridge.ShowTopBanner($"P{joinedSlot} 已重连回到战局" + (startPaused ? "（保持暂停中）" : ""), Color.SpringGreen, 3000);
             }
 
             int startTick = DXGame.Current?.IAIterationInt ?? 0;
@@ -1993,7 +2333,8 @@ namespace TABCoopMod.Sync
             _useCompactWireProtocol = true;
             SyncedAdaptivePhysicsIterations = TestHarnessConfig.AdaptivePhysicsIterations;
             byte protoFlags = (byte)(SessionStartProtoFlag_CompactBinary
-                | (SyncedAdaptivePhysicsIterations ? SessionStartProtoFlag_AdaptivePhysIter : 0));
+                | (SyncedAdaptivePhysicsIterations ? SessionStartProtoFlag_AdaptivePhysIter : 0)
+                | (startPaused ? SessionStartProtoFlag_StartPaused : 0));
             Transport.Broadcast(SendChannel.ReliableCommand, PacketType.SessionStart, w =>
             {
                 w.Write(startTick);
@@ -2010,8 +2351,9 @@ namespace TABCoopMod.Sync
             ResetSyncTrackingState();
             _useCompactWireProtocol = (protoFlags & SessionStartProtoFlag_CompactBinary) != 0;
             SyncedAdaptivePhysicsIterations = (protoFlags & SessionStartProtoFlag_AdaptivePhysIter) != 0;
+            bool startPaused = (protoFlags & SessionStartProtoFlag_StartPaused) != 0;
             InputDelayTicks = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, (int)hostDelay));
-            EnterSyncedLevel();
+            EnterSyncedLevel(startPaused);
             ModLogger.InfoImmediate($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, inputDelay={InputDelayTicks}, compact={_useCompactWireProtocol}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
         }
 
@@ -2098,11 +2440,12 @@ namespace TABCoopMod.Sync
         /// Call once both peers are inside the same synced level. Installs the turn-input gate and
         /// lets the simulation run the first InputDelayTicks immediately while broadcasts catch up.
         /// </summary>
-        public static void EnterSyncedLevel()
+        public static void EnterSyncedLevel(bool startPaused = false)
         {
             if (!IsSessionActive) return;
 
             UI.CoopLobbyWindow.ClearStaleWindowOnLevelEnter();
+            SyncLocalFactionSlotFromRoster();
 
             _pendingTurnCommands.Clear();
             _hostSymmetricQueue.Clear();
@@ -2135,11 +2478,11 @@ namespace TABCoopMod.Sync
 
             // The save loader leaves DXGame.Paused/GameSpeed at 0; clear it so engine animations and
             // the fixed-step clock start running. Session pauses are tracked separately.
-            LockstepClock.SetSessionPause(false);
+            LockstepClock.SetSessionPause(startPaused);
             LockstepClock.ResetHostTickPacing();
             if (DXGame.Current != null)
             {
-                if (DXGame.Current.Paused) DXGame.Current.Paused = false;
+                DXGame.Current.Paused = startPaused;
                 if (DXGame.Current.GameSpeed <= 0.0) DXGame.Current.GameSpeed = 1.0;
                 if (!DXGame.Current.InputEnabled)
                 {
@@ -2204,7 +2547,7 @@ namespace TABCoopMod.Sync
 
                 foreach (var cmd in due)
                 {
-                    if (cmd != null && cmd.TraceId != 0 && Transport != null && cmd.PlayerId == Transport.LocalPlayerId)
+                    if (cmd != null && cmd.TraceId != 0 && Transport != null && cmd.PlayerId == CommandInterceptor.LocalPlayerId)
                     {
                         long sentTs = 0;
                         bool found = false;
@@ -2312,8 +2655,9 @@ namespace TABCoopMod.Sync
             var game = DXGame.Current;
             if (game == null) return null;
 
-            byte localPid = Transport.LocalPlayerId;
-            if (localPid <= 1) return null;
+            if (Transport == null || Transport.IsHost) return null;
+            byte localPid = CommandInterceptor.LocalPlayerId;
+            if (localPid < 1 || localPid > 3) return null;
 
             Dictionary<ulong, UnitOwnershipEntry> ownedSnapshot = null;
             List<ulong> expired = null;
@@ -2517,7 +2861,18 @@ namespace TABCoopMod.Sync
                 if (DXGame.Current != null) DXGame.Current.InputEnabled = false;
                 if (_hostSnapshotReloadPending && _hostWaitingOwnReload)
                 {
+                    SyncLocalFactionSlotFromRoster();
                     FactionOwnershipTracker.TryLoadFromLevelScriptVariables();
+                    if (FactionOwnershipTracker.IsInitialized)
+                    {
+                        FactionOwnershipTracker.EnsureUnownedPlayerEntitiesAssigned();
+                        FactionContextManager.EnsureInitializedAfterRestore();
+                    }
+                    if (!string.IsNullOrWhiteSpace(HostOriginalSaveName)
+                        && string.Equals(GameBridge.CurrentGameStateName, "coop_host_snapshot", StringComparison.OrdinalIgnoreCase))
+                    {
+                        GameBridge.CurrentGameStateName = HostOriginalSaveName;
+                    }
                     RestoreLocalControlGroupsAfterMidGameReload();
                     _hostWaitingOwnReload = false;
                     ModLogger.InfoImmediate($"[CoopSessionManager] Host symmetric snapshot reload finished at tick={DXGame.Current?.IAIterationInt ?? 0} (clientAck={_clientSnapshotAckReceived}).");
@@ -2539,6 +2894,27 @@ namespace TABCoopMod.Sync
                 }
                 if (!IsInSyncedLevel && !_hostSnapshotReloadPending)
                 {
+                    SyncLocalFactionSlotFromRoster();
+                    string loadedSaveName = GameBridge.CurrentGameStateName;
+                    if (!string.IsNullOrWhiteSpace(loadedSaveName)
+                        && !string.Equals(loadedSaveName, "coop_host_snapshot", StringComparison.OrdinalIgnoreCase))
+                    {
+                        HostOriginalSaveName = loadedSaveName;
+                    }
+
+                    // Reset any stale static Multi-Faction state before probing the newly loaded/generated level.
+                    FactionOwnershipTracker.Reset();
+                    FactionContextManager.Reset();
+                    WonderCrowdfundManager.Reset();
+
+                    bool restoredMultiFaction = FactionOwnershipTracker.TryLoadFromLevelScriptVariables();
+                    if (restoredMultiFaction)
+                    {
+                        FactionOwnershipTracker.EnsureUnownedPlayerEntitiesAssigned();
+                        FactionContextManager.EnsureInitializedAfterRestore();
+                        BroadcastLobbyRoster();
+                    }
+
                     SetHostRoomPhase(LobbyRoomPhase.HostLoadingLevel, "正在同步关卡...");
                     RequestSnapshotBroadcast();
                 }
@@ -2548,7 +2924,13 @@ namespace TABCoopMod.Sync
             if (!_awaitingSnapshotLoad) return;
 
             _awaitingSnapshotLoad = false;
+            SyncLocalFactionSlotFromRoster();
             FactionOwnershipTracker.TryLoadFromLevelScriptVariables();
+            if (FactionOwnershipTracker.IsInitialized)
+            {
+                FactionOwnershipTracker.EnsureUnownedPlayerEntitiesAssigned();
+                FactionContextManager.EnsureInitializedAfterRestore();
+            }
             RestoreLocalControlGroupsAfterMidGameReload();
             IsInSyncedLevel = false;
             LockstepClock.SetSessionPause(true);
@@ -2661,6 +3043,7 @@ namespace TABCoopMod.Sync
             CoopLobbyWindow.Tick();
             UI.MultiFactionPanel.Tick();
             UI.ManualSyncButton.Tick();
+            UI.DisconnectNoticeOverlay.Tick();
             UI.AllyOverlayRenderer.UpdateUnitFactionRings();
             UI.PerfOverlayRenderer.Tick();
 
@@ -2878,7 +3261,7 @@ namespace TABCoopMod.Sync
                     {
                         Transport.Broadcast(SendChannel.UnreliableSequenced, PacketType.AllyCursorAndCamera, w =>
                         {
-                            w.Write((byte)(Transport.LocalPlayerId | 0x80));
+                            w.Write((byte)(CommandInterceptor.LocalPlayerId | 0x80));
                             w.Write(QuantizeCursorCoord(mouseWorldPos.X));
                             w.Write(QuantizeCursorCoord(mouseWorldPos.Y));
                             w.Write(QuantizeCursorCoord(camArea.X));
@@ -2892,7 +3275,7 @@ namespace TABCoopMod.Sync
                     {
                         Transport.Broadcast(SendChannel.UnreliableSequenced, PacketType.AllyCursorAndCamera, w =>
                         {
-                            w.Write(Transport.LocalPlayerId);
+                            w.Write(CommandInterceptor.LocalPlayerId);
                             w.Write(mouseWorldPos.X);
                             w.Write(mouseWorldPos.Y);
                             w.Write(camArea.X);
@@ -3692,7 +4075,7 @@ namespace TABCoopMod.Sync
         /// </summary>
         public static void SendTacticalPing(Point cell, string label = null)
         {
-            byte pid = Transport != null ? Transport.LocalPlayerId : CommandInterceptor.LocalPlayerId;
+            byte pid = CommandInterceptor.LocalPlayerId;
             string effectiveLabel = string.IsNullOrEmpty(label) ? $"Player {pid}" : label;
 
             AllyOverlayRenderer.TriggerMinimapAndGroundPing(pid, cell, effectiveLabel);
@@ -3721,9 +4104,11 @@ namespace TABCoopMod.Sync
                     _lobbyRoster.Clear();
                     for (int i = 0; i < count; i++)
                     {
+                        byte pid = r.ReadByte();
                         _lobbyRoster.Add(new PeerInfo
                         {
-                            PlayerId = r.ReadByte(),
+                            PlayerId = pid,
+                            FactionSlot = pid,
                             PlayerName = r.ReadString(),
                             SteamId64 = r.ReadUInt64(),
                             IsReady = r.ReadBoolean()
@@ -3766,8 +4151,44 @@ namespace TABCoopMod.Sync
                     {
                         SpawnMode = (MultiFactionSpawnMode)r.ReadByte();
                     }
+                    if (r.BaseStream.Position < r.BaseStream.Length)
+                    {
+                        byte slotCount = r.ReadByte();
+                        for (int i = 0; i < slotCount && r.BaseStream.Position < r.BaseStream.Length; i++)
+                        {
+                            byte slot = r.ReadByte();
+                            if (i < _lobbyRoster.Count && slot >= 1 && slot <= 3)
+                                _lobbyRoster[i].FactionSlot = slot;
+                        }
+                    }
                     Transport.SyncPeers(_lobbyRoster);
+                    SyncLocalFactionSlotFromRoster();
                     LobbyStateChanged?.Invoke();
+                    break;
+                }
+
+                case PacketType.LobbySeatSwapRequest:
+                {
+                    if (!Transport.IsHost) break;
+                    byte targetSlot = r.ReadByte();
+                    ApplyHostSeatSwap(senderId, targetSlot);
+                    break;
+                }
+
+                case PacketType.PeerDisconnectNotice:
+                {
+                    if (Transport.IsHost) break;
+                    bool active = r.ReadBoolean();
+                    byte dSlot = r.ReadByte();
+                    string dName = r.ReadString();
+                    HasDisconnectAlert = active;
+                    DisconnectAlertSlot = dSlot;
+                    DisconnectAlertPlayerName = dName ?? string.Empty;
+                    DisconnectAlertDismissed = false;
+                    if (active)
+                        GameBridge.ShowTopBanner($"玩家 {dName} (P{dSlot}) 已断线（基地保留），等待房主暂停重连或保存退出", Color.OrangeRed, 5000);
+                    else
+                        UI.DisconnectNoticeOverlay.Reset();
                     break;
                 }
 
@@ -3895,7 +4316,7 @@ namespace TABCoopMod.Sync
                         for (int i = 0; i < count; i++)
                         {
                             var cmd = NetCommand.ReadFrom(r);
-                            cmd.PlayerId = senderId;
+                            cmd.PlayerId = GetFactionSlotForTransportId(senderId);
                             int safeTick = Math.Max(cmd.TargetSimTick, minSafeTick);
                             cmd.TargetSimTick = safeTick;
                             if (!_hostSymmetricQueue.TryGetValue(safeTick, out var bucket))
@@ -3920,7 +4341,7 @@ namespace TABCoopMod.Sync
                         for (int i = 0; i < count; i++)
                         {
                             var cmd = NetCommand.ReadFrom(r);
-                            cmd.PlayerId = senderId;
+                            cmd.PlayerId = GetFactionSlotForTransportId(senderId);
                             _hostTurnBuffer.Add(cmd);
                         }
                     }
@@ -4182,7 +4603,7 @@ namespace TABCoopMod.Sync
                     byte hdr = r.ReadByte();
                     bool isCompact = (hdr & 0x80) != 0;
                     byte pid = (byte)(hdr & 0x7F);
-                    if (pid == Transport.LocalPlayerId) break;
+                    if (pid == CommandInterceptor.LocalPlayerId) break;
 
                     PointF mouseWorld;
                     RectangleF camWorld;
@@ -4261,7 +4682,7 @@ namespace TABCoopMod.Sync
                     int cellX = r.ReadInt32();
                     int cellY = r.ReadInt32();
                     string label = r.ReadString();
-                    if (Transport != null && pid == Transport.LocalPlayerId) break;
+                    if (Transport != null && pid == CommandInterceptor.LocalPlayerId) break;
 
                     AllyOverlayRenderer.TriggerMinimapAndGroundPing(pid, new Point(cellX, cellY), label);
 
@@ -4399,10 +4820,11 @@ namespace TABCoopMod.Sync
             if (isMulti)
             {
                 FactionContextManager.FlushActiveOwnerFromLevelState();
-                int maxP = Math.Max(1, Math.Min(3, (int)FactionOwnershipTracker.ActivePlayerCount));
+                const int maxP = 3;
                 var list = new List<FactionEconEntry>(maxP);
                 for (byte p = 1; p <= maxP; p++)
                 {
+                    if (!FactionOwnershipTracker.IsSlotParticipating(p)) continue;
                     var ledger = FactionContextManager.GetLedger(p);
                     if (ledger == null) continue;
                     var le = ledger.Economy;
@@ -5264,7 +5686,7 @@ namespace TABCoopMod.Sync
                 int protectedSelfOwned = 0;
                 int targetAligned = 0;
                 HashSet<ulong> targetAlignedIds = null;
-                byte localPid = Transport.LocalPlayerId;
+                byte localPid = CommandInterceptor.LocalPlayerId;
                 if (item.ApplyPosCorrection && item.Deltas != null && game != null)
                 {
                     if (_lastEntityPosCorrectedTick.Count > 512)

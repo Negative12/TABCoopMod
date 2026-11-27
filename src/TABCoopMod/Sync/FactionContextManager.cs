@@ -122,7 +122,7 @@ namespace TABCoopMod.Sync
         public static bool AnyAlivePlayerHasMarket()
         {
             if (!IsInitialized) return (GameBridge.ReadRawLevelEconomyState(out var s) && s.NMarkets > 0);
-            int maxP = Math.Max(1, Math.Min(3, (int)FactionOwnershipTracker.ActivePlayerCount));
+            const int maxP = 3;
             for (byte p = 1; p <= maxP; p++)
             {
                 if (FactionOwnershipTracker.IsExiled(p)) continue;
@@ -159,8 +159,27 @@ namespace TABCoopMod.Sync
             var baseBonus = GameBridge.GetLevelBonusTemplatesDict() ?? new Dictionary<ulong, int>();
             var baseTechs = GameBridge.GetLevelOnlyOneCommandsDict() ?? new Dictionary<int, int>();
 
+            byte[] slots = FactionOwnershipTracker.GetParticipatingSlotsSorted();
+            byte firstSlot = (slots != null && slots.Length > 0) ? slots[0] : (byte)1;
+            var activeSlots = new HashSet<byte>();
+            if (slots != null)
+            {
+                for (int i = 0; i < slots.Length; i++)
+                    activeSlots.Add(slots[i]);
+            }
+            if (activeSlots.Count == 0)
+            {
+                for (byte p = 1; p <= count; p++)
+                    activeSlots.Add(p);
+            }
+
             for (byte p = 1; p <= 3; p++)
             {
+                if (!activeSlots.Contains(p))
+                {
+                    _factions[p] = null;
+                    continue;
+                }
                 _factions[p] = new FactionLedger
                 {
                     Economy = baseEcon,
@@ -168,8 +187,8 @@ namespace TABCoopMod.Sync
                     OwnEnergyNeeded = baseEcon.EnergyNeeded,
                     ShowFullMap = GameBridge.GetLevelStateShowFullMap(),
                     // Starter match starts with symmetric starting stock & unlocked commands;
-                    // mid-game saves with Mayor bonuses keep gifts only on P1 so bonuses aren't duplicated.
-                    BonusEntityTemplates = p == 1 ? new Dictionary<ulong, int>(baseBonus) : new Dictionary<ulong, int>(),
+                    // mid-game saves with Mayor bonuses keep gifts only on the first active slot so bonuses aren't duplicated.
+                    BonusEntityTemplates = p == firstSlot ? new Dictionary<ulong, int>(baseBonus) : new Dictionary<ulong, int>(),
                     OnlyOneExecutedCommands = new Dictionary<int, int>(baseTechs)
                 };
             }
@@ -381,7 +400,7 @@ namespace TABCoopMod.Sync
             }
             if (allUnits.Count > 1)
                 allUnits.Sort(GameBridge.CompareEntitiesDeterministically);
-            int maxP = Math.Max(1, Math.Min(3, (int)FactionOwnershipTracker.ActivePlayerCount));
+            const int maxP = 3;
             var enhancersByOwner = new List<DXEntity>[4];
             for (byte pid = 1; pid <= maxP; pid++)
                 enhancersByOwner[pid] = new List<DXEntity>(8);
@@ -721,11 +740,11 @@ namespace TABCoopMod.Sync
         {
             if (gold <= 0 || !IsInitialized) return;
             FlushActiveOwnerFromLevelState();
-            int maxP = Math.Max(1, Math.Min(3, (int)FactionOwnershipTracker.ActivePlayerCount));
+            const int maxP = 3;
             var alive = new List<byte>(3);
             for (byte p = 1; p <= maxP; p++)
             {
-                if (!FactionOwnershipTracker.IsExiled(p) && _factions[p] != null)
+                if (!FactionOwnershipTracker.IsExiled(p) && FactionOwnershipTracker.IsSlotParticipating(p) && _factions[p] != null)
                     alive.Add(p);
             }
             if (alive.Count == 0) return;
@@ -880,7 +899,7 @@ namespace TABCoopMod.Sync
         {
             if (commandId == 0 || !IsInitialized) return;
             FlushActiveOwnerFromLevelState();
-            int maxP = Math.Max(1, Math.Min(3, (int)FactionOwnershipTracker.ActivePlayerCount));
+            const int maxP = 3;
             for (byte p = 1; p <= maxP; p++)
             {
                 if (FactionOwnershipTracker.IsExiled(p)) continue;
@@ -1024,9 +1043,10 @@ namespace TABCoopMod.Sync
             ulong h = 0x517CC1B727220A95UL;
             h = Mix(h, ZeroTransferFeeActive ? 1UL : 0UL);
             h = Mix(h, SharedEnergyGridActive ? 1UL : 0UL);
-            int maxP = Math.Max(1, Math.Min(3, (int)FactionOwnershipTracker.ActivePlayerCount));
+            const int maxP = 3;
             for (byte p = 1; p <= maxP; p++)
             {
+                if (!FactionOwnershipTracker.IsSlotParticipating(p)) continue;
                 var l = _factions[p];
                 if (l == null) continue;
                 var e = l.Economy;

@@ -669,7 +669,7 @@ namespace TABCoopMod.Sync
             if (st == null || st.Phase != WonderPhase.Building) return;
 
             int pct = Math.Max(0, Math.Min(100, returnPctInt));
-            for (byte pid = 1; pid <= PlayerCount; pid++)
+            for (byte pid = 1; pid <= 3; pid++)
             {
                 var contrib = st.PlayerBuildContrib[pid];
                 var ledger = FactionContextManager.GetLedger(pid);

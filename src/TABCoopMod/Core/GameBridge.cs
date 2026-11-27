@@ -47,6 +47,7 @@ namespace TABCoopMod.Core
         private static MethodInfo _mLocalize;
         private static MethodInfo _mGetSavesDir;
         private static MethodInfo _methodWriteSaveFile;
+        private static MethodInfo _methodSaveGameFlow;
         private static MethodInfo _methodLoadGameAndEnter;
         private static MethodInfo _methodShowTopBanner;
         private static MethodInfo _methodShowGroundIndicator;
@@ -397,11 +398,13 @@ namespace TABCoopMod.Core
                 _mLocalize = AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_ZXGame_Localize, new[] { typeof(string) });
                 _mGetSavesDir = AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_ZXGame_GetSavesDirectory, Type.EmptyTypes);
                 _methodWriteSaveFile = AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_ZXGame_WriteSaveFile, new[] { typeof(string) });
+                _methodSaveGameFlow = AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_ZXGame_SaveGameFlow, new[] { typeof(string), typeof(Action), typeof(bool), typeof(bool) });
                 _methodLoadGameAndEnter = AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_ZXGame_LoadGameAndEnter, new[] { typeof(string) });
 
                 Check(_mLocalize, "ZXGame.Localize");
                 Check(_mGetSavesDir, "ZXGame.GetSavesDirectory");
                 Check(_methodWriteSaveFile, "ZXGame.WriteSaveFile (.zxsav)");
+                Check(_methodSaveGameFlow, "ZXGame.SaveGameFlow");
                 Check(_methodLoadGameAndEnter, "ZXGame.LoadGameAndEnter (.zxsav)");
 
                 // 4. Level System Methods
@@ -1469,15 +1472,82 @@ namespace TABCoopMod.Core
         public static string Localize(string key) => _mLocalize != null ? (string)_mLocalize.Invoke(null, new object[] { key }) : key;
         public static string GetSavesDirectory() => (string)_mGetSavesDir?.Invoke(null, null);
 
+        public static string CurrentGameStateName
+        {
+            get
+            {
+                try
+                {
+                    var gs = CurrentGameStateObject;
+                    if (gs == null || _typeZXGameState == null) return null;
+                    return AccessTools.Property(_typeZXGameState, "Name")?.GetValue(gs, null) as string;
+                }
+                catch { return null; }
+            }
+            set
+            {
+                try
+                {
+                    var gs = CurrentGameStateObject;
+                    if (gs == null || _typeZXGameState == null) return;
+                    var prop = AccessTools.Property(_typeZXGameState, "Name");
+                    if (prop != null && prop.CanWrite)
+                        prop.SetValue(gs, value, null);
+                }
+                catch { }
+            }
+        }
+
         public static void WriteSaveFile(string fullFilePath)
         {
             var game = _mZXGameCurrent.Invoke(null, null);
             var ls = CurrentLevelState;
             if (ls != null)
             {
+                if (Sync.CoopSessionManager.IsMultiFactionActive || Sync.FactionOwnershipTracker.IsInitialized)
+                    Sync.FactionOwnershipTracker.SaveToLevelScriptVariables();
                 AccessTools.Method(typeof(ZXLevelState), ObfuscatedSymbols.Method_ZXLevelState_SaveTimeState)?.Invoke(ls, null);
             }
             _methodWriteSaveFile.Invoke(game, new object[] { fullFilePath });
+        }
+
+        public static bool SaveCurrentLevelAndExit(string saveName = null)
+        {
+            try
+            {
+                var game = _mZXGameCurrent?.Invoke(null, null);
+                var gs = CurrentGameStateObject;
+                if (game == null || gs == null || _methodSaveGameFlow == null)
+                    return false;
+
+                string chosenName = !string.IsNullOrWhiteSpace(saveName) ? saveName.Trim() : CurrentGameStateName;
+                if (string.IsNullOrWhiteSpace(chosenName) || string.Equals(chosenName, "coop_host_snapshot", StringComparison.OrdinalIgnoreCase))
+                {
+                    string orig = Sync.CoopSessionManager.HostOriginalSaveName;
+                    chosenName = !string.IsNullOrWhiteSpace(orig) && !string.Equals(orig, "coop_host_snapshot", StringComparison.OrdinalIgnoreCase)
+                        ? orig
+                        : "CoopSave_" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                }
+                CurrentGameStateName = chosenName;
+
+                if (DXModalScreen.IsInModal)
+                    DXModalScreen.CloseAll();
+
+                Action onComplete = () =>
+                {
+                    try { ReturnToMainMenu(); }
+                    catch (Exception ex) { ModLogger.Error("[GameBridge] SaveCurrentLevelAndExit ReturnToMainMenu failed", ex); }
+                };
+
+                ModLogger.InfoImmediate($"[GameBridge] Triggering vanilla SaveGameFlow('{chosenName}') and exiting to MainMenu...");
+                _methodSaveGameFlow.Invoke(game, new object[] { chosenName, onComplete, false, true });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error("[GameBridge] SaveCurrentLevelAndExit failed", ex);
+                return false;
+            }
         }
 
         public static void LoadSaveFileAndEnter(string fileNameOrPath)
@@ -1653,6 +1723,8 @@ namespace TABCoopMod.Core
         {
             try
             {
+                if (DXModalScreen.IsInModal)
+                    DXModalScreen.CloseAll();
                 DisableCameraIntroAnimation();
                 var game = _mZXGameCurrent?.Invoke(null, null) as DXGame;
                 if (game == null) return;

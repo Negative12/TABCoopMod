@@ -1353,4 +1353,35 @@ namespace TABCoopMod.Patches
                 __result = FactionOwnershipTracker.GetPlayerColor(owner);
         }
     }
+
+    /// <summary>
+    /// Ensures every vanilla manual/autosave/save-and-exit flow (ZXGame.SaveGameFlow) persists the latest
+    /// Multi-Faction ownership map, ledgers, Wonder state, and map metadata into ZXLevelState.ScriptVariables
+    /// right before ZipSerializer writes the .zxsav archive.
+    /// </summary>
+    [HarmonyPatch]
+    public static class Patch_ZXGame_SaveGameFlow_MultiFaction
+    {
+        public static MethodBase TargetMethod()
+        {
+            return GameBridge.TypeZXGame != null
+                ? AccessTools.Method(
+                    GameBridge.TypeZXGame,
+                    ObfuscatedSymbols.Method_ZXGame_SaveGameFlow,
+                    new[] { typeof(string), typeof(Action), typeof(bool), typeof(bool) })
+                : null;
+        }
+
+        [HarmonyPrefix]
+        public static void Prefix(bool __2)
+        {
+            // confirmModal == false means actual save execution is running now.
+            if (__2) return;
+            if ((CoopSessionManager.IsMultiFactionActive || FactionOwnershipTracker.IsInitialized)
+                && GameBridge.CurrentLevelState != null)
+            {
+                FactionOwnershipTracker.SaveToLevelScriptVariables();
+            }
+        }
+    }
 }

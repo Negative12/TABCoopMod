@@ -737,6 +737,7 @@ namespace TABCoopMod.Testing
                 peers.Add(new Dictionary<string, object>
                 {
                     ["id"] = p.PlayerId,
+                    ["factionSlot"] = p.EffectiveFactionSlot,
                     ["name"] = p.PlayerName,
                     ["ready"] = p.IsReady
                 });
@@ -767,6 +768,11 @@ namespace TABCoopMod.Testing
                 ["sessionActive"] = Sync.CoopSessionManager.IsSessionActive,
                 ["isHost"] = Sync.CoopSessionManager.Transport?.IsHost ?? false,
                 ["localPlayerId"] = Sync.CoopSessionManager.Transport?.LocalPlayerId ?? 0,
+                ["localFactionSlot"] = Patches.CommandInterceptor.LocalPlayerId,
+                ["hasDisconnectAlert"] = Sync.CoopSessionManager.HasDisconnectAlert,
+                ["disconnectAlertSlot"] = Sync.CoopSessionManager.DisconnectAlertSlot,
+                ["disconnectAlertName"] = Sync.CoopSessionManager.DisconnectAlertPlayerName,
+                ["disconnectAlertVisible"] = UI.DisconnectNoticeOverlay.IsVisible,
                 ["roomPhase"] = Sync.CoopSessionManager.RoomPhase.ToString(),
                 ["canStart"] = Sync.CoopSessionManager.CanHostStartGame,
                 ["balancePreset"] = Sync.CoopSessionManager.BalancePreset.ToString(),
@@ -798,6 +804,21 @@ namespace TABCoopMod.Testing
                     var modal = DXVision.GUI.DXModalScreen.CurrentModalObject;
                     if (modal != null) GameBridge.CloseZXWindow(modal);
                     return new Dictionary<string, object> { ["ok"] = modal != null };
+                case "disconnect_pause":
+                    Sync.CoopSessionManager.TogglePauseForDisconnectWait();
+                    return new Dictionary<string, object>
+                    {
+                        ["ok"] = true,
+                        ["paused"] = Determinism.LockstepClock.PausedBySession || (DXGame.Current?.Paused ?? false)
+                    };
+                case "disconnect_save_exit":
+                    return new Dictionary<string, object>
+                    {
+                        ["ok"] = Sync.CoopSessionManager.HostSaveAndExitFromAlert(GetStr(args, "saveName"))
+                    };
+                case "disconnect_dismiss":
+                    Sync.CoopSessionManager.DismissDisconnectAlert();
+                    return new Dictionary<string, object> { ["ok"] = true };
                 case "test_select":
                 {
                     ulong eid = GetULong(args, "entityId", 0);
@@ -1211,10 +1232,10 @@ namespace TABCoopMod.Testing
         private static object GetFactionState()
         {
             FactionContextManager.FlushActiveOwnerFromLevelState();
-            int maxP = Math.Max(1, Math.Min(3, (int)FactionOwnershipTracker.ActivePlayerCount));
             var players = new List<Dictionary<string, object>>();
-            for (byte pid = 1; pid <= maxP; pid++)
+            for (byte pid = 1; pid <= 3; pid++)
             {
+                if (!Sync.FactionOwnershipTracker.IsSlotParticipating(pid)) continue;
                 var l = FactionContextManager.GetLedger(pid);
                 if (l == null) continue;
                 var e = l.Economy;

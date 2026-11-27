@@ -27,6 +27,8 @@ namespace TABCoopMod.Networking
         LobbyRosterSync = 0x08,
         ClientReadyState = 0x09,
         LobbyHostNotice = 0x0A,
+        LobbySeatSwapRequest = 0x0E,
+        PeerDisconnectNotice = 0x0F,
         DirectEndpointExchange = 0x0B,
         DirectCutoverSync = 0x0C,
         DirectFallbackBatch = 0x0D,
@@ -73,6 +75,9 @@ namespace TABCoopMod.Networking
     public sealed class PeerInfo
     {
         public byte PlayerId { get; set; }
+        /// <summary>1-based in-game faction/seat slot (1=Blue, 2=Green, 3=Orange). Defaults to PlayerId when 0.</summary>
+        public byte FactionSlot { get; set; }
+        public byte EffectiveFactionSlot => (byte)(FactionSlot >= 1 && FactionSlot <= 3 ? FactionSlot : PlayerId);
         public string PlayerName { get; set; } = string.Empty;
         public ulong SteamId64 { get; set; }
         public bool IsReady { get; set; }
@@ -840,7 +845,14 @@ namespace TABCoopMod.Networking
                     ModLogger.Warn($"[LocalTcpLoopbackTransport] Version mismatch! Host={ModInfo.Version}, Client({clientName})={version}");
                 else
                     ModLogger.Info($"[LocalTcpLoopbackTransport] Handshake from {clientName} (ver={version}, localLan={clientLocalLan}).");
-                var peer = new PeerInfo { PlayerId = senderId, PlayerName = $"{clientName}#{senderId}", IsReady = false, IsLocalOrPrivateLan = clientLocalLan };
+                var peer = new PeerInfo
+                {
+                    PlayerId = senderId,
+                    FactionSlot = senderId,
+                    PlayerName = $"{clientName}#{senderId}",
+                    IsReady = false,
+                    IsLocalOrPrivateLan = clientLocalLan
+                };
                 _peers.RemoveAll(p => p.PlayerId == senderId);
                 _peers.Add(peer);
 
@@ -855,6 +867,9 @@ namespace TABCoopMod.Networking
                         w.Write(p.IsReady);
                     }
                     w.Write(ModInfo.Version);
+                    w.Write((byte)_peers.Count);
+                    foreach (var p in _peers)
+                        w.Write(p.EffectiveFactionSlot);
                 });
 
                 OnPeerConnected?.Invoke(peer);
@@ -870,9 +885,11 @@ namespace TABCoopMod.Networking
                 _peers.Clear();
                 for (int i = 0; i < count; i++)
                 {
+                    byte pid = reader.ReadByte();
                     _peers.Add(new PeerInfo
                     {
-                        PlayerId = reader.ReadByte(),
+                        PlayerId = pid,
+                        FactionSlot = pid,
                         PlayerName = reader.ReadString(),
                         IsReady = reader.ReadBoolean()
                     });
@@ -880,6 +897,16 @@ namespace TABCoopMod.Networking
                 string hostVersion = reader.BaseStream.Position < reader.BaseStream.Length
                     ? reader.ReadString()
                     : "<=0.1.2";
+                if (reader.BaseStream.Position < reader.BaseStream.Length)
+                {
+                    byte slotCount = reader.ReadByte();
+                    for (int i = 0; i < slotCount && reader.BaseStream.Position < reader.BaseStream.Length; i++)
+                    {
+                        byte slot = reader.ReadByte();
+                        if (i < _peers.Count && slot >= 1 && slot <= 3)
+                            _peers[i].FactionSlot = slot;
+                    }
+                }
                 ModLogger.Info($"[LocalTcpLoopbackTransport] HandshakeAccepted! LocalPlayerId={LocalPlayerId}, Peers={_peers.Count}, HostVer={hostVersion}");
                 OnPeerConnected?.Invoke(_peers.Find(p => p.PlayerId == LocalPlayerId));
                 if (!string.Equals(hostVersion, ModInfo.Version, StringComparison.Ordinal))
@@ -904,6 +931,7 @@ namespace TABCoopMod.Networking
                 _peers.Add(new PeerInfo
                 {
                     PlayerId = p.PlayerId,
+                    FactionSlot = p.EffectiveFactionSlot,
                     PlayerName = p.PlayerName ?? string.Empty,
                     SteamId64 = p.SteamId64,
                     IsReady = p.IsReady,
