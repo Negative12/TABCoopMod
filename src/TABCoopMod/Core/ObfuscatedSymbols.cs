@@ -108,8 +108,9 @@ namespace TABCoopMod.Core
         public const string Method_LevelSys_ExecutePendingCmd  = "#=zN0jTYBQMVgRf";
         public const string Method_LevelSys_GroupMoveSelected  = "#=zQp2M56bpPd9jmiNkVA==";
         public const string Method_LevelSys_AssignGroupMove    = "#=zgn6bDkSd9MGS3$WvAQ==";
-        public const string Method_LevelSys_ShowGroundIndicator= "#=znoo7TyEtVemrA_J6FQ==";
-        public const string Method_LevelSys_ShowTopBanner      = "#=zhWLC3K8=";
+        public const string Method_LevelSys_ShowGroundIndicator= "#=znoo7TyEtVemrA_J6FQ==";       
+        public const string Method_LevelSys_OpenGameMenu       = "#=zzka5dmAa0T2CCA26KA==";       
+        public const string Method_LevelSys_ShowTopBanner      = "#=zhWLC3K8=";                   
         public const string Method_LevelSys_EnqueueNotification= "#=zYWs2Gv9F3GD5";
         public const string Method_LevelSys_RefreshCmdPanel    = "#=zR1qHCYY=";
         public const string Method_LevelSys_RefreshSelectionGroupsHud = "#=zOAZllFnsly4T";

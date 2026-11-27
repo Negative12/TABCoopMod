@@ -50,6 +50,7 @@ namespace TABCoopMod.Core
         private static MethodInfo _methodLoadGameAndEnter;
         private static MethodInfo _methodShowTopBanner;
         private static MethodInfo _methodShowGroundIndicator;
+        private static MethodInfo _methodLevelSysOpenGameMenu;
         private static MethodInfo _methodAssignGroupMove;
         private static MethodInfo _methodPlaceBuilding;
 
@@ -401,10 +402,14 @@ namespace TABCoopMod.Core
                 _methodShowGroundIndicator = TypeZXSystemGameLevel?.GetMethod(
                     ObfuscatedSymbols.Method_LevelSys_ShowGroundIndicator,
                     BindingFlags.Public | BindingFlags.Instance);
+                _methodLevelSysOpenGameMenu = TypeZXSystemGameLevel?.GetMethod(
+                    ObfuscatedSymbols.Method_LevelSys_OpenGameMenu,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                 _methodAssignGroupMove = AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_AssignGroupMove,
                     new[] { typeof(List<DXEntity>), typeof(ZXCommand), typeof(PointF) });
 
                 Check(_methodShowTopBanner, "ZXSystemGameLevel.ShowTopBanner");
+                Check(_methodLevelSysOpenGameMenu, "ZXSystemGameLevel.OpenGameMenu");
                 Check(_methodAssignGroupMove, "ZXSystemGameLevel.AssignGroupMove");
 
                 // 5. Command Execution & Lookup
@@ -1703,6 +1708,22 @@ namespace TABCoopMod.Core
             if (levelSys != null)
             {
                 _methodShowTopBanner.Invoke(levelSys, new object[] { message, color, durationMs });
+            }
+        }
+
+        public static bool OpenLevelGameMenu()
+        {
+            try
+            {
+                var levelSys = _mLevelSysCurrent?.Invoke(null, null);
+                if (levelSys == null || _methodLevelSysOpenGameMenu == null) return false;
+                _methodLevelSysOpenGameMenu.Invoke(levelSys, null);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] OpenLevelGameMenu failed: {ex.Message}");
+                return false;
             }
         }
 

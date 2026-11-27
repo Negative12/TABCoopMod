@@ -260,6 +260,7 @@ namespace TABCoopMod.Sync
         private static double _gateWaitStartTicks = -1.0;
         private static double _gateLastWarnTicks = -1.0;
         private const double GateTimeoutMs = 3000.0;
+        private static bool _pendingOpenGameMenuAfterPause;
         private static int _hostWaitLastTick = -1;
         private static double _hostWaitLastTickChangeTicks = -1000.0;
         private static double _hostWaitLastLogTicks = -1000.0;
@@ -714,6 +715,7 @@ namespace TABCoopMod.Sync
             PauseSyncController.CancelCountdown();
             Patches.MayorSyncPatch.ResetTracking();
             ClearHostWaitStatus();
+            _pendingOpenGameMenuAfterPause = false;
             _hostWaitLastTick = -1;
             _hostWaitLastTickChangeTicks = -1000.0;
             _hostWaitLastLogTicks = -1000.0;
@@ -1093,6 +1095,7 @@ namespace TABCoopMod.Sync
             UI.MultiFactionPanel.Reset();
             UI.ManualSyncButton.Reset();
             UI.PerfOverlayRenderer.Reset();
+            _pendingOpenGameMenuAfterPause = false;
             UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
@@ -1181,6 +1184,7 @@ namespace TABCoopMod.Sync
             UI.MultiFactionPanel.Reset();
             UI.ManualSyncButton.Reset();
             UI.PerfOverlayRenderer.Reset();
+            _pendingOpenGameMenuAfterPause = false;
             UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
@@ -1487,6 +1491,30 @@ namespace TABCoopMod.Sync
             Transport.SendToPeer(1, SendChannel.ReliableCommand, PacketType.ManualResyncRequest, _ => { });
             GameBridge.ShowTopBanner("已请求房主手动同步...", Color.Cyan, 2200);
             return true;
+        }
+
+        /// <summary>
+        /// Called by the game-menu open hook before the vanilla menu is allowed to open.
+        /// In co-op, first apply a synchronized pause, then open the menu on a later frame.
+        /// </summary>
+        public static void RequestOpenGameMenuAfterPause()
+        {
+            if (!IsSessionActive || !IsInSyncedLevel || Transport == null)
+                return;
+            if (LockstepClock.PausedBySession)
+            {
+                GameBridge.OpenLevelGameMenu();
+                return;
+            }
+            if (_pendingOpenGameMenuAfterPause) return;
+
+            _pendingOpenGameMenuAfterPause = true;
+            PauseSyncController.RequestPause(true);
+        }
+
+        public static void CancelPendingGameMenuOpen()
+        {
+            _pendingOpenGameMenuAfterPause = false;
         }
 
         /// <summary>
@@ -2494,6 +2522,18 @@ namespace TABCoopMod.Sync
                 int pausedTick = DXGame.Current?.IAIterationInt ?? 0;
                 if (_networkGate == null || _networkGate.IsTickReady(pausedTick))
                     LockstepClock.RunInDeterministicContext(() => FlushDueTurnCommands(pausedTick));
+            }
+
+            // Deferred game-menu open: the menu request first applies a synchronized pause, then
+            // opens the native menu on a later frame so the client never freezes alone.
+            if (_pendingOpenGameMenuAfterPause
+                && LockstepClock.PausedBySession
+                && !LockstepClock.LoadingLevel
+                && !GameBridge.IsGameLoading()
+                && !DXVision.GUI.DXModalScreen.IsInModal)
+            {
+                _pendingOpenGameMenuAfterPause = false;
+                GameBridge.OpenLevelGameMenu();
             }
 
             // 3. Broadcast Ally Cursor & Camera Viewport at 20Hz when moving, 4Hz heartbeat when idle
