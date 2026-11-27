@@ -315,6 +315,9 @@ namespace TABCoopMod.Sync
         private static byte _deferredSessionStartProtoFlags;
         private static bool _hasEnteredSyncedLevelInMatch;
         private static ulong[][] _pendingResyncSelectionGroups;
+        private static bool _lateJoinInProgress;
+        private static byte _lateJoinPeerId;
+        private static string _pendingJoinRejectReason;
         public static bool IsHostSnapshotReloadPending => _hostSnapshotReloadPending;
 
         // Deferred work: never export/load from inside a deep engine callback (LevelLoadComplete
@@ -1161,6 +1164,9 @@ namespace TABCoopMod.Sync
             _lastEntityPosCorrectedTick.Clear();
             _pendingHostSnapshotExport = false;
             _pendingClientSnapshotLoadPath = null;
+            _lateJoinInProgress = false;
+            _lateJoinPeerId = 0;
+            _pendingJoinRejectReason = null;
             _pendingBroadcastSavBytes = null;
             _pendingBroadcastChkText = null;
             _kickingLoadFade = false;
@@ -1248,6 +1254,9 @@ namespace TABCoopMod.Sync
             FactionOwnershipTracker.Reset();
             _pendingHostSnapshotExport = false;
             _pendingClientSnapshotLoadPath = null;
+            _lateJoinInProgress = false;
+            _lateJoinPeerId = 0;
+            _pendingJoinRejectReason = null;
             _pendingBroadcastSavBytes = null;
             _pendingBroadcastChkText = null;
             _kickingLoadFade = false;
@@ -1365,10 +1374,11 @@ namespace TABCoopMod.Sync
                     }
                     BroadcastLobbyRoster();
 
-                    // If Host is already inside a level when a peer connects, push snapshot immediately!
-                    if (GameBridge.CurrentLevelState != null && !_hostSnapshotReloadPending)
+                    // If Host is already inside a level when a peer connects, start a late join.
+                    if (GameBridge.CurrentLevelState != null)
                     {
-                        RequestSnapshotBroadcast();
+                        if (TryAcceptLateJoin(peer))
+                            RequestSnapshotBroadcast();
                     }
                 }
                 else
@@ -1404,6 +1414,11 @@ namespace TABCoopMod.Sync
                 _peerLastPosSyncSentTicks.Remove(playerId);
                 _peerLastFullPosAlignSentTicks.Remove(playerId);
                 _clientSnapshotAckPeers.Remove(playerId);
+                if (playerId == _lateJoinPeerId)
+                {
+                    _lateJoinInProgress = false;
+                    _lateJoinPeerId = 0;
+                }
                 _lobbyRoster.RemoveAll(p => p.PlayerId == playerId);
                 if (Transport != null && Transport.IsHost)
                     UpdateAdaptiveInputDelay();
@@ -1481,9 +1496,70 @@ namespace TABCoopMod.Sync
         }
 
         /// <summary>
-        /// Defers a Host snapshot export to the next OnFrameTick top-level. Callers may sit on a deep
-        /// engine/network stack (LevelLoadComplete postfix, packet delivery), where the recursive ZIP
-        /// serializer would blow the main-thread stack.
+        /// Host accepts a peer that connected while a level is running. The existing
+        /// full-resync path pauses everyone, lets the new client load, then resumes.
+        /// </summary>
+        private static bool TryAcceptLateJoin(PeerInfo peer)
+        {
+            if (peer == null || !IsSessionActive || Transport == null || !Transport.IsHost)
+                return false;
+
+            if (!IsInSyncedLevel)
+            {
+                RejectLateJoin(peer, "房主正在加载，暂不能加入");
+                return false;
+            }
+
+            string reason = null;
+            if (GameMode != CoopGameMode.Archon)
+                reason = "独立基地模式暂不支持中途加入";
+            else if (LockstepClock.LoadingLevel || GameBridge.IsGameLoading())
+                reason = "房主正在加载，暂不能加入";
+            else if (GameBridge.IsLevelEnded())
+                reason = "本局已结束";
+            else if (_pendingHostSnapshotExport || _awaitingClientSnapshotAck
+                || _hostSnapshotReloadPending || _lateJoinInProgress)
+                reason = "房主正在同步，请稍后再试";
+            else if (GetEffectivePeers().Count > 3)
+                reason = "房间已满（最多 3 人）";
+
+            if (!string.IsNullOrEmpty(reason))
+            {
+                RejectLateJoin(peer, reason);
+                return false;
+            }
+
+            _lateJoinInProgress = true;
+            _lateJoinPeerId = peer.PlayerId;
+
+            var lobbyPeer = _lobbyRoster.Find(p => p.PlayerId == peer.PlayerId);
+            if (lobbyPeer != null) lobbyPeer.IsReady = true;
+            BroadcastLobbyRoster();
+
+            ModLogger.Info($"[LateJoin] Accepted P{peer.PlayerId}; pausing for full snapshot resync.");
+            GameBridge.ShowTopBanner($"P{peer.PlayerId} 正在加入，正在同步战局...", Color.Cyan, 4000);
+            LockstepClock.SetSessionPause(true);
+            return true;
+        }
+
+        private static void RejectLateJoin(PeerInfo peer, string reason)
+        {
+            if (peer == null) return;
+            ModLogger.Warn($"[LateJoin] Rejected P{peer.PlayerId}: {reason}");
+            try
+            {
+                Transport?.SendToPeer(peer.PlayerId, SendChannel.ReliableCommand, PacketType.JoinRejected,
+                    w => w.Write(reason));
+            }
+            catch { }
+            _lobbyRoster.RemoveAll(p => p.PlayerId == peer.PlayerId);
+            BroadcastLobbyRoster();
+            GameBridge.ShowTopBanner(reason, Color.OrangeRed, 3500);
+        }
+
+        /// <summary>
+        /// Host exports the current level and broadcasts a fresh snapshot. Reused by
+        /// manual/auto resync and by late join; existing clients reload for determinism.
         /// </summary>
         public static void RequestSnapshotBroadcast()
         {
@@ -1763,7 +1839,18 @@ namespace TABCoopMod.Sync
 
             ResetSyncTrackingState();
 
+            bool lateJoinCompleted = _lateJoinInProgress;
+            byte lateJoinPeerId = _lateJoinPeerId;
+            _lateJoinInProgress = false;
+            _lateJoinPeerId = 0;
+
             EnterSyncedLevel();
+
+            if (lateJoinCompleted)
+            {
+                ModLogger.Info($"[LateJoin] P{lateJoinPeerId} completed snapshot load; resuming session.");
+                GameBridge.ShowTopBanner($"P{lateJoinPeerId} 已加入战局", Color.SpringGreen, 3000);
+            }
 
             int startTick = DXGame.Current?.IAIterationInt ?? 0;
             long idCounter = LockstepClock.CurrentSyncedEntityIdCounter;
@@ -2383,6 +2470,16 @@ namespace TABCoopMod.Sync
             if (frameGame == null || frameGame.Disposing)
                 return;
 
+            if (!string.IsNullOrEmpty(_pendingJoinRejectReason))
+            {
+                string rejectReason = _pendingJoinRejectReason;
+                _pendingJoinRejectReason = null;
+                ModLogger.Warn($"[CoopSessionManager] Join rejected by Host: {rejectReason}");
+                GameBridge.ShowTopBanner(rejectReason, Color.OrangeRed, 5000);
+                StopSession();
+                return;
+            }
+
             if (!TestHarnessConfig.Enabled && !TestHarnessConfig.ControlEnabled)
             {
                 SteamP2PTransport.PumpSteamCallbacksIfNeeded(Transport);
@@ -2486,6 +2583,8 @@ namespace TABCoopMod.Sync
                     _awaitingClientAckStartTicks = -1.0;
                     _clientSnapshotAckReceived = false;
                     _clientSnapshotAckPeers.Clear();
+                    _lateJoinInProgress = false;
+                    _lateJoinPeerId = 0;
                     EnterSyncedLevel();
                 }
                 else
@@ -3528,6 +3627,16 @@ namespace TABCoopMod.Sync
                         }
                         LobbyStateChanged?.Invoke();
                     }
+                    break;
+                }
+
+                case PacketType.JoinRejected:
+                {
+                    if (Transport.IsHost) break;
+                    string reason = r.BaseStream.Position < r.BaseStream.Length
+                        ? r.ReadString()
+                        : "房间已满（最多 3 人）";
+                    _pendingJoinRejectReason = reason;
                     break;
                 }
 
