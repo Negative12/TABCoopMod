@@ -77,6 +77,38 @@ namespace TABCoopMod.Sync
         public static bool IsLanSession =>
             UnwrapTransport() is LocalTcpLoopbackTransport lan && lan.IsLanMode;
 
+        /// <summary>
+        /// True only for genuinely local transports (same-machine loopback, or LAN peers that
+        /// joined via a loopback/private address) with chaos injection disabled. In this case
+        /// the host can keep input delay at one tick instead of treating frame-scheduling jitter
+        /// as WAN latency. frp/public LAN paths are excluded.
+        /// </summary>
+        public static bool IsFastLocalPath
+        {
+            get
+            {
+                if (Transport == null) return false;
+                if (Transport is ChaosTransport chaos && chaos.IsChaosActive) return false;
+
+                if (!(UnwrapTransport() is LocalTcpLoopbackTransport local)) return false;
+                if (!local.IsLanMode) return true;
+                if (!local.IsHost) return local.IsLoopbackOrPrivateLanTarget;
+
+                var peers = Transport.ConnectedPeers;
+                if (peers == null || peers.Count == 0) return false;
+
+                bool hasClient = false;
+                for (int i = 0; i < peers.Count; i++)
+                {
+                    var p = peers[i];
+                    if (p == null || p.PlayerId == 1) continue;
+                    hasClient = true;
+                    if (!p.IsLocalOrPrivateLan) return false;
+                }
+                return hasClient;
+            }
+        }
+
         public static INetworkTransport UnwrapTransport(INetworkTransport transport = null)
         {
             var t = transport ?? Transport;
@@ -954,7 +986,8 @@ namespace TABCoopMod.Sync
                         PlayerId = p.PlayerId,
                         PlayerName = p.PlayerName,
                         SteamId64 = p.SteamId64,
-                        IsReady = p.PlayerId == 1 || p.IsReady
+                        IsReady = p.PlayerId == 1 || p.IsReady,
+                        IsLocalOrPrivateLan = p.IsLocalOrPrivateLan
                     });
                 }
             }
@@ -1013,7 +1046,8 @@ namespace TABCoopMod.Sync
                         PlayerId = p.PlayerId,
                         PlayerName = p.PlayerName,
                         SteamId64 = p.SteamId64,
-                        IsReady = true
+                        IsReady = true,
+                        IsLocalOrPrivateLan = p.IsLocalOrPrivateLan
                     });
                 }
             }
@@ -1324,7 +1358,8 @@ namespace TABCoopMod.Sync
                             PlayerId = peer.PlayerId,
                             PlayerName = peer.PlayerName,
                             SteamId64 = peer.SteamId64,
-                            IsReady = peer.PlayerId == 1 || peer.IsReady
+                            IsReady = peer.PlayerId == 1 || peer.IsReady,
+                            IsLocalOrPrivateLan = peer.IsLocalOrPrivateLan
                         });
                         _lobbyRoster.Sort((a, b) => a.PlayerId.CompareTo(b.PlayerId));
                     }
@@ -1348,7 +1383,8 @@ namespace TABCoopMod.Sync
                                 PlayerId = p.PlayerId,
                                 PlayerName = p.PlayerName,
                                 SteamId64 = p.SteamId64,
-                                IsReady = p.IsReady
+                                IsReady = p.IsReady,
+                                IsLocalOrPrivateLan = p.IsLocalOrPrivateLan
                             });
                         }
                     }
@@ -2869,6 +2905,7 @@ namespace TABCoopMod.Sync
         {
             if (!IsSessionActive || Transport == null) return -1.0;
             if (Transport.IsHost) return 0.0;
+            if (IsFastLocalPath) return 0.0;
             if (Transport is ITransportDiagnostics diag && diag.TryGetPeerDiagnostics(1, out var pDiag) && pDiag.IsDirectUdp && pDiag.DirectRttMs > 0.0)
                 return pDiag.DirectRttMs;
             if (LocalRttToHostMs >= 0.0)
@@ -2965,7 +3002,7 @@ namespace TABCoopMod.Sync
             {
                 var p = remotePeers[i];
                 string path = ResolveHostSidePeerPath(p.PlayerId);
-                double rawRtt = ResolveHostSidePeerRtt(p.PlayerId, now);
+                double rawRtt = IsFastLocalPath ? 0.0 : ResolveHostSidePeerRtt(p.PlayerId, now);
                 double est = ComputeEstimatedActualDelayMs(rawRtt, InputDelayTicks, clientCount);
                 var snap = new RoomPeerLinkSnapshot
                 {
@@ -3047,7 +3084,7 @@ namespace TABCoopMod.Sync
             _lastRttProbeTicks = now;
             uint seq = ++_rttPingSeq;
             long timestamp = Stopwatch.GetTimestamp();
-            float hostSmoothedRtt = (float)CurrentSmoothedRttMs;
+            float hostSmoothedRtt = IsFastLocalPath ? 0f : (float)CurrentSmoothedRttMs;
             var linkSnapshots = RefreshHostPeerLinkSnapshots();
             Transport.Broadcast(SendChannel.UnreliableSequenced, PacketType.RttPing, w =>
             {
@@ -3104,11 +3141,15 @@ namespace TABCoopMod.Sync
             }
 
             double effectiveDelayRtt = maxEffectiveDelayRtt >= 0.0 ? maxEffectiveDelayRtt : maxMainRtt;
-            CurrentSmoothedRttMs = maxMainRtt >= 0.0 ? maxMainRtt : effectiveDelayRtt;
+            bool fastLocal = IsFastLocalPath;
+            CurrentSmoothedRttMs = fastLocal
+                ? 0.0
+                : (maxMainRtt >= 0.0 ? maxMainRtt : effectiveDelayRtt);
 
             int cur = InputDelayTicks;
             int desired = cur;
-            if (effectiveDelayRtt > 145.0) desired = 4;
+            if (fastLocal) desired = MinInputDelayTicks;
+            else if (effectiveDelayRtt > 145.0) desired = 4;
             else if (effectiveDelayRtt > 100.0) desired = (cur == 4 && effectiveDelayRtt >= 122.0) ? 4 : 3;
             else if (effectiveDelayRtt > 64.0) desired = (cur >= 3 && effectiveDelayRtt >= 82.0) ? 3 : 2;
             else if (cur == 2 && effectiveDelayRtt >= 50.0) desired = 2;

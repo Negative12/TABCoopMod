@@ -74,6 +74,9 @@ namespace TABCoopMod.Networking
         public string PlayerName { get; set; } = string.Empty;
         public ulong SteamId64 { get; set; }
         public bool IsReady { get; set; }
+        // True when a LAN client joined via loopback/private address. Host uses this to
+        // skip WAN-sized adaptive input delay for genuinely local sessions.
+        public bool IsLocalOrPrivateLan { get; set; }
     }
 
     public sealed class LocalProbeResult
@@ -130,6 +133,12 @@ namespace TABCoopMod.Networking
         public int ListenPort { get; set; } = DefaultPort;
         public string JoinAddress { get; set; } = "127.0.0.1";
         public int JoinPort { get; set; } = DefaultPort;
+
+        /// <summary>
+        /// Client-side hint: target is loopback/private LAN, so the host should not
+        /// apply WAN-sized input delay. Hosts read this from the handshake request.
+        /// </summary>
+        public bool IsLoopbackOrPrivateLanTarget => !IsLanMode || IsLoopbackOrPrivateAddress(JoinAddress);
 
         /// <summary>
         /// Optional callback returning current Host lobby phase byte for non-intrusive LobbyProbeAck replies.
@@ -280,6 +289,7 @@ namespace TABCoopMod.Networking
             {
                 w.Write(Environment.UserName ?? "ClientPlayer");
                 w.Write(ModInfo.Version);
+                w.Write(IsLoopbackOrPrivateLanTarget);
             });
         }
 
@@ -480,6 +490,38 @@ namespace TABCoopMod.Networking
             OnPeerDisconnected?.Invoke(playerId);
         }
 
+        private static bool IsLoopbackOrPrivateAddress(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host)) return false;
+            host = host.Trim();
+            if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)) return true;
+            return IPAddress.TryParse(host, out var ip) && IsLoopbackOrPrivateAddress(ip);
+        }
+
+        private static bool IsLoopbackOrPrivateAddress(IPAddress ip)
+        {
+            if (ip == null) return false;
+            if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+            if (IPAddress.IsLoopback(ip)) return true;
+
+            if (ip.AddressFamily == AddressFamily.InterNetwork)
+            {
+                byte[] b = ip.GetAddressBytes();
+                return b[0] == 10
+                    || (b[0] == 172 && b[1] >= 16 && b[1] <= 31)
+                    || (b[0] == 192 && b[1] == 168)
+                    || (b[0] == 169 && b[1] == 254);
+            }
+
+            if (ip.AddressFamily == AddressFamily.InterNetworkV6)
+            {
+                if (ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal) return true;
+                byte[] b = ip.GetAddressBytes();
+                return (b[0] & 0xFE) == 0xFC;
+            }
+            return false;
+        }
+
         private static bool IsSocketDisconnected(TcpClient client)
         {
             try
@@ -628,12 +670,14 @@ namespace TABCoopMod.Networking
             {
                 string clientName = reader.ReadString();
                 string version = reader.ReadString();
+                bool clientLocalLan = reader.BaseStream.Position < reader.BaseStream.Length
+                    && reader.ReadBoolean();
                 bool versionMatched = string.Equals(version, ModInfo.Version, StringComparison.Ordinal);
                 if (!versionMatched)
                     ModLogger.Warn($"[LocalTcpLoopbackTransport] Version mismatch! Host={ModInfo.Version}, Client({clientName})={version}");
                 else
-                    ModLogger.Info($"[LocalTcpLoopbackTransport] Handshake from {clientName} (ver={version}).");
-                var peer = new PeerInfo { PlayerId = senderId, PlayerName = $"{clientName}#{senderId}", IsReady = false };
+                    ModLogger.Info($"[LocalTcpLoopbackTransport] Handshake from {clientName} (ver={version}, localLan={clientLocalLan}).");
+                var peer = new PeerInfo { PlayerId = senderId, PlayerName = $"{clientName}#{senderId}", IsReady = false, IsLocalOrPrivateLan = clientLocalLan };
                 _peers.RemoveAll(p => p.PlayerId == senderId);
                 _peers.Add(peer);
 
@@ -699,7 +743,8 @@ namespace TABCoopMod.Networking
                     PlayerId = p.PlayerId,
                     PlayerName = p.PlayerName ?? string.Empty,
                     SteamId64 = p.SteamId64,
-                    IsReady = p.IsReady
+                    IsReady = p.IsReady,
+                    IsLocalOrPrivateLan = p.IsLocalOrPrivateLan
                 });
             }
         }
