@@ -236,6 +236,25 @@ namespace TABCoopMod.Networking
             }
         }
 
+        public bool TryGetPeerSummary(byte playerId, out string summary, out double rttMs, out bool isDirect)
+        {
+            lock (_stateLock)
+            {
+                if (_peers.TryGetValue(playerId, out var p) && p.TxEnabled && p.ActiveCandidate != null)
+                {
+                    var c = p.ActiveCandidate.Candidate;
+                    summary = $"Direct {c.Kind}";
+                    rttMs = p.ActiveCandidate.SmoothedRttMs > 0 ? p.ActiveCandidate.SmoothedRttMs : 0.0;
+                    isDirect = true;
+                    return true;
+                }
+            }
+            summary = null;
+            rttMs = -1.0;
+            isDirect = false;
+            return false;
+        }
+
         public bool TryGetActiveSummary(out string summary, out double rttMs, out bool isDirect)
         {
             lock (_stateLock)

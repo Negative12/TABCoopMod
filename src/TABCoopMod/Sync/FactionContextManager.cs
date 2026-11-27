@@ -377,9 +377,17 @@ namespace TABCoopMod.Sync
             }
             if (allUnits.Count > 1)
                 allUnits.Sort(GameBridge.CompareEntitiesDeterministically);
-            GameBridge.CallLevelStateSetEnhancerBuildings(enhancers);
-
             int maxP = Math.Max(1, Math.Min(3, (int)FactionOwnershipTracker.ActivePlayerCount));
+            var enhancersByOwner = new List<DXEntity>[4];
+            for (byte pid = 1; pid <= maxP; pid++)
+                enhancersByOwner[pid] = new List<DXEntity>(8);
+            for (int i = 0; i < enhancers.Count; i++)
+            {
+                var enh = enhancers[i];
+                byte enhOwner = FactionOwnershipTracker.ResolveOrAssignOwner(enh);
+                if (enhOwner >= 1 && enhOwner <= maxP)
+                    enhancersByOwner[enhOwner].Add(enh);
+            }
 
             float sellWood = GameBridge.GetLevelSellFactor(0);
             float sellStone = GameBridge.GetLevelSellFactor(1);
@@ -393,6 +401,11 @@ namespace TABCoopMod.Sync
             {
                 var ledger = _factions[pid];
                 if (ledger == null) continue;
+
+                // Scope enhancer aura calculations (Market -20% FoodNeeded, Warehouse +20% Output, Bank)
+                // strictly to buildings owned by the same faction, and invalidate the cached Render_Iteration>>4
+                // enhancer stamp so simulation ticks never depend on local render FPS.
+                GameBridge.CallLevelStateSetEnhancerBuildings(enhancersByOwner[pid]);
 
                 var e = ledger.Economy;
                 e.ResourceStorage = 0;
@@ -423,12 +436,13 @@ namespace TABCoopMod.Sync
                 {
                     var item = allBuildings[i];
                     if (item == null || item.Disposed || !GameBridge.IsPlayerEntity(item)) continue;
-                    if (FactionOwnershipTracker.GetOwner(item.ID) != pid) continue;
+                    if (FactionOwnershipTracker.ResolveOrAssignOwner(item) != pid) continue;
                     if (GameBridge.GetBuildingDisabledManually(item) || GameBridge.IsBuildingInfected(item)) continue;
 
                     var dp = GameBridge.GetEntityDefaultParamsBoxed(item);
                     if (dp == null) continue;
 
+                    GameBridge.InvalidateBuildingEnhancerCache(item);
                     GameBridge.ReadDefaultParamsStats(dp,
                         out _, out float resGenTime, out bool convertGold,
                         out int dpCol, out int dpStorage, out int dpGoldGen, out float dpGoldPerCol,
@@ -507,7 +521,7 @@ namespace TABCoopMod.Sync
                 {
                     var u = allUnits[i];
                     if (u == null || u.Disposed || !GameBridge.IsPlayerEntity(u)) continue;
-                    if (FactionOwnershipTracker.GetOwner(u.ID) != pid) continue;
+                    if (FactionOwnershipTracker.ResolveOrAssignOwner(u) != pid) continue;
                     if (!GameBridge.IsEntityAlive(u)) continue;
 
                     var dp3 = GameBridge.GetEntityDefaultParamsBoxed(u);
@@ -569,7 +583,43 @@ namespace TABCoopMod.Sync
                 }
             }
 
+            // Restore global enhancer list & clear cache stamps so vanilla tooltips reflect global enhancers.
+            GameBridge.CallLevelStateSetEnhancerBuildings(enhancers);
+            for (int i = 0; i < allBuildings.Count; i++)
+                GameBridge.InvalidateBuildingEnhancerCache(allBuildings[i]);
+
             LoadOwnerIntoLevelState(savedOwner);
+        }
+
+        public static bool ApplyAsyncEconDeltasForPlayer(
+            byte pid,
+            int dGold, int dWood, int dStone, int dIron, int dOil,
+            int dFoodRes, int dWorkRes, int dEngRes,
+            int dWoodProdRes, int dStoneProdRes, int dIronProdRes, int dOilProdRes)
+        {
+            if (!IsInitialized || pid < 1 || pid > 3) return false;
+            if (dGold == 0 && dWood == 0 && dStone == 0 && dIron == 0 && dOil == 0
+                && dFoodRes == 0 && dWorkRes == 0 && dEngRes == 0
+                && dWoodProdRes == 0 && dStoneProdRes == 0 && dIronProdRes == 0 && dOilProdRes == 0)
+            {
+                return false;
+            }
+
+            PushContext(pid);
+            try
+            {
+                if (dGold != 0) GameBridge.AddLevelResourceDelta("Gold", dGold);
+                if (dWood != 0) GameBridge.AddLevelResourceDelta("Wood", dWood);
+                if (dStone != 0) GameBridge.AddLevelResourceDelta("Stone", dStone);
+                if (dIron != 0) GameBridge.AddLevelResourceDelta("Iron", dIron);
+                if (dOil != 0) GameBridge.AddLevelResourceDelta("Oil", dOil);
+                GameBridge.ApplyLevelReservationDeltas(dFoodRes, dWorkRes, dEngRes, dWoodProdRes, dStoneProdRes, dIronProdRes, dOilProdRes);
+                return true;
+            }
+            finally
+            {
+                PopContext();
+            }
         }
 
         public static void Execute8HourStepForPlayer(byte pid)

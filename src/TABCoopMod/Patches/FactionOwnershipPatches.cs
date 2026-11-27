@@ -71,6 +71,19 @@ namespace TABCoopMod.Patches
                 new[] { GameBridge.TypeZXEntity, GameBridge.TypeZXCommandTarget, typeof(Type), typeof(bool), typeof(bool), typeof(DXEntityTemplate) });
         }
 
+        [HarmonyPrefix]
+        public static void Prefix(object __0, out byte __state)
+        {
+            __state = FactionSpawnContext.ActiveSpawningOwner;
+            if (!CoopSessionManager.IsMultiFactionActive) return;
+
+            byte owner = CommandExecutor.ActiveCommandPlayerId;
+            if (owner == 0 && __0 is DXEntity execEnt)
+                owner = FactionOwnershipTracker.ResolveOrAssignOwner(execEnt);
+            if (owner != 0)
+                FactionSpawnContext.ActiveSpawningOwner = owner;
+        }
+
         [HarmonyPostfix]
         public static void Postfix(DXEntity __result, object __0)
         {
@@ -80,11 +93,17 @@ namespace TABCoopMod.Patches
             // Prefer authoritative lockstep command PlayerId first so a missing or fallback
             // executor owner can never misattribute a newly built structure to another faction.
             byte owner = CommandExecutor.ActiveCommandPlayerId;
-            if (owner == 0) owner = FactionOwnershipTracker.GetOwner(__0 as DXEntity);
+            if (owner == 0) owner = FactionOwnershipTracker.ResolveOrAssignOwner(__0 as DXEntity);
             if (owner != 0)
             {
                 FactionOwnershipTracker.SetOwner(__result.ID, owner);
             }
+        }
+
+        [HarmonyFinalizer]
+        public static void Finalizer(byte __state)
+        {
+            FactionSpawnContext.ActiveSpawningOwner = __state;
         }
     }
 

@@ -198,6 +198,50 @@ namespace TABCoopMod.Sync
             return entity == null ? (byte)0 : GetOwner(entity.ID);
         }
 
+        /// <summary>
+        /// Resolves the authoritative faction owner for an entity, falling back to the active
+        /// spawn/command context or nearest alive CommandCenter and persisting that ownership
+        /// for player entities so an unattributed entity never mutates another player's ledger.
+        /// </summary>
+        public static byte ResolveOrAssignOwner(DXEntity entity)
+        {
+            if (entity == null || entity.Disposed) return 0;
+            byte owner = GetOwner(entity.ID);
+            if (owner != 0) return owner;
+
+            if (Patches.FactionSpawnContext.ActiveSpawningOwner != 0)
+                owner = Patches.FactionSpawnContext.ActiveSpawningOwner;
+            else if (Commands.CommandExecutor.ActiveCommandPlayerId != 0)
+                owner = Commands.CommandExecutor.ActiveCommandPlayerId;
+
+            if (owner == 0 && IsInitialized && GameBridge.IsPlayerEntity(entity))
+            {
+                var ccs = GameBridge.GetAllCommandCenters(aliveOnly: true);
+                byte bestPid = 0;
+                long bestDistSq = long.MaxValue;
+                for (int i = 0; i < ccs.Count; i++)
+                {
+                    var cc = ccs[i];
+                    byte ccPid = GetOwner(cc.ID);
+                    if (ccPid == 0) continue;
+                    long dx = entity.CellX - cc.CellX;
+                    long dy = entity.CellY - cc.CellY;
+                    long distSq = dx * dx + dy * dy;
+                    if (distSq < bestDistSq || (distSq == bestDistSq && ccPid < bestPid))
+                    {
+                        bestDistSq = distSq;
+                        bestPid = ccPid;
+                    }
+                }
+                owner = bestPid;
+            }
+
+            if (owner != 0 && (entity.ID & 0x8000000000000000UL) == 0 && GameBridge.IsPlayerEntity(entity))
+                SetOwner(entity.ID, owner);
+
+            return owner;
+        }
+
         public static void SetOwner(ulong entityId, byte playerId)
         {
             if (entityId == 0UL || (entityId & 0x8000000000000000UL) != 0)

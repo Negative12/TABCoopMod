@@ -99,6 +99,8 @@ namespace TABCoopMod.UI
 
         // Top identity & shared view containers
         private static DXTextObject _identityLabel;
+        private static DXTextObject _connLine1;
+        private static DXTextObject _connLine2;
         private static DXObject _entryView;
         private static DXObject _roomView;
 
@@ -435,14 +437,22 @@ namespace TABCoopMod.UI
             ModLogger.Info($"[CoopLobbyWindow] Layout OContent size: {cw:F1}x{ch:F1} (Unit={u:F3})");
 
             // All children inside OContent use parent-relative coordinates (never AreaInPixels!).
-            _identityLabel = CreateTextBox(0f, 0f, cw, 28f * u, 11.5f * u, FontStyle.Bold, Color.Khaki,
+            _identityLabel = CreateTextBox(0f, 0f, cw, 22f * u, 11f * u, FontStyle.Bold, Color.Khaki,
                 ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
             content.AddObject(_identityLabel);
 
-            var divider = CreateSolidBox(0f, 32f * u, cw, Math.Max(1f, 2f * u), BorderGoldColor, Color.Transparent, 0f);
+            _connLine1 = CreateTextBox(0f, 22f * u, cw, 18f * u, 9.5f * u, FontStyle.Regular, Color.LightSteelBlue,
+                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
+            content.AddObject(_connLine1);
+
+            _connLine2 = CreateTextBox(0f, 40f * u, cw, 18f * u, 9.5f * u, FontStyle.Regular, Color.LightSteelBlue,
+                ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
+            content.AddObject(_connLine2);
+
+            var divider = CreateSolidBox(0f, 60f * u, cw, Math.Max(1f, 2f * u), BorderGoldColor, Color.Transparent, 0f);
             content.AddObject(divider);
 
-            float bodyY = 44f * u;
+            float bodyY = 66f * u;
             float bodyH = ch - bodyY;
             float gap = 28f * u;
             float leftW = cw * 0.54f;
@@ -845,8 +855,7 @@ namespace TABCoopMod.UI
             if (_window == null || _isClosing) return;
 
             bool inSession = CoopSessionManager.IsSessionActive;
-            SetDynamicText(_identityLabel, BuildIdentityLine(inSession),
-                textColor: inSession ? Color.SpringGreen : Color.Khaki);
+            RefreshHeaderAndConnections(inSession);
 
             _entryView.Visible = !inSession;
             _roomView.Visible = inSession;
@@ -1297,7 +1306,7 @@ namespace TABCoopMod.UI
                 borderColor: meReady ? Color.SpringGreen : Color.Orange);
         }
 
-        private static string BuildIdentityLine(bool inSession)
+        private static void RefreshHeaderAndConnections(bool inSession)
         {
             string persona = "本地玩家";
             string steamTag = "未连接 Steam";
@@ -1311,18 +1320,86 @@ namespace TABCoopMod.UI
 
             if (!inSession)
             {
-                return $"当前玩家: {persona} ({steamTag})   |   状态: 未加入房间";
+                SetDynamicText(_identityLabel, $"当前玩家: {persona} ({steamTag})   |   状态: 未加入房间",
+                    textColor: Color.Khaki);
+                if (_connLine1 != null) _connLine1.Visible = false;
+                if (_connLine2 != null) _connLine2.Visible = false;
+                return;
             }
 
-            string mode = CoopSessionManager.IsLocalLoopbackSession ? "本地回环" : "Steam P2P";
-            var diag = CoopSessionManager.Transport as ITransportDiagnostics;
-            string pathText = diag != null ? diag.ActivePathSummary : mode;
-            double showRtt = (diag != null && diag.ActiveDirectRttMs > 0.0)
-                ? diag.ActiveDirectRttMs
-                : CoopSessionManager.CurrentSmoothedRttMs;
-            string rttText = showRtt > 0.0 ? $"{showRtt:F0}ms" : "--";
             string role = CoopSessionManager.Transport.IsHost ? "房主 P1" : $"客机 P{CoopSessionManager.Transport.LocalPlayerId}";
-            return $"当前玩家: {persona}  |  角色: {role}  |  链路: {pathText}  |  RTT: {rttText}";
+            var snapshots = CoopSessionManager.GetRoomPeerConnectionSnapshots();
+            int delayTicks = CoopSessionManager.InputDelayTicks;
+            int delayMs = (int)Math.Round(delayTicks * Determinism.LockstepClock.MsPerLogicTick);
+
+            if (snapshots.Count == 0)
+            {
+                SetDynamicText(_identityLabel,
+                    $"当前玩家: {persona}  |  角色: {role}  |  模式: {(CoopSessionManager.IsLocalLoopbackSession ? "本地回环" : "Steam P2P")}",
+                    textColor: Color.SpringGreen);
+                if (_connLine1 != null)
+                {
+                    _connLine1.Visible = true;
+                    SetDynamicText(_connLine1, "链路状态: 等待客机加入后探测直连/中继方式与推算实际延迟...",
+                        textColor: Color.Silver);
+                }
+                if (_connLine2 != null) _connLine2.Visible = false;
+                return;
+            }
+
+            string roomSyncNote = snapshots.Count >= 2 ? $"{delayTicks}t ({delayMs}ms, 3人协同)" : $"{delayTicks}t ({delayMs}ms)";
+            SetDynamicText(_identityLabel,
+                $"当前玩家: {persona}  |  角色: {role}  |  全房同步缓冲: {roomSyncNote}",
+                textColor: Color.SpringGreen);
+
+            if (_connLine1 != null)
+            {
+                _connLine1.Visible = true;
+                FormatConnectionLine(_connLine1, snapshots[0], snapshots.Count);
+            }
+            if (_connLine2 != null)
+            {
+                if (snapshots.Count >= 2)
+                {
+                    _connLine2.Visible = true;
+                    FormatConnectionLine(_connLine2, snapshots[1], snapshots.Count);
+                }
+                else
+                {
+                    _connLine2.Visible = false;
+                }
+            }
+        }
+
+        private static void FormatConnectionLine(DXTextObject target, CoopSessionManager.RoomPeerLinkSnapshot snap, int clientCount)
+        {
+            string pathZh = TranslatePathSummary(snap.PathSummary);
+            string delayText = snap.EstimatedActualDelayMs >= 0.0
+                ? $"推算实际延迟: ~{snap.EstimatedActualDelayMs:F0}ms (链路RTT {snap.RawRttMs:F0}ms)"
+                : "推算实际延迟: 探测中...";
+
+            Color color = snap.EstimatedActualDelayMs < 0.0
+                ? Color.LightSteelBlue
+                : (snap.EstimatedActualDelayMs <= 115.0
+                    ? Color.SpringGreen
+                    : (snap.EstimatedActualDelayMs <= 210.0 ? Color.Gold : Color.OrangeRed));
+
+            string text = $"  P{snap.PlayerId} ({snap.PlayerName}) ↔ 房主: {pathZh}  |  {delayText}";
+            SetDynamicText(target, text, textColor: color);
+        }
+
+        private static string TranslatePathSummary(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "探测中";
+            if (raw.StartsWith("Direct ", StringComparison.Ordinal))
+                return "UDP直连 (" + raw.Substring("Direct ".Length) + ")";
+            if (raw == "Steam Relay") return "Steam 中继 (Relay)";
+            if (raw == "Steam Direct") return "Steam 直连 (P2P)";
+            if (raw == "Steam Connecting") return "Steam 连接中...";
+            if (raw == "Steam Idle") return "Steam 待握手";
+            if (raw.StartsWith("Local Loopback", StringComparison.Ordinal))
+                return raw.Replace("Local Loopback", "本地回环");
+            return raw;
         }
 
         private static void OpenHostSingleplayerMenu(string hostHint, Func<bool> openMenuAction, bool rollSeed)

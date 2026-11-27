@@ -122,14 +122,55 @@ namespace TABCoopMod.Sync
         private const int WidePosReloadStreak = 10;          // ~15-20s wide residual drift after corrections
         private const double StructuralResyncCooldownMs = 90000.0;
         private const double LongPeriodRealignMs = 300000.0; // 5 min continuous residual divergence
-        private static int _consecutiveEconMismatch;
-        private static int _consecutiveAsyncEconMismatch;
-        private static int _consecutiveStructuralMismatch;
-        private static int _consecutiveMissingOnClient;
-        private static int _consecutiveSubCoarsePosDrift;
-        private static int _lastClientMissingOnClient;
-        private static int _lastClientMissingOnHost;
-        private static double _divergedSinceTicks = -1.0;
+
+        private sealed class PeerDesyncStreakState
+        {
+            public int ConsecutiveProjOnlyMismatch;
+            public int ConsecutiveHardMismatch;
+            public int ConsecutivePosExceeded;
+            public int ConsecutiveEconMismatch;
+            public int ConsecutiveAsyncEconMismatch;
+            public int ConsecutiveStructuralMismatch;
+            public int ConsecutiveMissingOnClient;
+            public int ConsecutiveSubCoarsePosDrift;
+            public int LastClientMissingOnClient;
+            public int LastClientMissingOnHost;
+            public double DivergedSinceTicks = -1.0;
+
+            public void Reset()
+            {
+                ConsecutiveProjOnlyMismatch = 0;
+                ConsecutiveHardMismatch = 0;
+                ConsecutivePosExceeded = 0;
+                ConsecutiveEconMismatch = 0;
+                ConsecutiveAsyncEconMismatch = 0;
+                ConsecutiveStructuralMismatch = 0;
+                ConsecutiveMissingOnClient = 0;
+                ConsecutiveSubCoarsePosDrift = 0;
+                LastClientMissingOnClient = 0;
+                LastClientMissingOnHost = 0;
+                DivergedSinceTicks = -1.0;
+            }
+        }
+
+        private static readonly Dictionary<byte, PeerDesyncStreakState> _peerDesyncStates =
+            new Dictionary<byte, PeerDesyncStreakState>();
+
+        private static PeerDesyncStreakState GetOrCreatePeerDesyncState(byte peerId)
+        {
+            if (!_peerDesyncStates.TryGetValue(peerId, out var st))
+            {
+                st = new PeerDesyncStreakState();
+                _peerDesyncStates[peerId] = st;
+            }
+            return st;
+        }
+
+        private static void ResetPeerDesyncState(byte peerId)
+        {
+            if (_peerDesyncStates.TryGetValue(peerId, out var st))
+                st.Reset();
+        }
 
         // Periodic log throttling (verbose mode bypasses via ModLogger.IsVerbose)
         private const double ChecksumSummaryIntervalMs = 30000.0;
@@ -145,18 +186,17 @@ namespace TABCoopMod.Sync
 
         private static void ResetTieredResyncState()
         {
-            _consecutiveEconMismatch = 0;
-            _consecutiveAsyncEconMismatch = 0;
-            _consecutiveStructuralMismatch = 0;
-            _consecutiveMissingOnClient = 0;
-            _consecutiveSubCoarsePosDrift = 0;
-            _lastClientMissingOnClient = 0;
-            _lastClientMissingOnHost = 0;
-            _divergedSinceTicks = -1.0;
+            _peerDesyncStates.Clear();
         }
+
+        private static double GetPeerTimestamp(Dictionary<byte, double> map, byte peerId)
+        {
+            return map.TryGetValue(peerId, out double v) ? v : -100000.0;
+        }
+
         private static double _lastAutoResyncTicks = -100000.0;
-        private static double _lastPosSyncSentTicks = -100000.0;
-        private static double _lastFullPosAlignSentTicks = -100000.0;
+        private static readonly Dictionary<byte, double> _peerLastPosSyncSentTicks = new Dictionary<byte, double>();
+        private static readonly Dictionary<byte, double> _peerLastFullPosAlignSentTicks = new Dictionary<byte, double>();
         private static readonly Dictionary<ulong, int> _lastEntityPosCorrectedTick = new Dictionary<ulong, int>();
         private static bool _desyncDumped;
 
@@ -182,6 +222,19 @@ namespace TABCoopMod.Sync
         public const int MaxInputDelayTicks = 4;
         public static int InputDelayTicks { get; private set; } = 1;
         public static double CurrentSmoothedRttMs { get; private set; }
+        public static double LocalRttToHostMs { get; private set; } = -1.0;
+
+        public sealed class RoomPeerLinkSnapshot
+        {
+            public byte PlayerId;
+            public string PlayerName;
+            public string PathSummary;
+            public double RawRttMs;
+            public double EstimatedActualDelayMs;
+        }
+
+        private static readonly Dictionary<byte, RoomPeerLinkSnapshot> _syncedRoomPeerLinks =
+            new Dictionary<byte, RoomPeerLinkSnapshot>();
         private static readonly SortedDictionary<int, List<NetCommand>> _pendingTurnCommands =
             new SortedDictionary<int, List<NetCommand>>();
         private static TurnInputTickGate _networkGate = new TurnInputTickGate();
@@ -211,6 +264,13 @@ namespace TABCoopMod.Sync
         private static bool _hostSnapshotReloadPending;
         private static bool _hostWaitingOwnReload;
         private static bool _clientSnapshotAckReceived;
+        private static readonly HashSet<byte> _clientSnapshotAckPeers = new HashSet<byte>();
+        private static bool _deferredSessionStartPending;
+        private static int _deferredSessionStartTick;
+        private static int _deferredSessionStartSeed;
+        private static long _deferredSessionStartIdCounter;
+        private static byte _deferredSessionStartHostDelay;
+        private static byte _deferredSessionStartProtoFlags;
         private static bool _hasEnteredSyncedLevelInMatch;
         private static ulong[][] _pendingResyncSelectionGroups;
         public static bool IsHostSnapshotReloadPending => _hostSnapshotReloadPending;
@@ -315,9 +375,20 @@ namespace TABCoopMod.Sync
             public List<byte[]> Chunks;
         }
 
+        private struct FactionEconEntry
+        {
+            public byte PlayerId;
+            public int Gold, Wood, Stone, Iron, Oil;
+            public int FoodReserved, WorkersReserved, EnergyReserved;
+            public int WoodProdRes, StoneProdRes, IronProdRes, OilProdRes;
+        }
+
         private struct EconSnapshot
         {
             public int Gold, Wood, Stone, Iron, Oil;
+            public int FoodReserved, WorkersReserved, EnergyReserved;
+            public int WoodProdRes, StoneProdRes, IronProdRes, OilProdRes;
+            public FactionEconEntry[] Factions;
         }
 
         private struct StructSampleMeta
@@ -388,6 +459,9 @@ namespace TABCoopMod.Sync
             public int LifeDiffCount, MissingOnHost, MissingOnClient;
             public bool ApplyEconCorrection;
             public int DeltaGold, DeltaWood, DeltaStone, DeltaIron, DeltaOil;
+            public int DeltaFoodRes, DeltaWorkRes, DeltaEngRes;
+            public int DeltaWoodProdRes, DeltaStoneProdRes, DeltaIronProdRes, DeltaOilProdRes;
+            public FactionEconEntry[] MultiFactionEconDeltas;
             public List<ProdQueueFixItem> ProdQueueFixes;
             public List<StructSampleMeta> StructBuilds;
             public List<ulong> StructDestroys;
@@ -408,14 +482,11 @@ namespace TABCoopMod.Sync
         private static readonly Dictionary<ulong, UnitOwnershipEntry> _unitOwnership =
             new Dictionary<ulong, UnitOwnershipEntry>();
         private static volatile int _asyncGeneration;
-        private static int _posSyncBuildInFlight;
+        private static readonly HashSet<byte> _posSyncBuildInFlightPeers = new HashSet<byte>();
 
         private static double _lastCursorBroadcastTicks;
         private static int _lastCheckedSimTick = -1;
         private static bool _firstChecksumPosDumped;
-        private static int _consecutiveProjOnlyMismatch;
-        private static int _consecutiveHardMismatch;
-        private static int _consecutivePosExceeded;
         private static int _verifiedChecksumCycles;
         private static bool _econEarlyBypassUsed;
         private static bool _driftOnsetLogged;
@@ -578,7 +649,7 @@ namespace TABCoopMod.Sync
         private static void ResetSyncTrackingState()
         {
             _asyncGeneration++;
-            Interlocked.Exchange(ref _posSyncBuildInFlight, 0);
+            lock (_posSyncBuildInFlightPeers) _posSyncBuildInFlightPeers.Clear();
             _lastSentCursorWorldPos = new PointF(-9999f, -9999f);
             _lastSentCamArea = RectangleF.Empty;
             _lastCursorCamPacketMs = -100000.0;
@@ -592,11 +663,9 @@ namespace TABCoopMod.Sync
                 _clientPrevDriftSamples = null;
             }
             _lastCheckedSimTick = -1;
-            _lastFullPosAlignSentTicks = -100000.0;
+            _peerLastPosSyncSentTicks.Clear();
+            _peerLastFullPosAlignSentTicks.Clear();
             _lastEntityPosCorrectedTick.Clear();
-            _consecutiveProjOnlyMismatch = 0;
-            _consecutiveHardMismatch = 0;
-            _consecutivePosExceeded = 0;
             _verifiedChecksumCycles = 0;
             _econEarlyBypassUsed = false;
             _driftOnsetLogged = false;
@@ -1002,11 +1071,14 @@ namespace TABCoopMod.Sync
             _hostSymmetricQueue.Clear();
             _pendingTurnCommands.Clear();
             UI.MultiFactionPanel.Reset();
+            UI.PerfOverlayRenderer.Reset();
             UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
             InputDelayTicks = MinInputDelayTicks;
             CurrentSmoothedRttMs = 0.0;
+            LocalRttToHostMs = -1.0;
+            _syncedRoomPeerLinks.Clear();
             _lastRttProbeTicks = -100000.0;
             _lastDelayAdjustTicks = -100000.0;
             _peerSmoothedRttMs.Clear();
@@ -1021,11 +1093,13 @@ namespace TABCoopMod.Sync
             _hostSnapshotReloadPending = false;
             _hostWaitingOwnReload = false;
             _clientSnapshotAckReceived = false;
+            _clientSnapshotAckPeers.Clear();
+            _deferredSessionStartPending = false;
             _hasEnteredSyncedLevelInMatch = false;
             _pendingResyncSelectionGroups = null;
             _lastAutoResyncTicks = -100000.0;
-            _lastPosSyncSentTicks = -100000.0;
-            _lastFullPosAlignSentTicks = -100000.0;
+            _peerLastPosSyncSentTicks.Clear();
+            _peerLastFullPosAlignSentTicks.Clear();
             _lastEntityPosCorrectedTick.Clear();
             _pendingHostSnapshotExport = false;
             _pendingClientSnapshotLoadPath = null;
@@ -1084,11 +1158,14 @@ namespace TABCoopMod.Sync
             _hostSymmetricQueue.Clear();
             _pendingTurnCommands.Clear();
             UI.MultiFactionPanel.Reset();
+            UI.PerfOverlayRenderer.Reset();
             UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
             InputDelayTicks = MinInputDelayTicks;
             CurrentSmoothedRttMs = 0.0;
+            LocalRttToHostMs = -1.0;
+            _syncedRoomPeerLinks.Clear();
             _lastRttProbeTicks = -100000.0;
             _lastDelayAdjustTicks = -100000.0;
             _peerSmoothedRttMs.Clear();
@@ -1103,8 +1180,11 @@ namespace TABCoopMod.Sync
             _hostSnapshotReloadPending = false;
             _hostWaitingOwnReload = false;
             _clientSnapshotAckReceived = false;
+            _clientSnapshotAckPeers.Clear();
+            _deferredSessionStartPending = false;
             _hasEnteredSyncedLevelInMatch = false;
             _pendingResyncSelectionGroups = null;
+            LockstepClock.ClearLoadingFlag();
             FactionOwnershipTracker.Reset();
             _pendingHostSnapshotExport = false;
             _pendingClientSnapshotLoadPath = null;
@@ -1244,8 +1324,13 @@ namespace TABCoopMod.Sync
                 AllyStates.Remove(playerId);
                 _peerSmoothedRttMs.Remove(playerId);
                 _peerRttSampleTicks.Remove(playerId);
+                _syncedRoomPeerLinks.Remove(playerId);
                 _peerLastSimTick.Remove(playerId);
                 _peerLastSimTickWallMs.Remove(playerId);
+                _peerDesyncStates.Remove(playerId);
+                _peerLastPosSyncSentTicks.Remove(playerId);
+                _peerLastFullPosAlignSentTicks.Remove(playerId);
+                _clientSnapshotAckPeers.Remove(playerId);
                 _lobbyRoster.RemoveAll(p => p.PlayerId == playerId);
                 if (Transport != null && Transport.IsHost)
                     UpdateAdaptiveInputDelay();
@@ -1255,6 +1340,11 @@ namespace TABCoopMod.Sync
                     BroadcastLobbyRoster();
                     GameBridge.ShowTopBanner($"Player {playerId} Disconnected", Color.OrangeRed, 3000);
                     LobbyStateChanged?.Invoke();
+                    if (_awaitingClientSnapshotAck && AreAllConnectedClientsSnapshotAcked())
+                    {
+                        _clientSnapshotAckReceived = true;
+                        TryCompleteHostSyncBarrier();
+                    }
                 }
                 else if (Transport != null && !Transport.IsHost)
                 {
@@ -1401,9 +1491,6 @@ namespace TABCoopMod.Sync
                 _tickPosCache.Clear();
                 _tickPosCacheOrder.Clear();
                 _posSyncIncoming.Clear();
-                _consecutiveProjOnlyMismatch = 0;
-                _consecutiveHardMismatch = 0;
-                _consecutivePosExceeded = 0;
                 ResetTieredResyncState();
                 _lastCheckedSimTick = -1;
                 _pendingTurnCommands.Clear();
@@ -1420,6 +1507,7 @@ namespace TABCoopMod.Sync
                     _hostSnapshotReloadPending = false;
                     _hostWaitingOwnReload = false;
                     _clientSnapshotAckReceived = false;
+                    _clientSnapshotAckPeers.Clear();
                     return;
                 }
 
@@ -1432,6 +1520,7 @@ namespace TABCoopMod.Sync
                 _hostSnapshotReloadPending = true;
                 _hostWaitingOwnReload = true;
                 _clientSnapshotAckReceived = false;
+                _clientSnapshotAckPeers.Clear();
                 _awaitingClientSnapshotAck = false;
                 _awaitingClientAckStartTicks = -1.0;
 
@@ -1487,6 +1576,8 @@ namespace TABCoopMod.Sync
         {
             if (savBytes == null || Transport == null || !Transport.IsHost) return;
             int totalChunks = (savBytes.Length + ChunkSizeBytes - 1) / ChunkSizeBytes;
+            _clientSnapshotAckReceived = false;
+            _clientSnapshotAckPeers.Clear();
             _awaitingClientSnapshotAck = true;
             _awaitingClientAckStartTicks = DXHelper_Environment.Ticks;
             ModLogger.InfoImmediate($"[CoopSessionManager] Broadcasting Snapshot ({savBytes.Length:N0} bytes in {totalChunks} chunks, seed={syncSeed}, idCounter={idCounter})...");
@@ -1513,15 +1604,28 @@ namespace TABCoopMod.Sync
             }
         }
 
+        private static bool AreAllConnectedClientsSnapshotAcked()
+        {
+            if (Transport == null || !Transport.IsHost) return false;
+            foreach (var p in GetEffectivePeers())
+            {
+                if (p.PlayerId == 1) continue;
+                if (!_clientSnapshotAckPeers.Contains(p.PlayerId))
+                    return false;
+            }
+            return true;
+        }
+
         private static void TryCompleteHostSyncBarrier()
         {
             if (Transport == null || !Transport.IsHost) return;
-            if (_hostWaitingOwnReload || !_clientSnapshotAckReceived) return;
+            if (_hostWaitingOwnReload || !_clientSnapshotAckReceived || !AreAllConnectedClientsSnapshotAcked()) return;
 
             _hostSnapshotReloadPending = false;
             _awaitingClientSnapshotAck = false;
             _awaitingClientAckStartTicks = -1.0;
             _clientSnapshotAckReceived = false;
+            _clientSnapshotAckPeers.Clear();
 
             ResetSyncTrackingState();
 
@@ -1542,6 +1646,16 @@ namespace TABCoopMod.Sync
                 w.Write(protoFlags);
             });
             ModLogger.InfoImmediate($"[CoopSessionManager] Host+Client barrier satisfied; entered synced level and sent SessionStart at tick={startTick}, seed={CurrentSessionSeed}, inputDelay={InputDelayTicks}!");
+        }
+
+        private static void ApplySessionStart(int startTick, int seed, long idCounter, byte hostDelay, byte protoFlags)
+        {
+            ResetSyncTrackingState();
+            _useCompactWireProtocol = (protoFlags & SessionStartProtoFlag_CompactBinary) != 0;
+            SyncedAdaptivePhysicsIterations = (protoFlags & SessionStartProtoFlag_AdaptivePhysIter) != 0;
+            InputDelayTicks = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, (int)hostDelay));
+            EnterSyncedLevel();
+            ModLogger.InfoImmediate($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, inputDelay={InputDelayTicks}, compact={_useCompactWireProtocol}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
         }
 
         private static void OnLocalCommandCaptured(NetCommand cmd)
@@ -1704,7 +1818,6 @@ namespace TABCoopMod.Sync
                 // Anchor resync cooldown AFTER in-game reload finishes so export/transfer/InitLevel time
                 // never eats up the cooldown window and triggers a 10-20s reload loop.
                 _lastAutoResyncTicks = DXHelper_Environment.Ticks;
-                _consecutivePosExceeded = 0;
                 ResetTieredResyncState();
             }
 
@@ -2009,6 +2122,22 @@ namespace TABCoopMod.Sync
                 w.Write(clientTick);
             });
             ModLogger.Info($"[CoopSessionManager] Client finished loading snapshot at tick={clientTick}; sent SnapshotLoadedAck and waiting for SessionStart. {GameBridge.GetHudDiagSummary()}");
+            if (_deferredSessionStartPending)
+            {
+                _deferredSessionStartPending = false;
+                ModLogger.Info($"[CoopSessionManager] Applying deferred SessionStart (tick={_deferredSessionStartTick}) now that local snapshot load is complete.");
+                ApplySessionStart(
+                    _deferredSessionStartTick,
+                    _deferredSessionStartSeed,
+                    _deferredSessionStartIdCounter,
+                    _deferredSessionStartHostDelay,
+                    _deferredSessionStartProtoFlags);
+            }
+        }
+
+        internal static void ClearInSyncedLevelForNewLoad()
+        {
+            IsInSyncedLevel = false;
         }
 
         /// <summary>Records the snapshot seed so the post-load calibration uses the Host's seed.</summary>
@@ -2070,6 +2199,7 @@ namespace TABCoopMod.Sync
             CoopLobbyWindow.Tick();
             UI.MultiFactionPanel.Tick();
             UI.AllyOverlayRenderer.UpdateUnitFactionRings();
+            UI.PerfOverlayRenderer.Tick();
 
             if (!string.IsNullOrEmpty(_pendingVersionMismatchAlert)
                 && !TestHarnessConfig.Enabled
@@ -2145,6 +2275,7 @@ namespace TABCoopMod.Sync
                     _awaitingClientSnapshotAck = false;
                     _awaitingClientAckStartTicks = -1.0;
                     _clientSnapshotAckReceived = false;
+                    _clientSnapshotAckPeers.Clear();
                     EnterSyncedLevel();
                 }
                 else
@@ -2535,6 +2666,183 @@ namespace TABCoopMod.Sync
             });
         }
 
+        public static double ComputeEstimatedActualDelayMs(double linkRttMs, int inputDelayTicks, int remoteClientCount)
+        {
+            if (linkRttMs < 0.0 || double.IsNaN(linkRttMs) || double.IsInfinity(linkRttMs))
+                return -1.0;
+            double inputDelayMs = Math.Max(MinInputDelayTicks, inputDelayTicks) * LockstepClock.MsPerLogicTick;
+            double halfTickAlignMs = LockstepClock.MsPerLogicTick * 0.5;
+            double multiPeerOverheadMs = remoteClientCount > 1 ? (remoteClientCount - 1) * 12.0 : 0.0;
+            return linkRttMs + inputDelayMs + halfTickAlignMs + multiPeerOverheadMs;
+        }
+
+        public static double GetLocalEffectiveRttToHostMs()
+        {
+            if (!IsSessionActive || Transport == null) return -1.0;
+            if (Transport.IsHost) return 0.0;
+            if (Transport is ITransportDiagnostics diag && diag.TryGetPeerDiagnostics(1, out var pDiag) && pDiag.IsDirectUdp && pDiag.DirectRttMs > 0.0)
+                return pDiag.DirectRttMs;
+            if (LocalRttToHostMs >= 0.0)
+                return LocalRttToHostMs;
+            return CurrentSmoothedRttMs > 0.0 ? CurrentSmoothedRttMs : -1.0;
+        }
+
+        public static string ClassifyTpsBottleneck(double mspt, double tps, double targetTps, double avgFrameMs)
+        {
+            if (targetTps <= 0.1 || tps >= targetTps * 0.90)
+                return string.Empty;
+            if (DeterministicSandboxPatches.SecondsSinceLastSimPauseOrLoad < 1.5)
+                return string.Empty;
+
+            double tickBudgetMs = 1000.0 / Math.Max(1.0, targetTps);
+            if (mspt >= tickBudgetMs * 0.85 || (avgFrameMs >= 65.0 && mspt >= 14.0))
+                return "算力瓶颈";
+
+            if (!IsSessionActive || !IsInSyncedLevel || Transport == null)
+                return "算力瓶颈";
+
+            if (Transport.IsHost)
+            {
+                GetHostPaceAdjustment(out double paceMult, out int maxTicks);
+                if (paceMult > 1.05 || maxTicks == 0)
+                {
+                    if (TryGetSlowestClientLagTicks(out int maxLagTicks))
+                    {
+                        double effRtt = CurrentSmoothedRttMs > 0.0 ? CurrentSmoothedRttMs : 0.0;
+                        double expectedNetLagTicks = (effRtt / LockstepClock.MsPerLogicTick) + InputDelayTicks + 2.5;
+                        if (effRtt >= 80.0 && maxLagTicks <= expectedNetLagTicks)
+                            return "网络瓶颈";
+                        return "队友慢";
+                    }
+                    return CurrentSmoothedRttMs >= 80.0 ? "网络瓶颈" : "队友慢";
+                }
+                if (avgFrameMs >= 55.0)
+                    return "算力瓶颈";
+                return CurrentSmoothedRttMs >= 80.0 ? "网络瓶颈" : "算力瓶颈";
+            }
+
+            long gateBlockTs = Volatile.Read(ref DeterministicSandboxPatches.LastClientNetGateBlockTs);
+            double sinceGateBlockMs = gateBlockTs > 0L
+                ? (Stopwatch.GetTimestamp() - gateBlockTs) * 1000.0 / Stopwatch.Frequency
+                : 99999.0;
+            double localRtt = GetLocalEffectiveRttToHostMs();
+            double roomRtt = Math.Max(localRtt, CurrentSmoothedRttMs);
+            if (mspt < tickBudgetMs * 0.65 && (sinceGateBlockMs <= 1500.0 || roomRtt >= 70.0 || avgFrameMs < 55.0))
+                return "网络瓶颈";
+
+            return "算力瓶颈";
+        }
+
+        private static string ResolveHostSidePeerPath(byte peerId)
+        {
+            if (Transport is ITransportDiagnostics diag && diag.TryGetPeerDiagnostics(peerId, out var pDiag) && !string.IsNullOrEmpty(pDiag.PathSummary))
+                return pDiag.PathSummary;
+            return IsLocalLoopbackSession ? "Local Loopback (127.0.0.1)" : "Steam P2P";
+        }
+
+        private static double ResolveHostSidePeerRtt(byte peerId, double now)
+        {
+            if (Transport is ITransportDiagnostics diag && diag.TryGetPeerDiagnostics(peerId, out var pDiag)
+                && pDiag.IsDirectUdp && pDiag.DirectRttMs > 0.0)
+            {
+                return pDiag.DirectRttMs;
+            }
+            if (_peerSmoothedRttMs.TryGetValue(peerId, out double rtt)
+                && _peerRttSampleTicks.TryGetValue(peerId, out double sampleTs)
+                && (now - sampleTs <= RttStalePeerMs || now < sampleTs))
+            {
+                return rtt;
+            }
+            return -1.0;
+        }
+
+        private static List<RoomPeerLinkSnapshot> RefreshHostPeerLinkSnapshots()
+        {
+            var peers = GetEffectivePeers();
+            var remotePeers = new List<PeerInfo>(2);
+            for (int i = 0; i < peers.Count; i++)
+            {
+                if (peers[i] != null && peers[i].PlayerId != 1)
+                    remotePeers.Add(peers[i]);
+            }
+            remotePeers.Sort((a, b) => a.PlayerId.CompareTo(b.PlayerId));
+
+            double now = DXHelper_Environment.Ticks;
+            int clientCount = remotePeers.Count;
+            var result = new List<RoomPeerLinkSnapshot>(clientCount);
+            _syncedRoomPeerLinks.Clear();
+
+            for (int i = 0; i < remotePeers.Count; i++)
+            {
+                var p = remotePeers[i];
+                string path = ResolveHostSidePeerPath(p.PlayerId);
+                double rawRtt = ResolveHostSidePeerRtt(p.PlayerId, now);
+                double est = ComputeEstimatedActualDelayMs(rawRtt, InputDelayTicks, clientCount);
+                var snap = new RoomPeerLinkSnapshot
+                {
+                    PlayerId = p.PlayerId,
+                    PlayerName = p.PlayerName ?? $"P{p.PlayerId}",
+                    PathSummary = path,
+                    RawRttMs = rawRtt,
+                    EstimatedActualDelayMs = est
+                };
+                _syncedRoomPeerLinks[p.PlayerId] = snap;
+                result.Add(snap);
+            }
+            return result;
+        }
+
+        public static List<RoomPeerLinkSnapshot> GetRoomPeerConnectionSnapshots()
+        {
+            if (!IsSessionActive || Transport == null)
+                return new List<RoomPeerLinkSnapshot>();
+
+            if (Transport.IsHost)
+                return RefreshHostPeerLinkSnapshots();
+
+            var peers = GetEffectivePeers();
+            var remotePeers = new List<PeerInfo>(2);
+            for (int i = 0; i < peers.Count; i++)
+            {
+                if (peers[i] != null && peers[i].PlayerId != 1)
+                    remotePeers.Add(peers[i]);
+            }
+            remotePeers.Sort((a, b) => a.PlayerId.CompareTo(b.PlayerId));
+
+            int clientCount = remotePeers.Count;
+            var result = new List<RoomPeerLinkSnapshot>(clientCount);
+            byte localId = Transport.LocalPlayerId;
+            for (int i = 0; i < remotePeers.Count; i++)
+            {
+                var p = remotePeers[i];
+                _syncedRoomPeerLinks.TryGetValue(p.PlayerId, out var cached);
+
+                string path = cached?.PathSummary;
+                double rawRtt = cached != null ? cached.RawRttMs : -1.0;
+
+                if (p.PlayerId == localId && Transport is ITransportDiagnostics diag && diag.TryGetPeerDiagnostics(1, out var localDiag))
+                {
+                    if (!string.IsNullOrEmpty(localDiag.PathSummary))
+                        path = localDiag.PathSummary;
+                    if (localDiag.IsDirectUdp && localDiag.DirectRttMs > 0.0)
+                        rawRtt = localDiag.DirectRttMs;
+                }
+                if (string.IsNullOrEmpty(path))
+                    path = IsLocalLoopbackSession ? "Local Loopback (127.0.0.1)" : "Steam Connecting";
+
+                double est = ComputeEstimatedActualDelayMs(rawRtt, InputDelayTicks, clientCount);
+                result.Add(new RoomPeerLinkSnapshot
+                {
+                    PlayerId = p.PlayerId,
+                    PlayerName = p.PlayerName ?? $"P{p.PlayerId}",
+                    PathSummary = path,
+                    RawRttMs = rawRtt,
+                    EstimatedActualDelayMs = est
+                });
+            }
+            return result;
+        }
+
         private static void ProbeNetworkRtt()
         {
             if (Transport == null || !Transport.IsHost || !HasJoinedClient) return;
@@ -2551,11 +2859,21 @@ namespace TABCoopMod.Sync
             uint seq = ++_rttPingSeq;
             long timestamp = Stopwatch.GetTimestamp();
             float hostSmoothedRtt = (float)CurrentSmoothedRttMs;
+            var linkSnapshots = RefreshHostPeerLinkSnapshots();
             Transport.Broadcast(SendChannel.UnreliableSequenced, PacketType.RttPing, w =>
             {
                 w.Write(seq);
                 w.Write(timestamp);
                 w.Write(hostSmoothedRtt);
+                w.Write((byte)InputDelayTicks);
+                w.Write((byte)linkSnapshots.Count);
+                for (int i = 0; i < linkSnapshots.Count; i++)
+                {
+                    var s = linkSnapshots[i];
+                    w.Write(s.PlayerId);
+                    w.Write(s.PathSummary ?? string.Empty);
+                    w.Write((float)s.RawRttMs);
+                }
             });
         }
 
@@ -2564,33 +2882,40 @@ namespace TABCoopMod.Sync
             if (Transport == null || !Transport.IsHost) return;
 
             double now = DXHelper_Environment.Ticks;
-            double maxRtt = -1.0;
+            double maxMainRtt = -1.0;
+            double maxEffectiveDelayRtt = -1.0;
+            var diag = Transport as ITransportDiagnostics;
+
             foreach (var p in GetEffectivePeers())
             {
                 if (p.PlayerId == 1) continue;
+                double mainRtt = -1.0;
                 if (_peerSmoothedRttMs.TryGetValue(p.PlayerId, out double rtt)
                     && _peerRttSampleTicks.TryGetValue(p.PlayerId, out double sampleTs)
                     && (now - sampleTs <= RttStalePeerMs || now < sampleTs))
                 {
-                    if (rtt > maxRtt) maxRtt = rtt;
+                    mainRtt = rtt;
+                    if (rtt > maxMainRtt) maxMainRtt = rtt;
                 }
+
+                double peerDelayRtt = mainRtt;
+                if (diag != null && diag.TryGetPeerDiagnostics(p.PlayerId, out var pDiag)
+                    && pDiag.IsDirectUdp && pDiag.DirectRttMs > 0.0)
+                {
+                    peerDelayRtt = pDiag.DirectRttMs;
+                }
+                if (peerDelayRtt > maxEffectiveDelayRtt)
+                    maxEffectiveDelayRtt = peerDelayRtt;
             }
 
-            if (maxRtt < 0.0)
+            if (maxMainRtt < 0.0 && maxEffectiveDelayRtt < 0.0)
             {
                 CurrentSmoothedRttMs = 0.0;
                 return;
             }
 
-            // When background DirectFastPath UDP is verified bidirectional, prefer its wire RTT for
-            // InputDelayTicks sizing so slower Client render frames never inflate InputDelayTicks 1 -> 2..3.
-            double effectiveDelayRtt = maxRtt;
-            if (Transport is ITransportDiagnostics diag && diag.ActiveDirectRttMs > 0.0)
-            {
-                effectiveDelayRtt = diag.ActiveDirectRttMs;
-            }
-
-            CurrentSmoothedRttMs = maxRtt;
+            double effectiveDelayRtt = maxEffectiveDelayRtt >= 0.0 ? maxEffectiveDelayRtt : maxMainRtt;
+            CurrentSmoothedRttMs = maxMainRtt >= 0.0 ? maxMainRtt : effectiveDelayRtt;
 
             int cur = InputDelayTicks;
             int desired = cur;
@@ -2607,7 +2932,7 @@ namespace TABCoopMod.Sync
 
             _lastDelayAdjustTicks = now;
             InputDelayTicks = desired;
-            ModLogger.Info($"[AdaptiveDelay] InputDelayTicks {cur} -> {desired} (delayRtt={effectiveDelayRtt:F1}ms, mainRtt={maxRtt:F1}ms)");
+            ModLogger.Info($"[AdaptiveDelay] InputDelayTicks {cur} -> {desired} (delayRtt={effectiveDelayRtt:F1}ms, mainRtt={CurrentSmoothedRttMs:F1}ms)");
         }
 
         private static void UpdatePeerSimTick(byte peerId, int simTick)
@@ -2995,9 +3320,13 @@ namespace TABCoopMod.Sync
                 {
                     if (!Transport.IsHost) break;
                     int clientTick = r.ReadInt32();
-                    _clientSnapshotAckReceived = true;
-                    ModLogger.Info($"[CoopSessionManager] Received SnapshotLoadedAck from Client({senderId}) at tick={clientTick} (hostWaitingOwnReload={_hostWaitingOwnReload}).");
-                    TryCompleteHostSyncBarrier();
+                    _clientSnapshotAckPeers.Add(senderId);
+                    bool allAcked = AreAllConnectedClientsSnapshotAcked();
+                    if (allAcked)
+                        _clientSnapshotAckReceived = true;
+                    ModLogger.Info($"[CoopSessionManager] Received SnapshotLoadedAck from Client({senderId}) at tick={clientTick} (hostWaitingOwnReload={_hostWaitingOwnReload}, allAcked={allAcked}, ackedCount={_clientSnapshotAckPeers.Count}).");
+                    if (allAcked)
+                        TryCompleteHostSyncBarrier();
                     break;
                 }
 
@@ -3009,12 +3338,18 @@ namespace TABCoopMod.Sync
                     long idCounter = r.ReadInt64();
                     byte hostDelay = r.BaseStream.Position < r.BaseStream.Length ? r.ReadByte() : (byte)MinInputDelayTicks;
                     byte protoFlags = r.BaseStream.Position < r.BaseStream.Length ? r.ReadByte() : (byte)0;
-                    ResetSyncTrackingState();
-                    _useCompactWireProtocol = (protoFlags & SessionStartProtoFlag_CompactBinary) != 0;
-                    SyncedAdaptivePhysicsIterations = (protoFlags & SessionStartProtoFlag_AdaptivePhysIter) != 0;
-                    InputDelayTicks = Math.Max(MinInputDelayTicks, Math.Min(MaxInputDelayTicks, (int)hostDelay));
-                    EnterSyncedLevel();
-                    ModLogger.InfoImmediate($"[CoopSessionManager] Received SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}, seed={seed}, idCounter={idCounter}, inputDelay={InputDelayTicks}, compact={_useCompactWireProtocol}, mode={EffectiveResyncMode}). Unpausing in lockstep!");
+                    if (_awaitingSnapshotLoad || LockstepClock.LoadingLevel || !string.IsNullOrEmpty(_pendingClientSnapshotLoadPath))
+                    {
+                        _deferredSessionStartPending = true;
+                        _deferredSessionStartTick = startTick;
+                        _deferredSessionStartSeed = seed;
+                        _deferredSessionStartIdCounter = idCounter;
+                        _deferredSessionStartHostDelay = hostDelay;
+                        _deferredSessionStartProtoFlags = protoFlags;
+                        ModLogger.InfoImmediate($"[CoopSessionManager] Deferred SessionStart from Host (tick={startTick}, localTick={DXGame.Current?.IAIterationInt ?? 0}) while local snapshot load completes.");
+                        break;
+                    }
+                    ApplySessionStart(startTick, seed, idCounter, hostDelay, protoFlags);
                     break;
                 }
 
@@ -3218,6 +3553,8 @@ namespace TABCoopMod.Sync
                     int missingOnHost = r.ReadInt32();
                     int missingOnClient = r.ReadInt32();
 
+                    var peerState = GetOrCreatePeerDesyncState(senderId);
+
                     // After host-authoritative snapping (<= MaxAsyncNudgeCells) a residual this wide means
                     // many units are on entirely different paths; only that, sustained, warrants a reload.
                     // Require at least 40 units drifted >0.5 cells (and >1% of compared units in huge swarms)
@@ -3227,23 +3564,23 @@ namespace TABCoopMod.Sync
                     bool significantPosExceed = exceededThreshold && (drifted5 >= 10 || drifted1 >= 25);
                     bool countsAsPosExceed = IsStrictMode ? (significantPosExceed || widePosDrift) : widePosDrift;
                     if (countsAsPosExceed)
-                        _consecutivePosExceeded++;
+                        peerState.ConsecutivePosExceeded++;
                     else
-                        _consecutivePosExceeded = 0;
+                        peerState.ConsecutivePosExceeded = 0;
 
                     if (missingOnClient >= 10)
-                        _consecutiveMissingOnClient++;
+                        peerState.ConsecutiveMissingOnClient++;
                     else
-                        _consecutiveMissingOnClient = 0;
+                        peerState.ConsecutiveMissingOnClient = 0;
 
-                    _lastClientMissingOnClient = missingOnClient;
-                    _lastClientMissingOnHost = missingOnHost;
+                    peerState.LastClientMissingOnClient = missingOnClient;
+                    peerState.LastClientMissingOnHost = missingOnHost;
 
                     double statsNow = DXHelper_Environment.Ticks;
                     bool notablePosDrift = killsApplied > 0 || lifeApplied > 0
                         || missingOnClient >= 5 || missingOnHost >= 5
                         || maxDelta >= 2.0f || exceededThreshold
-                        || _consecutiveMissingOnClient > 0 || _consecutivePosExceeded > 0
+                        || peerState.ConsecutiveMissingOnClient > 0 || peerState.ConsecutivePosExceeded > 0
                         || ModLogger.IsVerbose;
                     if (notablePosDrift || statsNow < _lastPosDriftStatsLogMs || (statsNow - _lastPosDriftStatsLogMs) >= PosAlignLogIntervalMs)
                     {
@@ -3251,14 +3588,14 @@ namespace TABCoopMod.Sync
                         ModLogger.Info(
                             $"[PosDriftStats] Client({senderId}) Tick={pTick} Applied={wasApplied}({appliedCount}/{comparedCount}) " +
                             $"Drifted(>0.001={drifted001}, >0.01={drifted01}, >0.1={drifted1}, >0.5={drifted5}) " +
-                            $"MaxDelta={maxDelta:F4} RmsDelta={rmsDelta:F4} Type={maxType} Exceeded={exceededThreshold} Streak={_consecutivePosExceeded} " +
-                            $"LifeDiff={lifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={missingOnHost} MissingOnClient={missingOnClient} MissingStreak={_consecutiveMissingOnClient}");
+                            $"MaxDelta={maxDelta:F4} RmsDelta={rmsDelta:F4} Type={maxType} Exceeded={exceededThreshold} Streak={peerState.ConsecutivePosExceeded} " +
+                            $"LifeDiff={lifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={missingOnHost} MissingOnClient={missingOnClient} MissingStreak={peerState.ConsecutiveMissingOnClient}");
                     }
 
-                    bool triggerMissingResync = !IsStrictMode && _consecutiveMissingOnClient >= MissingOnClientReloadStreak;
+                    bool triggerMissingResync = !IsStrictMode && peerState.ConsecutiveMissingOnClient >= MissingOnClientReloadStreak;
                     bool triggerPosResync = IsStrictMode
-                        ? (widePosDrift || _consecutivePosExceeded >= 3)
-                        : (_consecutivePosExceeded >= WidePosReloadStreak);
+                        ? (widePosDrift || peerState.ConsecutivePosExceeded >= 3)
+                        : (peerState.ConsecutivePosExceeded >= WidePosReloadStreak);
                     if ((triggerPosResync || triggerMissingResync) && EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport)
                     {
                         double now = DXHelper_Environment.Ticks;
@@ -3266,12 +3603,11 @@ namespace TABCoopMod.Sync
                         if (now - _lastAutoResyncTicks >= requiredCooldown)
                         {
                             _lastAutoResyncTicks = now;
-                            _consecutivePosExceeded = 0;
-                            _consecutiveMissingOnClient = 0;
+                            ResetTieredResyncState();
                             if (triggerMissingResync)
-                                ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after MissingOnClient at Tick {pTick} (MissingOnClient={missingOnClient}, MissingOnHost={missingOnHost}).");
+                                ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after MissingOnClient({senderId}) at Tick {pTick} (MissingOnClient={missingOnClient}, MissingOnHost={missingOnHost}).");
                             else
-                                ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after PosDrift at Tick {pTick} (MaxDelta={maxDelta:F4}, RmsDelta={rmsDelta:F4}, Drifted5={drifted5}).");
+                                ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after PosDrift({senderId}) at Tick {pTick} (MaxDelta={maxDelta:F4}, RmsDelta={rmsDelta:F4}, Drifted5={drifted5}).");
                             RequestSnapshotBroadcast();
                         }
                     }
@@ -3391,6 +3727,31 @@ namespace TABCoopMod.Sync
                         if (hostRtt >= 0f && hostRtt < 5000f)
                             CurrentSmoothedRttMs = hostRtt;
                     }
+                    if (r.BaseStream.Position + 2 <= r.BaseStream.Length)
+                    {
+                        byte hostInputDelay = r.ReadByte();
+                        byte linkCount = r.ReadByte();
+                        if (!IsInSyncedLevel && hostInputDelay >= MinInputDelayTicks && hostInputDelay <= MaxInputDelayTicks)
+                            InputDelayTicks = hostInputDelay;
+
+                        _syncedRoomPeerLinks.Clear();
+                        for (int i = 0; i < linkCount && r.BaseStream.Position < r.BaseStream.Length; i++)
+                        {
+                            byte pid = r.ReadByte();
+                            string path = r.ReadString();
+                            float rawRtt = r.ReadSingle();
+                            double est = ComputeEstimatedActualDelayMs(rawRtt, InputDelayTicks, linkCount);
+                            _syncedRoomPeerLinks[pid] = new RoomPeerLinkSnapshot
+                            {
+                                PlayerId = pid,
+                                PathSummary = path,
+                                RawRttMs = rawRtt,
+                                EstimatedActualDelayMs = est
+                            };
+                            if (pid == Transport.LocalPlayerId && rawRtt >= 0f && rawRtt < 5000f)
+                                LocalRttToHostMs = rawRtt;
+                        }
+                    }
                     Transport.SendToPeer(1, SendChannel.UnreliableSequenced, PacketType.RttPong, w =>
                     {
                         w.Write(seq);
@@ -3441,7 +3802,8 @@ namespace TABCoopMod.Sync
         {
             if (samples == null) return;
             _tickPosCache[tick] = samples;
-            _tickEconCache[tick] = new EconSnapshot
+
+            var snap = new EconSnapshot
             {
                 Gold = digest.Gold,
                 Wood = digest.Wood,
@@ -3449,6 +3811,60 @@ namespace TABCoopMod.Sync
                 Iron = digest.Iron,
                 Oil = digest.Oil
             };
+            bool isMulti = IsMultiFactionActive && FactionContextManager.IsInitialized;
+            if (isMulti)
+                FactionContextManager.PushContext(1);
+            try
+            {
+                if (GameBridge.ReadRawLevelEconomyState(out var raw))
+                {
+                    snap.FoodReserved = raw.FoodReserved;
+                    snap.WorkersReserved = raw.WorkersReserved;
+                    snap.EnergyReserved = raw.EnergyReserved;
+                    snap.WoodProdRes = raw.WoodProdRes;
+                    snap.StoneProdRes = raw.StoneProdRes;
+                    snap.IronProdRes = raw.IronProdRes;
+                    snap.OilProdRes = raw.OilProdRes;
+                }
+            }
+            finally
+            {
+                if (isMulti)
+                    FactionContextManager.PopContext();
+            }
+
+            if (isMulti)
+            {
+                FactionContextManager.FlushActiveOwnerFromLevelState();
+                int maxP = Math.Max(1, Math.Min(3, (int)FactionOwnershipTracker.ActivePlayerCount));
+                var list = new List<FactionEconEntry>(maxP);
+                for (byte p = 1; p <= maxP; p++)
+                {
+                    var ledger = FactionContextManager.GetLedger(p);
+                    if (ledger == null) continue;
+                    var le = ledger.Economy;
+                    list.Add(new FactionEconEntry
+                    {
+                        PlayerId = p,
+                        Gold = le.Gold,
+                        Wood = le.Wood,
+                        Stone = le.Stone,
+                        Iron = le.Iron,
+                        Oil = le.Oil,
+                        FoodReserved = le.FoodReserved,
+                        WorkersReserved = le.WorkersReserved,
+                        EnergyReserved = le.EnergyReserved,
+                        WoodProdRes = le.WoodProdRes,
+                        StoneProdRes = le.StoneProdRes,
+                        IronProdRes = le.IronProdRes,
+                        OilProdRes = le.OilProdRes
+                    });
+                }
+                if (list.Count > 0)
+                    snap.Factions = list.ToArray();
+            }
+
+            _tickEconCache[tick] = snap;
             if (prodQueues != null && prodQueues.Count > 0)
                 _tickProdCache[tick] = prodQueues;
             else
@@ -3768,15 +4184,13 @@ namespace TABCoopMod.Sync
             {
                 byte senderId = kv.Key;
                 var client = kv.Value.Digest;
+                var peerState = GetOrCreatePeerDesyncState(senderId);
 
                 if (host.FullHash == client.FullHash)
                 {
                     resolvedPeers.Add(senderId);
                     _verifiedChecksumCycles++;
-                    _consecutiveProjOnlyMismatch = 0;
-                    _consecutiveHardMismatch = 0;
-                    _consecutivePosExceeded = 0;
-                    ResetTieredResyncState();
+                    peerState.Reset();
                     double matchNow = DXHelper_Environment.Ticks;
                     bool stateRecovered = !string.Equals(_lastChecksumLogKind, "MATCH", StringComparison.Ordinal);
                     if (stateRecovered || ModLogger.IsVerbose || matchNow < _lastChecksumMatchLogMs || (matchNow - _lastChecksumMatchLogMs) >= ChecksumSummaryIntervalMs)
@@ -3868,25 +4282,25 @@ namespace TABCoopMod.Sync
                 bool longPeriodDue = false;
                 if (!IsStrictMode)
                 {
-                    _consecutiveEconMismatch = timeDiff ? _consecutiveEconMismatch + 1 : 0;
-                    _consecutiveAsyncEconMismatch = econAsyncDiff ? _consecutiveAsyncEconMismatch + 1 : 0;
-                    _consecutiveStructuralMismatch = structuralDiff ? _consecutiveStructuralMismatch + 1 : 0;
-                    bool substantiveDiff = timeDiff || _consecutiveAsyncEconMismatch >= 3 || absEntityDelta > entityTol;
+                    peerState.ConsecutiveEconMismatch = timeDiff ? peerState.ConsecutiveEconMismatch + 1 : 0;
+                    peerState.ConsecutiveAsyncEconMismatch = econAsyncDiff ? peerState.ConsecutiveAsyncEconMismatch + 1 : 0;
+                    peerState.ConsecutiveStructuralMismatch = structuralDiff ? peerState.ConsecutiveStructuralMismatch + 1 : 0;
+                    bool substantiveDiff = timeDiff || peerState.ConsecutiveAsyncEconMismatch >= 3 || absEntityDelta > entityTol;
                     if (substantiveDiff)
                     {
-                        if (_divergedSinceTicks < 0) _divergedSinceTicks = now;
-                        longPeriodDue = now - _divergedSinceTicks >= LongPeriodRealignMs;
+                        if (peerState.DivergedSinceTicks < 0) peerState.DivergedSinceTicks = now;
+                        longPeriodDue = now - peerState.DivergedSinceTicks >= LongPeriodRealignMs;
                     }
                     else
                     {
-                        _divergedSinceTicks = -1.0;
+                        peerState.DivergedSinceTicks = -1.0;
                     }
                 }
                 bool earlyEconBypass = !IsStrictMode && !_econEarlyBypassUsed
                     && _verifiedChecksumCycles <= 3
-                    && (_consecutiveEconMismatch >= EconReloadStreak || _consecutiveAsyncEconMismatch >= AsyncEconFallbackStreak);
+                    && (peerState.ConsecutiveEconMismatch >= EconReloadStreak || peerState.ConsecutiveAsyncEconMismatch >= AsyncEconFallbackStreak);
                 bool structuralCooldownElapsed = !IsStrictMode
-                    && _consecutiveStructuralMismatch >= StructuralReloadStreak
+                    && peerState.ConsecutiveStructuralMismatch >= StructuralReloadStreak
                     && (now - _lastAutoResyncTicks >= StructuralResyncCooldownMs);
                 bool cooldownElapsed = (now - _lastAutoResyncTicks >= AutoResyncCooldownMs) || earlyEconBypass || structuralCooldownElapsed;
                 bool canReloadNow = EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport
@@ -3894,22 +4308,22 @@ namespace TABCoopMod.Sync
 
                 bool triggerHardDesync = IsStrictMode
                     ? (hardCoreDiff || projDiff)
-                    : canReloadNow && (_consecutiveEconMismatch >= EconReloadStreak
-                        || _consecutiveAsyncEconMismatch >= AsyncEconFallbackStreak
-                        || _consecutiveStructuralMismatch >= StructuralReloadStreak
+                    : canReloadNow && (peerState.ConsecutiveEconMismatch >= EconReloadStreak
+                        || peerState.ConsecutiveAsyncEconMismatch >= AsyncEconFallbackStreak
+                        || peerState.ConsecutiveStructuralMismatch >= StructuralReloadStreak
                         || longPeriodDue);
 
                 if (triggerHardDesync)
                 {
-                    if (projDiff && !hardCoreDiff) _consecutiveProjOnlyMismatch++;
-                    else _consecutiveProjOnlyMismatch = 0;
-                    _consecutiveHardMismatch = 0;
+                    if (projDiff && !hardCoreDiff) peerState.ConsecutiveProjOnlyMismatch++;
+                    else peerState.ConsecutiveProjOnlyMismatch = 0;
+                    peerState.ConsecutiveHardMismatch = 0;
 
                     string reason = IsStrictMode ? "strict"
-                        : _consecutiveEconMismatch >= EconReloadStreak ? $"time/econ x{_consecutiveEconMismatch}"
-                        : _consecutiveAsyncEconMismatch >= AsyncEconFallbackStreak ? $"asyncEconFallback x{_consecutiveAsyncEconMismatch}"
-                        : _consecutiveStructuralMismatch >= StructuralReloadStreak ? $"entityDelta={absEntityDelta} x{_consecutiveStructuralMismatch}"
-                        : $"long-period realign after {(now - _divergedSinceTicks) / 1000.0:F0}s";
+                        : peerState.ConsecutiveEconMismatch >= EconReloadStreak ? $"time/econ x{peerState.ConsecutiveEconMismatch}"
+                        : peerState.ConsecutiveAsyncEconMismatch >= AsyncEconFallbackStreak ? $"asyncEconFallback x{peerState.ConsecutiveAsyncEconMismatch}"
+                        : peerState.ConsecutiveStructuralMismatch >= StructuralReloadStreak ? $"entityDelta={absEntityDelta} x{peerState.ConsecutiveStructuralMismatch}"
+                        : $"long-period realign after {(now - peerState.DivergedSinceTicks) / 1000.0:F0}s";
                     ModLogger.Error($"[StateChecksum] HARD DESYNC DETECTED at Tick {tick} ({reason})! Life={lifeDiff} Aggro={aggroDiff} Entity={entityDiff} Econ={econDiff} Proj={projDiff} Pos={posDiff} (Host=0x{host.FullHash:X16}, Client({senderId})=0x{client.FullHash:X16})");
                     ModLogger.Error($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
                     ModLogger.Error($"[StateChecksum]   Client : {clientSummary ?? "(none)"}");
@@ -3930,46 +4344,49 @@ namespace TABCoopMod.Sync
                         }
                         _lastAutoResyncTicks = now;
                         ResetTieredResyncState();
-                        ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after HARD DESYNC at Tick {tick} (Life={lifeDiff}, Aggro={aggroDiff}, Entity={entityDiff}, Econ={econDiff}, Proj={projDiff}).");
+                        ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after HARD DESYNC at Tick {tick} (Peer={senderId}, Life={lifeDiff}, Aggro={aggroDiff}, Entity={entityDiff}, Econ={econDiff}, Proj={projDiff}).");
                         RequestSnapshotBroadcast();
                     }
                     continue;
                 }
+
+                double peerLastPosSyncMs = GetPeerTimestamp(_peerLastPosSyncSentTicks, senderId);
+                double peerLastFullPosAlignMs = GetPeerTimestamp(_peerLastFullPosAlignSentTicks, senderId);
 
                 if (hardCoreDiff)
                 {
                     // Combat-level drift (HP / aggro / small entity delta): correct host-authoritatively
                     // in the background; the tiered policy above decides if a reload is ever needed.
                     // Decouple fast HP/kill sync (2s) from slow position realignments (8s).
-                    _consecutiveHardMismatch++;
-                    _consecutiveProjOnlyMismatch = 0;
-                    bool firstTransient = !string.Equals(_lastChecksumLogKind, "TRANSIENT", StringComparison.Ordinal) || _consecutiveHardMismatch == 1;
-                    if (firstTransient || ModLogger.IsVerbose || (_consecutiveHardMismatch % 5) == 0 || now < _lastChecksumTransientLogMs || (now - _lastChecksumTransientLogMs) >= 10000.0)
+                    peerState.ConsecutiveHardMismatch++;
+                    peerState.ConsecutiveProjOnlyMismatch = 0;
+                    bool firstTransient = !string.Equals(_lastChecksumLogKind, "TRANSIENT", StringComparison.Ordinal) || peerState.ConsecutiveHardMismatch == 1;
+                    if (firstTransient || ModLogger.IsVerbose || (peerState.ConsecutiveHardMismatch % 5) == 0 || now < _lastChecksumTransientLogMs || (now - _lastChecksumTransientLogMs) >= 10000.0)
                     {
                         _lastChecksumLogKind = "TRANSIENT";
                         _lastChecksumTransientLogMs = now;
-                        ModLogger.Warn($"[StateChecksum] TRANSIENT STATE DRIFT at Tick {tick} (Life={lifeDiff} Aggro={aggroDiff} Entity={entityDiff}(d={absEntityDelta}) Econ={econDiff} CoarseDiff={coarsePosDiff} streak={_consecutiveHardMismatch} econStreak={_consecutiveEconMismatch}/{_consecutiveAsyncEconMismatch} entityStreak={_consecutiveStructuralMismatch}).");
+                        ModLogger.Warn($"[StateChecksum] TRANSIENT STATE DRIFT Client({senderId}) at Tick {tick} (Life={lifeDiff} Aggro={aggroDiff} Entity={entityDiff}(d={absEntityDelta}) Econ={econDiff} CoarseDiff={coarsePosDiff} streak={peerState.ConsecutiveHardMismatch} econStreak={peerState.ConsecutiveEconMismatch}/{peerState.ConsecutiveAsyncEconMismatch} entityStreak={peerState.ConsecutiveStructuralMismatch}).");
                         if (firstTransient || ModLogger.IsVerbose)
                         {
                             ModLogger.Info($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
                             ModLogger.Info($"[StateChecksum]   Client : {clientSummary ?? "(none)"}");
                         }
                     }
-                    bool needEcon = resAmountDiff && !IsStrictMode;
+                    bool needEcon = (resAmountDiff || resvDiff || (IsMultiFactionActive && host.HardHash != client.HardHash)) && !IsStrictMode;
                     bool needProd = prodDiff && !IsStrictMode;
                     bool needStructMeta = (entityDiff || resvDiff) && !IsStrictMode;
-                    bool needSpawnMeta = (entityDiff || _lastClientMissingOnClient > 0) && !IsStrictMode;
+                    bool needSpawnMeta = (entityDiff || peerState.LastClientMissingOnClient > 0) && !IsStrictMode;
                     bool needAnySync = posDiff || lifeDiff || entityDiff || needEcon || needProd || resvDiff || aggroDiff;
                     double effectivePosCooldownMs = host.EntityCount > 8000 ? AsyncPosAlignCooldownMs * 2.5 : AsyncPosAlignCooldownMs;
                     double effectiveSoftCooldownMs = host.EntityCount > 8000 ? AsyncSoftPosAlignCooldownMs * 2.5 : AsyncSoftPosAlignCooldownMs;
-                    if (needAnySync && (now - _lastPosSyncSentTicks >= effectivePosCooldownMs))
+                    if (needAnySync && (now - peerLastPosSyncMs >= effectivePosCooldownMs))
                     {
-                        _lastPosSyncSentTicks = now;
+                        _peerLastPosSyncSentTicks[senderId] = now;
                         bool applyLife = EnableAsyncPosAlign || !IsStrictMode;
                         bool applyPos = applyLife && (posDiff || aggroDiff || entityDiff)
-                            && (now - _lastFullPosAlignSentTicks >= effectiveSoftCooldownMs);
+                            && (now - peerLastFullPosAlignMs >= effectiveSoftCooldownMs);
                         if (applyPos)
-                            _lastFullPosAlignSentTicks = now;
+                            _peerLastFullPosAlignSentTicks[senderId] = now;
                         bool needTargetMeta = (EnableAsyncPosAlign || !IsStrictMode) && (applyPos || aggroDiff);
                         ushort lifeEntMask = (lifeDiff || entityDiff || resvDiff) ? ComputeLifeOrEntityDiffBucketMask(in host, in client) : (ushort)0;
                         ushort posMask = (posDiff && (applyPos || needTargetMeta)) ? ComputeDiffBucketMask(in host, in client) : (ushort)0;
@@ -3994,18 +4411,18 @@ namespace TABCoopMod.Sync
                 if (projDiff)
                 {
                     // Projectiles are short-lived; their effect shows up as HP, which is corrected above.
-                    _consecutiveProjOnlyMismatch++;
-                    _consecutiveHardMismatch = 0;
-                    if (_consecutiveProjOnlyMismatch == 1 || ModLogger.IsVerbose || now < _lastChecksumSoftLogMs || (now - _lastChecksumSoftLogMs) >= ChecksumSummaryIntervalMs)
+                    peerState.ConsecutiveProjOnlyMismatch++;
+                    peerState.ConsecutiveHardMismatch = 0;
+                    if (peerState.ConsecutiveProjOnlyMismatch == 1 || ModLogger.IsVerbose || now < _lastChecksumSoftLogMs || (now - _lastChecksumSoftLogMs) >= ChecksumSummaryIntervalMs)
                     {
                         _lastChecksumLogKind = "PROJ";
                         _lastChecksumSoftLogMs = now;
-                        ModLogger.Warn($"[StateChecksum] TRANSIENT PROJ DIFF at Tick {tick} (Life/Aggro/Entity/Econ MATCH; PosDiff={posDiff} CoarseDiff={coarsePosDiff}, streak={_consecutiveProjOnlyMismatch}).");
+                        ModLogger.Warn($"[StateChecksum] TRANSIENT PROJ DIFF Client({senderId}) at Tick {tick} (Life/Aggro/Entity/Econ MATCH; PosDiff={posDiff} CoarseDiff={coarsePosDiff}, streak={peerState.ConsecutiveProjOnlyMismatch}).");
                     }
-                    if (coarsePosDiff && (now - _lastFullPosAlignSentTicks >= AsyncSoftPosAlignCooldownMs))
+                    if (coarsePosDiff && (now - peerLastFullPosAlignMs >= AsyncSoftPosAlignCooldownMs))
                     {
-                        _lastFullPosAlignSentTicks = now;
-                        _lastPosSyncSentTicks = now;
+                        _peerLastFullPosAlignSentTicks[senderId] = now;
+                        _peerLastPosSyncSentTicks[senderId] = now;
                         TrySendPosDriftSync(
                             senderId,
                             tick,
@@ -4019,8 +4436,8 @@ namespace TABCoopMod.Sync
                 }
 
                 // Pure position drift (or same-count sub-tile aggro oscillation): NO real combat/economy divergence!
-                _consecutiveProjOnlyMismatch = 0;
-                _consecutiveHardMismatch = 0;
+                peerState.ConsecutiveProjOnlyMismatch = 0;
+                peerState.ConsecutiveHardMismatch = 0;
                 bool firstSoft = !string.Equals(_lastChecksumLogKind, "SOFT", StringComparison.Ordinal);
                 if (firstSoft || ModLogger.IsVerbose || now < _lastChecksumSoftLogMs || (now - _lastChecksumSoftLogMs) >= ChecksumSummaryIntervalMs)
                 {
@@ -4029,9 +4446,9 @@ namespace TABCoopMod.Sync
                     _lastChecksumLogKind = "SOFT";
                     _lastChecksumSoftLogMs = now;
                     if (softAggroDrift)
-                        ModLogger.Warn($"[StateChecksum] SOFT AGGRO/POS DRIFT at Tick {tick} (AggroCount={host.AggroZombieCount}/{client.AggroZombieCount}; Life/Entity/Proj/Econ/Coarse MATCH, mode={EffectiveResyncMode}).{softSuffix}");
+                        ModLogger.Warn($"[StateChecksum] SOFT AGGRO/POS DRIFT Client({senderId}) at Tick {tick} (AggroCount={host.AggroZombieCount}/{client.AggroZombieCount}; Life/Entity/Proj/Econ/Coarse MATCH, mode={EffectiveResyncMode}).{softSuffix}");
                     else
-                        ModLogger.Warn($"[StateChecksum] SOFT POS DRIFT at Tick {tick} (Life/Aggro/Entity/Proj/Econ MATCH! CoarseDiff={coarsePosDiff}, mode={EffectiveResyncMode}).{softSuffix}");
+                        ModLogger.Warn($"[StateChecksum] SOFT POS DRIFT Client({senderId}) at Tick {tick} (Life/Aggro/Entity/Proj/Econ MATCH! CoarseDiff={coarsePosDiff}, mode={EffectiveResyncMode}).{softSuffix}");
                     if (ModLogger.IsVerbose)
                     {
                         ModLogger.Info($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
@@ -4045,15 +4462,15 @@ namespace TABCoopMod.Sync
 
                 if (IsStrictMode)
                 {
-                    if (now - _lastPosSyncSentTicks >= 2000.0)
+                    if (now - peerLastPosSyncMs >= 2000.0)
                     {
-                        _lastPosSyncSentTicks = now;
+                        _peerLastPosSyncSentTicks[senderId] = now;
                         TrySendPosDriftSync(senderId, tick, applyLifeCorrection: false, applyPosCorrection: false, bucketMask: ComputeDiffBucketMask(in host, in client), includeStatic: false);
                     }
                     if (EnableAutoResync && !_awaitingClientSnapshotAck && !_pendingHostSnapshotExport && (now - _lastAutoResyncTicks >= AutoResyncCooldownMs))
                     {
                         _lastAutoResyncTicks = now;
-                        ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after DESYNC (strict pos) at Tick {tick}.");
+                        ModLogger.WarnImmediate($"[CoopSessionManager] Auto-resync triggered after DESYNC (strict pos, Client({senderId})) at Tick {tick}.");
                         RequestSnapshotBroadcast();
                     }
                 }
@@ -4062,19 +4479,19 @@ namespace TABCoopMod.Sync
                     bool shouldSendSoftSync;
                     if (!coarsePosDiff && !softAggroDrift)
                     {
-                        _consecutiveSubCoarsePosDrift++;
-                        shouldSendSoftSync = _consecutiveSubCoarsePosDrift >= 3;
+                        peerState.ConsecutiveSubCoarsePosDrift++;
+                        shouldSendSoftSync = peerState.ConsecutiveSubCoarsePosDrift >= 3;
                     }
                     else
                     {
-                        _consecutiveSubCoarsePosDrift = 0;
+                        peerState.ConsecutiveSubCoarsePosDrift = 0;
                         shouldSendSoftSync = true;
                     }
 
-                    if (shouldSendSoftSync && (now - _lastFullPosAlignSentTicks >= AsyncSoftPosAlignCooldownMs))
+                    if (shouldSendSoftSync && (now - peerLastFullPosAlignMs >= AsyncSoftPosAlignCooldownMs))
                     {
-                        _lastFullPosAlignSentTicks = now;
-                        _lastPosSyncSentTicks = now;
+                        _peerLastFullPosAlignSentTicks[senderId] = now;
+                        _peerLastPosSyncSentTicks[senderId] = now;
                         TrySendPosDriftSync(
                             senderId,
                             tick,
@@ -4146,28 +4563,61 @@ namespace TABCoopMod.Sync
                 int nCells = DXWorldGrid.NCells;
                 float maxCoord = nCells > 1 ? nCells - 0.5f : 10000f;
 
-                // Phase 2A: Resource deltas (same-tick diff preserved across transit)
+                // Phase 2A: Resource & reservation deltas (same-tick diff preserved across transit)
                 // Note: StateHasher hashes P1's authoritative ledger in Multi-Faction mode, so Client must
-                // push P1's context before applying deltas (never overwrite Client's resting P2/P3 ledger!).
-                if (item.ApplyEconCorrection && game != null
-                    && (item.DeltaGold != 0 || item.DeltaWood != 0 || item.DeltaStone != 0 || item.DeltaIron != 0 || item.DeltaOil != 0))
+                // push P1's context before applying base deltas, and apply any P2/P3 ledger diffs safely.
+                bool anyResvApplied = false;
+                bool isMultiActive = IsMultiFactionActive && FactionContextManager.IsInitialized;
+                if (item.ApplyEconCorrection && game != null)
                 {
-                    bool pushedP1 = IsMultiFactionActive && FactionContextManager.IsInitialized;
-                    if (pushedP1) FactionContextManager.PushContext(1);
-                    try
+                    if (isMultiActive && item.MultiFactionEconDeltas != null && item.MultiFactionEconDeltas.Length > 0)
                     {
-                        if (item.DeltaGold != 0) GameBridge.AddLevelResourceDelta("Gold", item.DeltaGold);
-                        if (item.DeltaWood != 0) GameBridge.AddLevelResourceDelta("Wood", item.DeltaWood);
-                        if (item.DeltaStone != 0) GameBridge.AddLevelResourceDelta("Stone", item.DeltaStone);
-                        if (item.DeltaIron != 0) GameBridge.AddLevelResourceDelta("Iron", item.DeltaIron);
-                        if (item.DeltaOil != 0) GameBridge.AddLevelResourceDelta("Oil", item.DeltaOil);
+                        for (int i = 0; i < item.MultiFactionEconDeltas.Length; i++)
+                        {
+                            var fd = item.MultiFactionEconDeltas[i];
+                            if (FactionContextManager.ApplyAsyncEconDeltasForPlayer(
+                                    fd.PlayerId,
+                                    fd.Gold, fd.Wood, fd.Stone, fd.Iron, fd.Oil,
+                                    fd.FoodReserved, fd.WorkersReserved, fd.EnergyReserved,
+                                    fd.WoodProdRes, fd.StoneProdRes, fd.IronProdRes, fd.OilProdRes))
+                            {
+                                anyResvApplied = true;
+                                ModLogger.Info(
+                                    $"[AsyncEconAlign] Tick={item.Tick} applied P{fd.PlayerId} deltas: Gold={fd.Gold:+#;-#;0} Wood={fd.Wood:+#;-#;0} Stone={fd.Stone:+#;-#;0} Iron={fd.Iron:+#;-#;0} Oil={fd.Oil:+#;-#;0} Resv(F={fd.FoodReserved:+#;-#;0},W={fd.WorkersReserved:+#;-#;0},E={fd.EnergyReserved:+#;-#;0})");
+                            }
+                        }
                     }
-                    finally
+                    else
                     {
-                        if (pushedP1) FactionContextManager.PopContext();
+                        bool hasBaseResDelta = item.DeltaGold != 0 || item.DeltaWood != 0 || item.DeltaStone != 0 || item.DeltaIron != 0 || item.DeltaOil != 0;
+                        bool hasBaseResvDelta = item.DeltaFoodRes != 0 || item.DeltaWorkRes != 0 || item.DeltaEngRes != 0
+                            || item.DeltaWoodProdRes != 0 || item.DeltaStoneProdRes != 0 || item.DeltaIronProdRes != 0 || item.DeltaOilProdRes != 0;
+                        if (hasBaseResDelta || hasBaseResvDelta)
+                        {
+                            bool pushedP1 = isMultiActive;
+                            if (pushedP1) FactionContextManager.PushContext(1);
+                            try
+                            {
+                                if (item.DeltaGold != 0) GameBridge.AddLevelResourceDelta("Gold", item.DeltaGold);
+                                if (item.DeltaWood != 0) GameBridge.AddLevelResourceDelta("Wood", item.DeltaWood);
+                                if (item.DeltaStone != 0) GameBridge.AddLevelResourceDelta("Stone", item.DeltaStone);
+                                if (item.DeltaIron != 0) GameBridge.AddLevelResourceDelta("Iron", item.DeltaIron);
+                                if (item.DeltaOil != 0) GameBridge.AddLevelResourceDelta("Oil", item.DeltaOil);
+                                if (hasBaseResvDelta)
+                                {
+                                    anyResvApplied |= GameBridge.ApplyLevelReservationDeltas(
+                                        item.DeltaFoodRes, item.DeltaWorkRes, item.DeltaEngRes,
+                                        item.DeltaWoodProdRes, item.DeltaStoneProdRes, item.DeltaIronProdRes, item.DeltaOilProdRes);
+                                }
+                            }
+                            finally
+                            {
+                                if (pushedP1) FactionContextManager.PopContext();
+                            }
+                            ModLogger.Info(
+                                $"[AsyncEconAlign] Tick={item.Tick} applied deltas{(pushedP1 ? " (P1)" : "")}: Gold={item.DeltaGold:+#;-#;0} Wood={item.DeltaWood:+#;-#;0} Stone={item.DeltaStone:+#;-#;0} Iron={item.DeltaIron:+#;-#;0} Oil={item.DeltaOil:+#;-#;0} Resv(F={item.DeltaFoodRes:+#;-#;0},W={item.DeltaWorkRes:+#;-#;0},E={item.DeltaEngRes:+#;-#;0})");
+                        }
                     }
-                    ModLogger.Info(
-                        $"[AsyncEconAlign] Tick={item.Tick} applied deltas{(pushedP1 ? " (P1)" : "")}: Gold={item.DeltaGold:+#;-#;0} Wood={item.DeltaWood:+#;-#;0} Stone={item.DeltaStone:+#;-#;0} Iron={item.DeltaIron:+#;-#;0} Oil={item.DeltaOil:+#;-#;0}");
                 }
 
                 // Phase 2B: Production queue alignment (guarded against stale transit overwrites)
@@ -4237,6 +4687,14 @@ namespace TABCoopMod.Sync
                     }
                     if (dynSpawned > 0)
                         ModLogger.Info($"[AsyncSpawnAlign] Tick={item.Tick} spawned={dynSpawned}/{item.DynamicSpawns.Count} dynamic entities.");
+                }
+
+                if (anyResvApplied || prodFixed > 0 || structBuilt > 0 || structDestroyed > 0 || dynSpawned > 0)
+                {
+                    if (isMultiActive)
+                        FactionContextManager.RecalculateAllFactions();
+                    else
+                        GameBridge.CallLevelStateRecalculate();
                 }
 
                 int appliedCount = 0;
@@ -4520,8 +4978,11 @@ namespace TABCoopMod.Sync
 
             ushort effectiveMask = bucketMask == 0 ? (ushort)0xFFFF : bucketMask;
             int gen = _asyncGeneration;
-            if (Interlocked.CompareExchange(ref _posSyncBuildInFlight, 1, 0) != 0)
-                return;
+            lock (_posSyncBuildInFlightPeers)
+            {
+                if (!_posSyncBuildInFlightPeers.Add(targetPlayerId))
+                    return;
+            }
 
             bool wantStatic = includeStatic || includeStructMeta;
             List<StateHasher.EntityPosSample> filtered = new List<StateHasher.EntityPosSample>(
@@ -4547,7 +5008,8 @@ namespace TABCoopMod.Sync
 
             if (filtered.Count == 0 && !hasEcon && !hasProd)
             {
-                Interlocked.Exchange(ref _posSyncBuildInFlight, 0);
+                lock (_posSyncBuildInFlightPeers)
+                    _posSyncBuildInFlightPeers.Remove(targetPlayerId);
                 return;
             }
 
@@ -4792,6 +5254,32 @@ namespace TABCoopMod.Sync
                                 NetCommand.WriteZigZagVarInt32(bw, econSnap.Stone);
                                 NetCommand.WriteZigZagVarInt32(bw, econSnap.Iron);
                                 NetCommand.WriteZigZagVarInt32(bw, econSnap.Oil);
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.FoodReserved);
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.WorkersReserved);
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.EnergyReserved);
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.WoodProdRes);
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.StoneProdRes);
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.IronProdRes);
+                                NetCommand.WriteZigZagVarInt32(bw, econSnap.OilProdRes);
+                                byte fCount = econSnap.Factions != null ? (byte)econSnap.Factions.Length : (byte)0;
+                                bw.Write(fCount);
+                                for (int fi = 0; fi < fCount; fi++)
+                                {
+                                    var fe = econSnap.Factions[fi];
+                                    bw.Write(fe.PlayerId);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.Gold);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.Wood);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.Stone);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.Iron);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.Oil);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.FoodReserved);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.WorkersReserved);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.EnergyReserved);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.WoodProdRes);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.StoneProdRes);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.IronProdRes);
+                                    NetCommand.WriteZigZagVarInt32(bw, fe.OilProdRes);
+                                }
                             }
                             if (hasProd)
                             {
@@ -4855,6 +5343,32 @@ namespace TABCoopMod.Sync
                                 bw.Write(econSnap.Stone);
                                 bw.Write(econSnap.Iron);
                                 bw.Write(econSnap.Oil);
+                                bw.Write(econSnap.FoodReserved);
+                                bw.Write(econSnap.WorkersReserved);
+                                bw.Write(econSnap.EnergyReserved);
+                                bw.Write(econSnap.WoodProdRes);
+                                bw.Write(econSnap.StoneProdRes);
+                                bw.Write(econSnap.IronProdRes);
+                                bw.Write(econSnap.OilProdRes);
+                                byte fCount = econSnap.Factions != null ? (byte)econSnap.Factions.Length : (byte)0;
+                                bw.Write(fCount);
+                                for (int fi = 0; fi < fCount; fi++)
+                                {
+                                    var fe = econSnap.Factions[fi];
+                                    bw.Write(fe.PlayerId);
+                                    bw.Write(fe.Gold);
+                                    bw.Write(fe.Wood);
+                                    bw.Write(fe.Stone);
+                                    bw.Write(fe.Iron);
+                                    bw.Write(fe.Oil);
+                                    bw.Write(fe.FoodReserved);
+                                    bw.Write(fe.WorkersReserved);
+                                    bw.Write(fe.EnergyReserved);
+                                    bw.Write(fe.WoodProdRes);
+                                    bw.Write(fe.StoneProdRes);
+                                    bw.Write(fe.IronProdRes);
+                                    bw.Write(fe.OilProdRes);
+                                }
                             }
                             if (hasProd)
                             {
@@ -4951,8 +5465,8 @@ namespace TABCoopMod.Sync
                 }
                 finally
                 {
-                    if (gen == _asyncGeneration)
-                        Interlocked.Exchange(ref _posSyncBuildInFlight, 0);
+                    lock (_posSyncBuildInFlightPeers)
+                        _posSyncBuildInFlightPeers.Remove(targetPlayerId);
                 }
             });
         }
@@ -5159,8 +5673,40 @@ namespace TABCoopMod.Sync
                                     Wood = NetCommand.ReadZigZagVarInt32(br),
                                     Stone = NetCommand.ReadZigZagVarInt32(br),
                                     Iron = NetCommand.ReadZigZagVarInt32(br),
-                                    Oil = NetCommand.ReadZigZagVarInt32(br)
+                                    Oil = NetCommand.ReadZigZagVarInt32(br),
+                                    FoodReserved = NetCommand.ReadZigZagVarInt32(br),
+                                    WorkersReserved = NetCommand.ReadZigZagVarInt32(br),
+                                    EnergyReserved = NetCommand.ReadZigZagVarInt32(br),
+                                    WoodProdRes = NetCommand.ReadZigZagVarInt32(br),
+                                    StoneProdRes = NetCommand.ReadZigZagVarInt32(br),
+                                    IronProdRes = NetCommand.ReadZigZagVarInt32(br),
+                                    OilProdRes = NetCommand.ReadZigZagVarInt32(br)
                                 };
+                                byte fCount = br.ReadByte();
+                                if (fCount > 0)
+                                {
+                                    var fList = new FactionEconEntry[fCount];
+                                    for (int fi = 0; fi < fCount; fi++)
+                                    {
+                                        fList[fi] = new FactionEconEntry
+                                        {
+                                            PlayerId = br.ReadByte(),
+                                            Gold = NetCommand.ReadZigZagVarInt32(br),
+                                            Wood = NetCommand.ReadZigZagVarInt32(br),
+                                            Stone = NetCommand.ReadZigZagVarInt32(br),
+                                            Iron = NetCommand.ReadZigZagVarInt32(br),
+                                            Oil = NetCommand.ReadZigZagVarInt32(br),
+                                            FoodReserved = NetCommand.ReadZigZagVarInt32(br),
+                                            WorkersReserved = NetCommand.ReadZigZagVarInt32(br),
+                                            EnergyReserved = NetCommand.ReadZigZagVarInt32(br),
+                                            WoodProdRes = NetCommand.ReadZigZagVarInt32(br),
+                                            StoneProdRes = NetCommand.ReadZigZagVarInt32(br),
+                                            IronProdRes = NetCommand.ReadZigZagVarInt32(br),
+                                            OilProdRes = NetCommand.ReadZigZagVarInt32(br)
+                                        };
+                                    }
+                                    hostEcon.Factions = fList;
+                                }
                             }
                             if (flagHasProd)
                             {
@@ -5209,8 +5755,40 @@ namespace TABCoopMod.Sync
                                     Wood = br.ReadInt32(),
                                     Stone = br.ReadInt32(),
                                     Iron = br.ReadInt32(),
-                                    Oil = br.ReadInt32()
+                                    Oil = br.ReadInt32(),
+                                    FoodReserved = br.ReadInt32(),
+                                    WorkersReserved = br.ReadInt32(),
+                                    EnergyReserved = br.ReadInt32(),
+                                    WoodProdRes = br.ReadInt32(),
+                                    StoneProdRes = br.ReadInt32(),
+                                    IronProdRes = br.ReadInt32(),
+                                    OilProdRes = br.ReadInt32()
                                 };
+                                byte fCount = br.ReadByte();
+                                if (fCount > 0)
+                                {
+                                    var fList = new FactionEconEntry[fCount];
+                                    for (int fi = 0; fi < fCount; fi++)
+                                    {
+                                        fList[fi] = new FactionEconEntry
+                                        {
+                                            PlayerId = br.ReadByte(),
+                                            Gold = br.ReadInt32(),
+                                            Wood = br.ReadInt32(),
+                                            Stone = br.ReadInt32(),
+                                            Iron = br.ReadInt32(),
+                                            Oil = br.ReadInt32(),
+                                            FoodReserved = br.ReadInt32(),
+                                            WorkersReserved = br.ReadInt32(),
+                                            EnergyReserved = br.ReadInt32(),
+                                            WoodProdRes = br.ReadInt32(),
+                                            StoneProdRes = br.ReadInt32(),
+                                            IronProdRes = br.ReadInt32(),
+                                            OilProdRes = br.ReadInt32()
+                                        };
+                                    }
+                                    hostEcon.Factions = fList;
+                                }
                             }
                             if (flagHasProd)
                             {
@@ -5385,9 +5963,12 @@ namespace TABCoopMod.Sync
                             lifeFixes.Add(new EntityLifeFix { Id = missingOnHostDynamicIds[i], Delta = 0, Kill = true });
                     }
 
-                    // Phase 2A: Resource deltas
+                    // Phase 2A: Resource & reservation deltas (Archon + per-faction Multi-Faction ledgers)
                     bool applyEconCorrection = false;
                     int deltaGold = 0, deltaWood = 0, deltaStone = 0, deltaIron = 0, deltaOil = 0;
+                    int deltaFoodRes = 0, deltaWorkRes = 0, deltaEngRes = 0;
+                    int deltaWoodProdRes = 0, deltaStoneProdRes = 0, deltaIronProdRes = 0, deltaOilProdRes = 0;
+                    FactionEconEntry[] mfDeltas = null;
                     if (apply && flagHasEcon && hasClientEcon)
                     {
                         deltaGold = hostEcon.Gold - clientEcon.Gold;
@@ -5395,7 +5976,62 @@ namespace TABCoopMod.Sync
                         deltaStone = hostEcon.Stone - clientEcon.Stone;
                         deltaIron = hostEcon.Iron - clientEcon.Iron;
                         deltaOil = hostEcon.Oil - clientEcon.Oil;
-                        applyEconCorrection = deltaGold != 0 || deltaWood != 0 || deltaStone != 0 || deltaIron != 0 || deltaOil != 0;
+                        deltaFoodRes = hostEcon.FoodReserved - clientEcon.FoodReserved;
+                        deltaWorkRes = hostEcon.WorkersReserved - clientEcon.WorkersReserved;
+                        deltaEngRes = hostEcon.EnergyReserved - clientEcon.EnergyReserved;
+                        deltaWoodProdRes = hostEcon.WoodProdRes - clientEcon.WoodProdRes;
+                        deltaStoneProdRes = hostEcon.StoneProdRes - clientEcon.StoneProdRes;
+                        deltaIronProdRes = hostEcon.IronProdRes - clientEcon.IronProdRes;
+                        deltaOilProdRes = hostEcon.OilProdRes - clientEcon.OilProdRes;
+                        applyEconCorrection = deltaGold != 0 || deltaWood != 0 || deltaStone != 0 || deltaIron != 0 || deltaOil != 0
+                            || deltaFoodRes != 0 || deltaWorkRes != 0 || deltaEngRes != 0
+                            || deltaWoodProdRes != 0 || deltaStoneProdRes != 0 || deltaIronProdRes != 0 || deltaOilProdRes != 0;
+
+                        if (hostEcon.Factions != null && clientEcon.Factions != null)
+                        {
+                            var fdList = new List<FactionEconEntry>(hostEcon.Factions.Length);
+                            for (int fi = 0; fi < hostEcon.Factions.Length; fi++)
+                            {
+                                var hf = hostEcon.Factions[fi];
+                                FactionEconEntry cf = default;
+                                bool matched = false;
+                                for (int ci = 0; ci < clientEcon.Factions.Length; ci++)
+                                {
+                                    if (clientEcon.Factions[ci].PlayerId == hf.PlayerId)
+                                    {
+                                        cf = clientEcon.Factions[ci];
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+                                if (!matched) continue;
+                                var d = new FactionEconEntry
+                                {
+                                    PlayerId = hf.PlayerId,
+                                    Gold = hf.Gold - cf.Gold,
+                                    Wood = hf.Wood - cf.Wood,
+                                    Stone = hf.Stone - cf.Stone,
+                                    Iron = hf.Iron - cf.Iron,
+                                    Oil = hf.Oil - cf.Oil,
+                                    FoodReserved = hf.FoodReserved - cf.FoodReserved,
+                                    WorkersReserved = hf.WorkersReserved - cf.WorkersReserved,
+                                    EnergyReserved = hf.EnergyReserved - cf.EnergyReserved,
+                                    WoodProdRes = hf.WoodProdRes - cf.WoodProdRes,
+                                    StoneProdRes = hf.StoneProdRes - cf.StoneProdRes,
+                                    IronProdRes = hf.IronProdRes - cf.IronProdRes,
+                                    OilProdRes = hf.OilProdRes - cf.OilProdRes
+                                };
+                                if (d.Gold != 0 || d.Wood != 0 || d.Stone != 0 || d.Iron != 0 || d.Oil != 0
+                                    || d.FoodReserved != 0 || d.WorkersReserved != 0 || d.EnergyReserved != 0
+                                    || d.WoodProdRes != 0 || d.StoneProdRes != 0 || d.IronProdRes != 0 || d.OilProdRes != 0)
+                                {
+                                    fdList.Add(d);
+                                    applyEconCorrection = true;
+                                }
+                            }
+                            if (fdList.Count > 0)
+                                mfDeltas = fdList.ToArray();
+                        }
                     }
 
                     // Phase 2B: Production queue fixes
@@ -5541,6 +6177,14 @@ namespace TABCoopMod.Sync
                         DeltaStone = deltaStone,
                         DeltaIron = deltaIron,
                         DeltaOil = deltaOil,
+                        DeltaFoodRes = deltaFoodRes,
+                        DeltaWorkRes = deltaWorkRes,
+                        DeltaEngRes = deltaEngRes,
+                        DeltaWoodProdRes = deltaWoodProdRes,
+                        DeltaStoneProdRes = deltaStoneProdRes,
+                        DeltaIronProdRes = deltaIronProdRes,
+                        DeltaOilProdRes = deltaOilProdRes,
+                        MultiFactionEconDeltas = mfDeltas,
                         ProdQueueFixes = prodQueueFixes,
                         StructBuilds = structBuilds,
                         StructDestroys = structDestroys,
@@ -5635,10 +6279,10 @@ namespace TABCoopMod.Sync
                 string savPath = Path.Combine(savesDir, clientSaveName + ".zxsav");
                 string chkPath = Path.Combine(savesDir, clientSaveName + ".zxcheck");
 
-                File.WriteAllBytes(savPath, savBytes);
+                WriteSnapshotFileSharedSafe(savPath, savBytes);
                 // ZXGame validates saves via Path.ChangeExtension(path, ".zxcheck") and the sidecar
                 // is bound to the save name, hence we reuse the Host's file stem above.
-                File.WriteAllText(chkPath, chkContent);
+                WriteSnapshotTextSharedSafe(chkPath, chkContent);
 
                 ModLogger.Info($"[CoopSessionManager] Saved received snapshot to {savPath} ({savBytes.Length:N0} bytes, check={chkContent.Length} chars). Deferring load to next frame...");
 
@@ -5654,6 +6298,67 @@ namespace TABCoopMod.Sync
             }
         }
 
+        private static bool SnapshotFileMatches(string path, byte[] expected)
+        {
+            if (!File.Exists(path)) return false;
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    if (fs.Length != expected.Length) return false;
+                    byte[] buffer = new byte[81920];
+                    int offset = 0;
+                    while (offset < expected.Length)
+                    {
+                        int toRead = Math.Min(buffer.Length, expected.Length - offset);
+                        int read = fs.Read(buffer, 0, toRead);
+                        if (read <= 0) return false;
+                        for (int i = 0; i < read; i++)
+                        {
+                            if (buffer[i] != expected[offset + i])
+                                return false;
+                        }
+                        offset += read;
+                    }
+                    return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void WriteSnapshotFileSharedSafe(string path, byte[] data)
+        {
+            const int maxAttempts = 30;
+            for (int attempt = 0; attempt < maxAttempts; attempt++)
+            {
+                if (SnapshotFileMatches(path, data))
+                    return;
+
+                try
+                {
+                    using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+                    {
+                        fs.Write(data, 0, data.Length);
+                        fs.Flush();
+                    }
+                    return;
+                }
+                catch (IOException) when (attempt < maxAttempts - 1)
+                {
+                    Thread.Sleep(25);
+                }
+            }
+        }
+
+        private static void WriteSnapshotTextSharedSafe(string path, string content)
+        {
+            byte[] bytes = System.Text.Encoding.UTF8.GetBytes(content ?? string.Empty);
+            WriteSnapshotFileSharedSafe(path, bytes);
+        }
+
         /// <summary>Client-side snapshot load, executed from OnFrameTick before packet polling.</summary>
         private static void BeginClientSnapshotLoad(string savPath)
         {
@@ -5666,6 +6371,7 @@ namespace TABCoopMod.Sync
                     // so Host control groups baked into coop_host_snapshot.zxsav are never inherited.
                     _pendingResyncSelectionGroups = new ulong[9][];
                 }
+                _deferredSessionStartPending = false;
                 IsInSyncedLevel = false;
                 LockstepClock.SetSessionPause(true);
                 if (DXGame.Current != null) DXGame.Current.InputEnabled = false;
@@ -5761,6 +6467,16 @@ namespace TABCoopMod.Sync
             [HarmonyPrefix]
             public static void Prefix()
             {
+                if (CoopSessionManager.IsSessionActive)
+                {
+                    bool isSnapshotLoad = !CoopSessionManager.Transport.IsHost
+                        || CoopSessionManager.IsHostSnapshotReloadPending
+                        || Determinism.LockstepClock.PendingSnapshotEntityIdCounter != 0;
+                    if (isSnapshotLoad)
+                        Determinism.LockstepClock.LoadingLevel = true;
+                    else if (CoopSessionManager.Transport.IsHost)
+                        CoopSessionManager.ClearInSyncedLevelForNewLoad();
+                }
                 if (Determinism.LockstepClock.IsDeterministicModeActive)
                     Determinism.LockstepClock.ResetSyncedRandomStreamsForInitLevel();
             }

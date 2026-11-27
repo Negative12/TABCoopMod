@@ -465,6 +465,7 @@ namespace TABCoopMod.Commands
                 {
                     case NetCommandType.ExecuteCommand:
                         ExecuteSingleOrBatchCommand(netCmd);
+                        if (swappedContext) TABCoopMod.Sync.FactionContextManager.RecalculateAllFactions();
                         break;
 
                     case NetCommandType.GroupMoveOrPatrol:
@@ -473,14 +474,17 @@ namespace TABCoopMod.Commands
 
                     case NetCommandType.PlaceBuilding:
                         ExecutePlaceBuilding(netCmd);
+                        if (swappedContext) TABCoopMod.Sync.FactionContextManager.RecalculateAllFactions();
                         break;
 
                     case NetCommandType.CancelCurrentOrder:
                         ExecuteCancelCurrentOrder(netCmd);
+                        if (swappedContext) TABCoopMod.Sync.FactionContextManager.RecalculateAllFactions();
                         break;
 
                     case NetCommandType.CancelQueuedOrder:
                         ExecuteCancelQueuedOrder(netCmd);
+                        if (swappedContext) TABCoopMod.Sync.FactionContextManager.RecalculateAllFactions();
                         break;
 
                     case NetCommandType.SetPaused:

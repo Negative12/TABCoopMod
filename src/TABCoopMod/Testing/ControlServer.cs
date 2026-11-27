@@ -290,6 +290,13 @@ namespace TABCoopMod.Testing
             var curSys = GameBridge.CurrentGameSystem as DXSystem;
 
             GameBridge.GetLevelStateCommandCenterExtras(out int ccExtraWorkers, out int ccExtraFood);
+            Determinism.DeterministicSandboxPatches.GetPerfMetrics(out double perfMspt, out double perfTps);
+            bool pausedNow = Determinism.LockstepClock.PausedBySession || (game?.Paused ?? false);
+            double targetTps = pausedNow ? 0.0 : 30.0 * Math.Max(0.1, game?.GameSpeed ?? 1.0);
+            string bottleneck = pausedNow
+                ? string.Empty
+                : Sync.CoopSessionManager.ClassifyTpsBottleneck(
+                    perfMspt, perfTps, targetTps, Determinism.DeterministicSandboxPatches.DiagAvgFrameMs);
 
             return new Dictionary<string, object>
             {
@@ -306,6 +313,10 @@ namespace TABCoopMod.Testing
                 ["avgFrameMs"] = Math.Round(Determinism.DeterministicSandboxPatches.DiagAvgFrameMs, 1),
                 ["avgLogicMs"] = Math.Round(Determinism.DeterministicSandboxPatches.DiagAvgTickLogicMs, 1),
                 ["avgPhysMs"] = Math.Round(Determinism.DeterministicSandboxPatches.DiagAvgPhysicsMs, 1),
+                ["mspt"] = Math.Round(perfMspt, 1),
+                ["tps"] = Math.Round(perfTps, 1),
+                ["tpsBottleneck"] = bottleneck,
+                ["localRttToHostMs"] = Math.Round(Sync.CoopSessionManager.GetLocalEffectiveRttToHostMs(), 1),
                 ["lastWantedTicks"] = Determinism.DeterministicSandboxPatches.DiagLastWantedTicks,
                 ["lastRanTicks"] = Determinism.DeterministicSandboxPatches.DiagLastRanTicks,
                 ["cursorLocked"] = game?.CursorLocked ?? false,
@@ -723,6 +734,19 @@ namespace TABCoopMod.Testing
                 });
             }
 
+            var peerLinks = new List<Dictionary<string, object>>();
+            foreach (var link in Sync.CoopSessionManager.GetRoomPeerConnectionSnapshots())
+            {
+                peerLinks.Add(new Dictionary<string, object>
+                {
+                    ["playerId"] = link.PlayerId,
+                    ["playerName"] = link.PlayerName,
+                    ["pathSummary"] = link.PathSummary,
+                    ["rawRttMs"] = Math.Round(link.RawRttMs, 1),
+                    ["estimatedActualDelayMs"] = Math.Round(link.EstimatedActualDelayMs, 1)
+                });
+            }
+
             return new Dictionary<string, object>
             {
                 ["onMainMenu"] = GameBridge.IsOnMainMenu(),
@@ -751,6 +775,8 @@ namespace TABCoopMod.Testing
                 ["chaosJitterMs"] = Sync.CoopSessionManager.LocalChaosJitterMs,
                 ["chaosLossRate"] = Sync.CoopSessionManager.LocalChaosLossRate,
                 ["smoothedRttMs"] = Sync.CoopSessionManager.CurrentSmoothedRttMs,
+                ["inputDelayTicks"] = Sync.CoopSessionManager.InputDelayTicks,
+                ["peerLinks"] = peerLinks,
                 ["peers"] = peers
             };
         }

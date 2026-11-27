@@ -3579,10 +3579,39 @@ namespace TABCoopMod.Core
             EnsureCommandTargetMeta();
             if (_typeZXCommandTargetRef == null) return false;
 
+            if (_propZXOrderCommand == null)
+                _propZXOrderCommand = _typeZXOrder.GetProperty("Command", BindingFlags.Public | BindingFlags.Instance);
+            if (_methodTrainReserve == null && TypeTrain != null)
+                _methodTrainReserve = AccessTools.Method(TypeTrain, "#=zEjiaQKLJuj2V5aXjiw==", Type.EmptyTypes);
+            if (_methodTrainUnreserve == null && TypeTrain != null)
+                _methodTrainUnreserve = AccessTools.Method(TypeTrain, "#=z6YYk1ExkWvhWXnV3NQ==", Type.EmptyTypes);
+
+            bool pushedContext = false;
+            if (Sync.CoopSessionManager.IsMultiFactionActive && Sync.FactionContextManager.IsInitialized)
+            {
+                byte owner = Sync.FactionOwnershipTracker.ResolveOrAssignOwner(entity);
+                if (owner != 0)
+                {
+                    Sync.FactionContextManager.PushContext(owner);
+                    pushedContext = true;
+                }
+            }
+
             try
             {
                 lock (orders.SyncRoot)
                 {
+                    if (_propZXOrderCommand != null && _methodTrainUnreserve != null && TypeTrain != null)
+                    {
+                        for (int i = 0; i < orders.Count; i++)
+                        {
+                            object existingOrder = orders[i];
+                            object existingCmd = existingOrder != null ? _propZXOrderCommand.GetValue(existingOrder) : null;
+                            if (existingCmd != null && TypeTrain.IsInstanceOfType(existingCmd))
+                                _methodTrainUnreserve.Invoke(existingCmd, null);
+                        }
+                    }
+
                     orders.Clear();
                     if (commandIds != null && commandIds.Length > 0)
                     {
@@ -3594,16 +3623,27 @@ namespace TABCoopMod.Core
                             if (cmd == null) continue;
                             object zxOrder = _ctorZXOrder.Invoke(new[] { cmd, defaultTarget });
                             if (zxOrder != null)
+                            {
                                 orders.Add(zxOrder);
+                                if (_methodTrainReserve != null && TypeTrain != null && TypeTrain.IsInstanceOfType(cmd))
+                                    _methodTrainReserve.Invoke(cmd, null);
+                            }
                         }
                     }
                 }
+                if (pushedContext)
+                    Sync.FactionContextManager.RecalculateAllFactions();
                 return true;
             }
             catch (Exception ex)
             {
                 ModLogger.Warn($"[GameBridge] ApplyOrdersQueuedCommandIds({entity.ID}) failed: {ex.Message}");
                 return false;
+            }
+            finally
+            {
+                if (pushedContext)
+                    Sync.FactionContextManager.PopContext();
             }
         }
 
@@ -3831,6 +3871,11 @@ namespace TABCoopMod.Core
                 DXEntity targetEnt = DXGame.Current?.GetEntityByID(targetEntityId);
                 if (targetEnt == null || targetEnt.Disposed)
                     return false;
+                if (TypeZXEntity != null && !TypeZXEntity.IsInstanceOfType(targetEnt))
+                {
+                    ModLogger.Warn($"[GameBridge] TrySetEntityTargetRefOnBData skipped non-ZXEntity target id={targetEntityId} ({targetEnt.GetType().Name}).");
+                    return false;
+                }
                 PropertyInfo pEnt = refType.GetProperty("Entity", BindingFlags.Public | BindingFlags.Instance);
                 if (pEnt == null) return false;
                 pEnt.SetValue(refBox, targetEnt);
@@ -4294,11 +4339,18 @@ namespace TABCoopMod.Core
             if (targetEntityId != 0UL && _typeEntityRefClosed != null && _pEntityRefEntity != null && _pSerEntityRef != null)
             {
                 var ent = DXGame.Current?.GetEntityByID(targetEntityId);
-                if (ent != null)
+                if (ent != null && !ent.Disposed)
                 {
-                    object refBox = Activator.CreateInstance(_typeEntityRefClosed);
-                    _pEntityRefEntity.SetValue(refBox, ent);
-                    _pSerEntityRef.SetValue(box, refBox);
+                    if (TypeZXEntity == null || TypeZXEntity.IsInstanceOfType(ent))
+                    {
+                        object refBox = Activator.CreateInstance(_typeEntityRefClosed);
+                        _pEntityRefEntity.SetValue(refBox, ent);
+                        _pSerEntityRef.SetValue(box, refBox);
+                    }
+                    else
+                    {
+                        ModLogger.Warn($"[GameBridge] CreateCommandTarget ignored non-ZXEntity target id={targetEntityId} ({ent.GetType().Name}).");
+                    }
                 }
             }
             return box;
@@ -7159,6 +7211,68 @@ namespace TABCoopMod.Core
         {
             object ls = CurrentLevelState;
             if (ls != null) _mLsRecalculate?.Invoke(ls, null);
+        }
+
+        private static PropertyInfo _propZXOrderCommand;
+        private static MethodInfo _methodTrainReserve;
+        private static MethodInfo _methodTrainUnreserve;
+        private static FieldInfo _fieldBuildingEnhancerCacheIter;
+        private static bool _enhancerCacheFieldChecked;
+
+        /// <summary>
+        /// Invalidates Building's cached Render_Iteration>>4 enhancer-building stamp (#=zlFi$Ybidu8UdzEFiptU0xNuJEJ7o)
+        /// so Building.UnderEnhancerBuilding recomputes deterministically on simulation ticks rather than lagging by local render FPS.
+        /// </summary>
+        public static void InvalidateBuildingEnhancerCache(DXEntity building)
+        {
+            if (building == null || TypeBuilding == null) return;
+            if (!_enhancerCacheFieldChecked)
+            {
+                _enhancerCacheFieldChecked = true;
+                _fieldBuildingEnhancerCacheIter = TypeBuilding.GetField("#=zlFi$Ybidu8UdzEFiptU0xNuJEJ7o",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+            if (_fieldBuildingEnhancerCacheIter != null && TypeBuilding.IsInstanceOfType(building))
+                _fieldBuildingEnhancerCacheIter.SetValue(building, -1);
+        }
+
+        public static void InvalidateAllBuildingsEnhancerCache()
+        {
+            var game = DXGame.Current;
+            if (game == null || TypeBuilding == null) return;
+            if (!_enhancerCacheFieldChecked)
+            {
+                _enhancerCacheFieldChecked = true;
+                _fieldBuildingEnhancerCacheIter = TypeBuilding.GetField("#=zlFi$Ybidu8UdzEFiptU0xNuJEJ7o",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+            if (_fieldBuildingEnhancerCacheIter == null) return;
+            foreach (var ent in game.EntitiesOfType(TypeBuilding))
+            {
+                if (ent != null && !ent.Disposed)
+                    _fieldBuildingEnhancerCacheIter.SetValue(ent, -1);
+            }
+        }
+
+        public static bool ApplyLevelReservationDeltas(
+            int dFoodRes, int dWorkRes, int dEngRes,
+            int dWoodProdRes, int dStoneProdRes, int dIronProdRes, int dOilProdRes)
+        {
+            if (dFoodRes == 0 && dWorkRes == 0 && dEngRes == 0
+                && dWoodProdRes == 0 && dStoneProdRes == 0 && dIronProdRes == 0 && dOilProdRes == 0)
+            {
+                return false;
+            }
+            if (!ReadRawLevelEconomyState(out var s)) return false;
+            s.FoodReserved = Math.Max(0, s.FoodReserved + dFoodRes);
+            s.WorkersReserved = Math.Max(0, s.WorkersReserved + dWorkRes);
+            s.EnergyReserved = Math.Max(0, s.EnergyReserved + dEngRes);
+            s.WoodProdRes = Math.Max(0, s.WoodProdRes + dWoodProdRes);
+            s.StoneProdRes = Math.Max(0, s.StoneProdRes + dStoneProdRes);
+            s.IronProdRes = Math.Max(0, s.IronProdRes + dIronProdRes);
+            s.OilProdRes = Math.Max(0, s.OilProdRes + dOilProdRes);
+            WriteRawLevelEconomyState(in s);
+            return true;
         }
 
         public static void CallLevelStateSetEnhancerBuildings(IList buildings)

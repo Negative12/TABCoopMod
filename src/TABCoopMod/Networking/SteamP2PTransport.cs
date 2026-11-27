@@ -147,6 +147,44 @@ namespace TABCoopMod.Networking
 
         public double ActiveDirectRttMs => _direct != null && _direct.TryGetActiveSummary(out _, out double rtt, out bool isDirect) && isDirect ? rtt : -1.0;
 
+        public bool TryGetPeerDiagnostics(byte peerPlayerId, out PeerConnectionDiag diag)
+        {
+            diag = new PeerConnectionDiag
+            {
+                PlayerId = peerPlayerId,
+                IsDirectUdp = false,
+                PathSummary = IsActive ? "Steam Idle" : "Offline",
+                DirectRttMs = -1.0
+            };
+            if (!IsActive || peerPlayerId == LocalPlayerId) return false;
+
+            if (_direct != null && _direct.TryGetPeerSummary(peerPlayerId, out string directSummary, out double directRtt, out bool isDirect) && isDirect)
+            {
+                diag.IsDirectUdp = true;
+                diag.PathSummary = directSummary;
+                diag.DirectRttMs = directRtt;
+                return true;
+            }
+
+            try
+            {
+                if (_playerToSteamId.TryGetValue(peerPlayerId, out var steamId) && steamId.IsValid())
+                {
+                    if (SteamNetworking.GetP2PSessionState(steamId, out P2PSessionState_t state))
+                    {
+                        if (state.m_bConnectionActive != 0)
+                            diag.PathSummary = state.m_bUsingRelay != 0 ? "Steam Relay" : "Steam Direct";
+                        else if (state.m_bConnecting != 0)
+                            diag.PathSummary = "Steam Connecting";
+                    }
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         public string GetDebugStatsLine()
         {
             string directStats = _direct != null ? _direct.GetDebugStatsLine() : "DirectUDP(off)";
