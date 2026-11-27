@@ -50,6 +50,7 @@ namespace TABCoopMod.Core
         private static MethodInfo _methodLoadGameAndEnter;
         private static MethodInfo _methodShowTopBanner;
         private static MethodInfo _methodShowGroundIndicator;
+        private static MethodInfo _methodLevelSysOpenGameMenu;
         private static MethodInfo _methodAssignGroupMove;
         private static MethodInfo _methodPlaceBuilding;
 
@@ -201,7 +202,9 @@ namespace TABCoopMod.Core
         private static MethodInfo _methodShowAlert;
         private static MethodInfo _methodShowYesNo;
         private static MethodInfo _methodShowListSelector;
+        private static MethodInfo _methodShowInputBox;
         private static MethodInfo _methodGetPlainTextRenderer;
+        public static Type TypeDXEditBoxTypeOfInput { get; private set; }
         private static PropertyInfo _propWindowMsgTitle;
         private static PropertyInfo _propWindowMsgText;
 
@@ -368,12 +371,14 @@ namespace TABCoopMod.Core
                 TypeZXMessageBoxHelper = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXMessageBoxHelper);
                 TypeZXWindowMessage = GameAssembly.GetType("ZX.Editor.ZXWindowMessage");
                 TypeZXSteamManager = GameAssembly.GetType(ObfuscatedSymbols.Type_ZXSteamManager);
+                TypeDXEditBoxTypeOfInput = EngineAssembly.GetType("DXVision.DXEditBoxObject+TypeOfInput");
 
                 Check(TypeZXGame, $"Type ZXGame ({ObfuscatedSymbols.Type_ZXGame})");
                 Check(TypeZXSystemGameLevel, $"Type ZXSystemGameLevel ({ObfuscatedSymbols.Type_ZXSystemGameLevel})");
                 Check(TypeZXSystemMainMenu, $"Type ZXSystemMainMenu ({ObfuscatedSymbols.Type_ZXSystemMainMenu})");
                 Check(TypeZXMessageBoxHelper, $"Type ZXMessageBoxHelper ({ObfuscatedSymbols.Type_ZXMessageBoxHelper})");
                 Check(TypeZXWindowMessage, "Type ZXWindowMessage (ZX.Editor.ZXWindowMessage)");
+                Check(TypeDXEditBoxTypeOfInput, "Type DXEditBoxObject.TypeOfInput");
 
                 // 2. Singleton Getters
                 _mZXGameCurrent = AccessTools.Method(TypeZXGame, ObfuscatedSymbols.Method_GetCurrentSingleton, Type.EmptyTypes);
@@ -405,10 +410,14 @@ namespace TABCoopMod.Core
                 _methodShowGroundIndicator = TypeZXSystemGameLevel?.GetMethod(
                     ObfuscatedSymbols.Method_LevelSys_ShowGroundIndicator,
                     BindingFlags.Public | BindingFlags.Instance);
+                _methodLevelSysOpenGameMenu = TypeZXSystemGameLevel?.GetMethod(
+                    ObfuscatedSymbols.Method_LevelSys_OpenGameMenu,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                 _methodAssignGroupMove = AccessTools.Method(TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_AssignGroupMove,
                     new[] { typeof(List<DXEntity>), typeof(ZXCommand), typeof(PointF) });
 
                 Check(_methodShowTopBanner, "ZXSystemGameLevel.ShowTopBanner");
+                Check(_methodLevelSysOpenGameMenu, "ZXSystemGameLevel.OpenGameMenu");
                 Check(_methodAssignGroupMove, "ZXSystemGameLevel.AssignGroupMove");
 
                 // 5. Command Execution & Lookup
@@ -514,6 +523,14 @@ namespace TABCoopMod.Core
                     ? AccessTools.Method(TypeZXMessageBoxHelper, ObfuscatedSymbols.Method_MsgBox_ShowListSelector,
                         new[] { TypeZXWindowMessage, typeof(Action<int>), typeof(Action), typeof(string[]) })
                     : null;
+                _methodShowInputBox = TypeDXEditBoxTypeOfInput != null
+                    ? AccessTools.Method(TypeZXMessageBoxHelper, ObfuscatedSymbols.Method_MsgBox_ShowInputBox,
+                        new[]
+                        {
+                            typeof(string), typeof(string), typeof(string), TypeDXEditBoxTypeOfInput,
+                            typeof(int), typeof(Action<string>), typeof(Action), typeof(Func<string, bool>)
+                        })
+                    : null;
                 _methodGetPlainTextRenderer = AccessTools.Method(TypeZXMessageBoxHelper, ObfuscatedSymbols.Method_MsgBox_GetPlainTextRenderer, Type.EmptyTypes);
                 _propWindowMsgTitle = TypeZXWindowMessage != null ? AccessTools.Property(TypeZXWindowMessage, "Title") : null;
                 _propWindowMsgText = TypeZXWindowMessage != null ? AccessTools.Property(TypeZXWindowMessage, "Text") : null;
@@ -521,6 +538,7 @@ namespace TABCoopMod.Core
                 Check(_methodShowAlert, "ZXMessageBoxHelper.ShowAlert");
                 Check(_methodShowYesNo, "ZXMessageBoxHelper.ShowYesNo");
                 Check(_methodShowListSelector, "ZXMessageBoxHelper.ShowListSelector");
+                Check(_methodShowInputBox, "ZXMessageBoxHelper.ShowInputBox");
                 Check(_methodGetPlainTextRenderer, "ZXMessageBoxHelper.GetPlainTextRenderer");
                 Check(_propWindowMsgTitle, "ZXWindowMessage.Title");
                 Check(_propWindowMsgText, "ZXWindowMessage.Text");
@@ -1716,6 +1734,22 @@ namespace TABCoopMod.Core
             }
         }
 
+        public static bool OpenLevelGameMenu()
+        {
+            try
+            {
+                var levelSys = _mLevelSysCurrent?.Invoke(null, null);
+                if (levelSys == null || _methodLevelSysOpenGameMenu == null) return false;
+                _methodLevelSysOpenGameMenu.Invoke(levelSys, null);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] OpenLevelGameMenu failed: {ex.Message}");
+                return false;
+            }
+        }
+
         // NOTE: ZXCommand and ZXCommandTarget are internal types. Never cast to / `is`-check them here —
         // the Desktop CLR throws TypeAccessException on castclass/isinst of an inaccessible type
         // (铁律#3). All command execution paths therefore use object + reflection.
@@ -2066,6 +2100,45 @@ namespace TABCoopMod.Core
         public static object ShowAlertMessageBox(string title, string message, Action onOk = null)
         {
             return _methodShowAlert.Invoke(null, new object[] { title, message, onOk });
+        }
+
+        public static object ShowInputBox(
+            string title,
+            string message,
+            string defaultText,
+            Action<string> onOk,
+            Action onCancel = null,
+            int maxLength = 64,
+            Func<string, bool> validator = null)
+        {
+            if (_methodShowInputBox == null || TypeDXEditBoxTypeOfInput == null)
+            {
+                onOk?.Invoke(defaultText ?? string.Empty);
+                return null;
+            }
+
+            try
+            {
+                // TypeOfInput.AllCharactersExceptNewLines = 0 (allows digits, dots, colons, IPv6 brackets).
+                object inputType = Enum.ToObject(TypeDXEditBoxTypeOfInput, 0);
+                return _methodShowInputBox.Invoke(null, new object[]
+                {
+                    title ?? string.Empty,
+                    message ?? string.Empty,
+                    defaultText ?? string.Empty,
+                    inputType,
+                    Math.Max(1, maxLength),
+                    onOk ?? (s => { }),
+                    onCancel ?? (() => { }),
+                    validator ?? (s => true)
+                });
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Error("[GameBridge] ShowInputBox failed", ex);
+                onOk?.Invoke(defaultText ?? string.Empty);
+                return null;
+            }
         }
 
         public static object ShowYesNoMessageBox(string title, string message, Action onYes, Action onNo = null)

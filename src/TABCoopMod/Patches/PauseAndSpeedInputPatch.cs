@@ -59,6 +59,17 @@ namespace TABCoopMod.Patches
             [HarmonyPrefix]
             public static bool Prefix(DXKeys __0, ref bool __result)
             {
+                if (__0 == DXKeys.F9
+                    && CoopSessionManager.IsSessionActive
+                    && CoopSessionManager.IsInSyncedLevel
+                    && !LockstepClock.LoadingLevel
+                    && !DXModalScreen.IsInModal)
+                {
+                    CoopSessionManager.RequestManualResync();
+                    __result = true;
+                    return false;
+                }
+
                 if (__0 == DXKeys.F7
                     && CoopSessionManager.IsMultiFactionActive
                     && CoopSessionManager.IsInSyncedLevel
@@ -111,6 +122,39 @@ namespace TABCoopMod.Patches
                 }
 
                 PauseSyncController.RequestPause(!IsCurrentlyPaused());
+                return false;
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_LevelSys_OpenGameMenu
+        {
+            public static MethodBase TargetMethod()
+            {
+                return AccessTools.Method(GameBridge.TypeZXSystemGameLevel, ObfuscatedSymbols.Method_LevelSys_OpenGameMenu, Type.EmptyTypes);
+            }
+
+            [HarmonyPrefix]
+            public static bool Prefix()
+            {
+                if (!CoopSessionManager.IsSessionActive || !CoopSessionManager.IsInSyncedLevel) return true;
+                if (LockstepClock.LoadingLevel || GameBridge.IsLevelEnded()) return true;
+                if (DXModalScreen.IsInModal)
+                {
+                    CoopSessionManager.CancelPendingGameMenuOpen();
+                    return true;
+                }
+
+                // Already synchronized-paused: let the native menu open.
+                if (LockstepClock.PausedBySession)
+                {
+                    CoopSessionManager.CancelPendingGameMenuOpen();
+                    return true;
+                }
+
+                // Do not let ESC / the top-right menu button pause this client locally first.
+                // Apply a synchronized pause, then open the menu on a later frame.
+                CoopSessionManager.RequestOpenGameMenuAfterPause();
                 return false;
             }
         }
