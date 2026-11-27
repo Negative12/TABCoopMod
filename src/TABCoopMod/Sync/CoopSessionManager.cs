@@ -210,6 +210,7 @@ namespace TABCoopMod.Sync
         private static int _hostWaitLastTick = -1;
         private static double _hostWaitLastTickChangeTicks = -1000.0;
         private static double _hostWaitLastLogTicks = -1000.0;
+        private static double _hostWaitLastBannerTicks = -1000.0;
         public static bool HostWaitStatusActive { get; private set; }
         public static string HostWaitStatusText { get; private set; } = string.Empty;
 
@@ -647,6 +648,7 @@ namespace TABCoopMod.Sync
             _hostWaitLastTick = -1;
             _hostWaitLastTickChangeTicks = -1000.0;
             _hostWaitLastLogTicks = -1000.0;
+            _hostWaitLastBannerTicks = -1000.0;
         }
 
         public static int RollNewGameSeed()
@@ -1021,7 +1023,6 @@ namespace TABCoopMod.Sync
             _pendingTurnCommands.Clear();
             UI.MultiFactionPanel.Reset();
             UI.ManualSyncButton.Reset();
-            UI.HostWaitStatusOverlay.Reset();
             UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
@@ -1105,7 +1106,6 @@ namespace TABCoopMod.Sync
             _pendingTurnCommands.Clear();
             UI.MultiFactionPanel.Reset();
             UI.ManualSyncButton.Reset();
-            UI.HostWaitStatusOverlay.Reset();
             UI.AllyOverlayRenderer.ClearUnitFactionRings();
             _hostLastBroadcastSimTick = -1;
             _hostLastBroadcastTargetTick = -1;
@@ -2085,10 +2085,18 @@ namespace TABCoopMod.Sync
                 || !string.Equals(HostWaitStatusText, text, StringComparison.Ordinal);
             HostWaitStatusActive = true;
             HostWaitStatusText = text;
-            if (changed && now - _hostWaitLastLogTicks >= 1000.0)
+
+            // Use the game's native status banner (same slot as "Player X Paused Game")
+            // and refresh it while the stall persists. It fades out naturally after resume.
+            if (changed || now - _hostWaitLastBannerTicks >= 700.0)
             {
-                _hostWaitLastLogTicks = now;
-                ModLogger.Info($"[HostWait] {text} (tick={cur})");
+                _hostWaitLastBannerTicks = now;
+                GameBridge.ShowTopBanner(text, Color.Gold, 1200);
+                if (changed && now - _hostWaitLastLogTicks >= 1000.0)
+                {
+                    _hostWaitLastLogTicks = now;
+                    ModLogger.Info($"[HostWait] {text} (tick={cur})");
+                }
             }
         }
 
@@ -2207,7 +2215,6 @@ namespace TABCoopMod.Sync
             CoopLobbyWindow.Tick();
             UI.MultiFactionPanel.Tick();
             UI.ManualSyncButton.Tick();
-            UI.HostWaitStatusOverlay.Tick();
             UI.AllyOverlayRenderer.UpdateUnitFactionRings();
 
             if (!string.IsNullOrEmpty(_pendingVersionMismatchAlert)
