@@ -163,7 +163,7 @@ namespace TABCoopMod.Networking
             {
                 PlayerId = peerPlayerId,
                 IsDirectUdp = false,
-                PathSummary = "Local Loopback (127.0.0.1)",
+                PathSummary = ActivePathSummary,
                 DirectRttMs = -1.0
             };
             if (!IsActive) return false;
