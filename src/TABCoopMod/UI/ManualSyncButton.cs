@@ -46,17 +46,16 @@ namespace TABCoopMod.UI
                 return;
             _lastRefreshTicks = now;
 
-            float sw = DXScene.ScreenArea.Width > 0 ? DXScene.ScreenArea.Width : 1920f;
             if (_button == null || !ReferenceEquals(_parent, grid))
             {
                 Destroy();
-                Build(grid, sw);
+                Build(grid);
             }
 
             if (_button != null)
             {
                 _button.Visible = true;
-                UpdateArea(sw);
+                UpdateArea();
             }
         }
 
@@ -66,7 +65,7 @@ namespace TABCoopMod.UI
             _lastRefreshTicks = -1000.0;
         }
 
-        private static void Build(DXObject grid, float sw)
+        private static void Build(DXObject grid)
         {
             LockstepClock.EnterVisualVfxContext();
             try
@@ -79,7 +78,7 @@ namespace TABCoopMod.UI
                     InheritImageAttributes = false
                 };
                 _button.State.AreaStyle = DXObjectState.TAreaStyle.AreaInPixels;
-                _button.TextRenderer.Font = new Font("Microsoft YaHei", 9.5f, FontStyle.Bold);
+                _button.TextRenderer.Font = new Font("Microsoft YaHei", 9.0f, FontStyle.Bold);
                 _button.TextRenderer.TextAlign = ContentAlignment.MiddleCenter;
                 _button.TextRenderer.ColorText = Color.White;
                 _button.TextRenderer.ColorBackground = Color.FromArgb(235, 24, 44, 66);
@@ -99,7 +98,7 @@ namespace TABCoopMod.UI
                     }
                 };
                 _button.Text = "手动同步 (F9)";
-                UpdateArea(sw);
+                UpdateArea();
                 grid.AddObject(_button);
             }
             catch (Exception ex)
@@ -114,12 +113,12 @@ namespace TABCoopMod.UI
             }
         }
 
-        private static void UpdateArea(float screenWidth)
+        private static void UpdateArea()
         {
             if (_button == null) return;
             float u = DXScene.Unit > 0f ? DXScene.Unit : 1f;
-            float w = 190f * u;
-            _button.State.Area = new RectangleF((screenWidth - w) * 0.5f, 44f * u, w, 28f * u);
+            // Top-left, directly under the perf HUD (HUD is 24u tall at y=8u).
+            _button.State.Area = new RectangleF(10f * u, 38f * u, 180f * u, 24f * u);
         }
 
         private static void Destroy()
